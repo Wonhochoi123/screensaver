@@ -190,18 +190,59 @@ local cur       = { seq = 0, path = nil, orig = nil, lat = nil, lon = nil, mdir 
 local MONTHS = {jan=1,feb=2,mar=3,apr=4,may=5,jun=6,jul=7,aug=8,sep=9,oct=10,nov=11,dec=12}
 
 -- ----------------------------------------------------------------------------
--- Optimized Video Redirect Hook
+-- Display-size detection (adapts the screensaver to ANY resolution / aspect)
+-- ----------------------------------------------------------------------------
+local DISPLAY_W, DISPLAY_H = nil, nil
+
+local function refresh_display_size()
+    -- display-width/height = the physical monitor the window is on (best).
+    -- osd-width/height     = the render surface (good fallback once VO exists).
+    -- Both are stable across files, unlike per-image osd-dimensions.
+    local w = mp.get_property_number("display-width") or 0
+    local h = mp.get_property_number("display-height") or 0
+    if w < 320 or h < 320 then
+        w = mp.get_property_number("osd-width") or 0
+        h = mp.get_property_number("osd-height") or 0
+    end
+    if w >= 320 and h >= 320 then
+        DISPLAY_W, DISPLAY_H = w, h            -- remember the last good reading
+    end
+    return DISPLAY_W or 1920, DISPLAY_H or 1080  -- 1080p only until first real read
+end
+
+local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
+                   tif=true, tiff=true, gif=true, jfif=true}
+
+-- Blur-fill background sized to the ACTUAL display, not a fixed 4K/16:9 canvas.
+-- Blur is computed cheaply at 640x360 then upscaled to the real WxH; the sharp
+-- photo is contained and centered over it. Because the output frame matches the
+-- display aspect exactly, mpv fills the screen with no black bars on any ratio
+-- (16:9, 16:10, 21:9, 4:3, portrait, ...).
+local function apply_image_blur_vf()
+    local w, h = refresh_display_size()
+    local vf = string.format(
+        "lavfi=[split[bg][fg];" ..
+        "[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d[b];" ..
+        "[fg]scale=%d:%d:force_original_aspect_ratio=decrease[f];" ..
+        "[b][f]overlay=(W-w)/2:(H-h)/2]",
+        w, h, w, h)
+    mp.set_property("vf", vf)
+end
+
+-- ----------------------------------------------------------------------------
+-- on_load: optimized-video redirect + per-type filter selection
 -- ----------------------------------------------------------------------------
 local is_video = {mp4=true, mkv=true, mov=true, m4v=true, webm=true}
 mp.add_hook("on_load", 10, function()
     local path = mp.get_property("stream-open-filename")
     if not path then return end
 
-    local ext = path:match("%.([^%.]+)$")
-    if ext and is_video[ext:lower()] then
+    local ext = (path:match("%.([^%.]+)$") or ""):lower()
+
+    if is_video[ext] then
         local dir, file = path:match("^(.-)/([^/]+)$")
         if dir and file and not dir:match("/Optimized_Vids$") then
-            -- FIX: Strip the original extension to match the new strict .mp4 naming
+            -- Strip the original extension to match the strict .mp4 naming
             local base_name = file:match("(.+)%.[^%.]+$") or file
             local opt_path = BASE_DIR .. "/Optimized_Vids/" .. base_name .. ".mp4"
             local fi = utils.file_info(opt_path)
@@ -209,6 +250,12 @@ mp.add_hook("on_load", 10, function()
                 mp.set_property("stream-open-filename", opt_path)
             end
         end
+        mp.set_property("vf", "")    -- videos: framed already / blur baked by daemon
+        return
+    end
+
+    if image_ext[ext] then
+        apply_image_blur_vf()        -- images: adaptive blurred-fill background
     end
 end)
 
@@ -389,35 +436,19 @@ local function join_loc(landmark, city, state, country)
     return table.concat(p, ", ")
 end
 
--- Cached HUD size. osd-dimensions varies per-photo (depends on image aspect),
--- which previously caused every photo to mint a new WxH cache key and rebuild
--- maps. display-width/height are the physical display dimensions and stay
--- stable across files; once we get a sane reading, we lock it in for the
--- rest of the session.
-local HUD_CACHE_W, HUD_CACHE_H, HUD_CACHE_WINW, HUD_CACHE_WINH = nil, nil, nil, nil
-
+-- HUD size scales with the real display (height-relative), so the minimap/QR
+-- are proportional and correctly positioned on ANY resolution. Previously this
+-- could lock in a 4K fallback taken before the window existed, which pushed the
+-- overlays off-screen on non-4K displays. We now derive from refresh_display_size,
+-- which only commits a value once a genuine reading is available.
 local function get_hud_size()
-    if HUD_CACHE_W then
-        return HUD_CACHE_W, HUD_CACHE_H, HUD_CACHE_WINW, HUD_CACHE_WINH
-    end
-
-    local win_w = mp.get_property_number("display-width") or 0
-    local win_h = mp.get_property_number("display-height") or 0
-
-    -- Lock in standard 4K dimensions so the script stops
-    -- trying to build massive HUDs based on raw photo sizes.
-    if win_h < 720 or win_w < 720 then
-        win_w = 3840
-        win_h = 2160
-    end
+    local win_w, win_h = refresh_display_size()
 
     local base_w, base_h = 552, 616
     local target_h = math.floor(win_h * 0.28)
     local target_w = math.floor(target_h * (base_w / base_h))
     target_w = target_w - (target_w % 4)
 
-    HUD_CACHE_W, HUD_CACHE_H = target_w, target_h
-    HUD_CACHE_WINW, HUD_CACHE_WINH = win_w, win_h
     return target_w, target_h, win_w, win_h
 end
 
@@ -1470,30 +1501,10 @@ script=~~/photo.lua
 hwdec=auto-safe
 volume=70
 
-# --- Photo profiles (Background blur runs once per slide) ---
-[extension.jpg]
-vf=lavfi=[[in]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=3840:2160[b];[fg]scale=3840:2160:force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2]
-
-[extension.jpeg]
-vf=lavfi=[[in]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=3840:2160[b];[fg]scale=3840:2160:force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2]
-
-[extension.png]
-vf=lavfi=[[in]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=3840:2160[b];[fg]scale=3840:2160:force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2]
-
-[extension.webp]
-vf=lavfi=[[in]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=3840:2160[b];[fg]scale=3840:2160:force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2]
-
-# --- Video profiles ---
-[extension.mp4]
-vf=
-[extension.mkv]
-vf=
-[extension.mov]
-vf=
-[extension.m4v]
-vf=
-[extension.webm]
-vf=
+# Per-file video filters are now set dynamically by photo.lua (on_load), sized
+# to the REAL display so the blurred-fill background adapts to any aspect ratio.
+# Static vf profiles are intentionally omitted here — they would override the
+# adaptive filter and force a fixed 4K/16:9 canvas.
 EOF
 
 # =============================================================================
