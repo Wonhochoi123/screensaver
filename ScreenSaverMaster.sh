@@ -121,12 +121,28 @@ else
     echo "✅ All runtime tools present."
 fi
 
-# Font (independent of package install)
-if curl -fLo "$HOME/.local/share/fonts/Montserrat-SemiBold.ttf" --create-dirs "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-SemiBold.ttf" >/dev/null 2>&1; then
-    fc-cache -f >/dev/null 2>&1 || true
-    echo "▶ Montserrat font installed."
+# Fonts (independent of package install). The old google/fonts static URLs now
+# 404 because Montserrat ships as a variable font, which neither libass nor
+# ImageMagick weight-select reliably — so we pull STATIC weights from the
+# official designer's repo: ExtraBold for the date/location label, SemiBold for
+# the map/QR coordinate strips.
+FONT_DIR="$HOME/.local/share/fonts"
+FONT_BASE="https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf"
+got_font=0
+for w in ExtraBold SemiBold; do
+    if curl -fsSL --create-dirs -o "$FONT_DIR/Montserrat-$w.ttf" "$FONT_BASE/Montserrat-$w.ttf"; then
+        got_font=1
+    else
+        echo "⚠ Could not fetch Montserrat-$w."
+    fi
+done
+# Clean up any zero-byte leftovers from the previously-broken download.
+find "$FONT_DIR" -name 'Montserrat-*.ttf' -size 0 -delete 2>/dev/null || true
+if [ "$got_font" = 1 ]; then
+    fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
+    echo "▶ Montserrat fonts installed (ExtraBold + SemiBold)."
 else
-    echo "⚠ Could not fetch Montserrat font (HUD will fall back to NotoSans)."
+    echo "⚠ Montserrat unavailable — text will fall back to a system sans."
 fi
 
 # =============================================================================
@@ -872,8 +888,33 @@ MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
 QR_INNER=440
 
-FONT=$(fc-match -f '%{file}' monospace 2>/dev/null)
-[ -z "${FONT:-}" ] && FONT=$(fc-match -f '%{file}' sans 2>/dev/null)
+# Coordinate-label font: prefer the bundled Montserrat (matches the date/location
+# label) via direct .ttf path so it works even before fontconfig indexes it.
+FONT=""
+for f in \
+    "$HOME/.local/share/fonts/Montserrat-SemiBold.ttf" \
+    "$HOME/.local/share/fonts/Montserrat-Medium.ttf" \
+    "$HOME/.local/share/fonts/Montserrat-Regular.ttf"; do
+    [ -f "$f" ] && { FONT="$f"; break; }
+done
+[ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' "Montserrat:weight=semibold" 2>/dev/null)
+[ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' "DejaVu Sans" 2>/dev/null)
+[ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' sans 2>/dev/null)
+
+# Smooth, high-quality coordinate label: render at 4x then Lanczos-downscale so
+# glyph edges are cleanly anti-aliased; a soft shadow keeps it legible over the
+# satellite imagery / QR.
+make_text_strip() {
+    local out="$1" txt="$2"
+    local ss=4 w h ps sx sy
+    w=$((CANVAS*ss)); h=$((TEXTH*ss)); ps=$((26*ss)); sx=$((1*ss)); sy=$((2*ss))
+    $IM -size ${w}x${h} xc:none -gravity center \
+        ${FONT:+-font "$FONT"} -pointsize ${ps} \
+        -fill '#00000099' -annotate +${sx}+${sy} "$txt" \
+        -fill white       -annotate +0+0 "$txt" \
+        -filter Lanczos -resize ${CANVAS}x${TEXTH} \
+        "$out" 2>/dev/null
+}
 
 if [ "$need_qr" = 1 ]; then
     DMS_COORD=$(python3 - "$LAT" "$LON" <<'PY'
@@ -908,10 +949,8 @@ PY
     $IM -size ${CANVAS}x${FULLH} xc:none \
         "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
 
-    if $IM -size ${CANVAS}x${TEXTH} xc:none -gravity center \
-         ${FONT:+-font "$FONT"} -pointsize 26 \
-         -fill '#00000088' -annotate +1+2 "$DMS_COORD" \
-         -fill white       -annotate +0+0 "$DMS_COORD" "$TMP/QR_text.png" 2>/dev/null; then
+    make_text_strip "$TMP/QR_text.png" "$DMS_COORD"
+    if [ -s "$TMP/QR_text.png" ]; then
         $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
             "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite "$TMP/QR_ringglow.png" -composite \
             "$TMP/QR_body.png" -composite "$TMP/QR_text.png" -gravity south -geometry +0+6 -composite "$TMP/QR_final.png" || exit 5
@@ -995,10 +1034,8 @@ PY
         -fill "$MARKER_COLOR" -draw "circle ${CX},${MY} ${CX},$((MY-7))" \
         -fill white          -draw "circle ${CX},${MY} ${CX},$((MY-3))" "$TMP/M_marker.png"
 
-    if $IM -size ${CANVAS}x${TEXTH} xc:none -gravity center \
-         ${FONT:+-font "$FONT"} -pointsize 26 \
-         -fill '#00000088' -annotate +1+2 "$DD_COORD" \
-         -fill white       -annotate +0+0 "$DD_COORD" "$TMP/M_text.png" 2>/dev/null; then
+    make_text_strip "$TMP/M_text.png" "$DD_COORD"
+    if [ -s "$TMP/M_text.png" ]; then
         $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
             "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
             "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite \
