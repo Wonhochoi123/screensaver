@@ -206,7 +206,12 @@ local function refresh_display_size()
         h = mp.get_property_number("osd-height") or 0
     end
     if w >= 320 and h >= 320 then
-        DISPLAY_W, DISPLAY_H = w, h            -- remember the last good reading
+        if DISPLAY_W ~= w or DISPLAY_H ~= h then
+            DISPLAY_W, DISPLAY_H = w, h          -- remember the last good reading
+            -- Publish it for the video daemon (which has no display access).
+            local f = io.open(APP_DIR .. "/display.conf", "w")
+            if f then f:write(string.format("%dx%d", w, h)); f:close() end
+        end
     end
     return DISPLAY_W or 1920, DISPLAY_H or 1080  -- 1080p only until first real read
 end
@@ -1368,16 +1373,41 @@ while command -v ffmpeg >/dev/null 2>&1; do
         filename="$(basename "$vid")"
         base="${filename%.*}"
 
+        # Target = the real display size published by photo.lua (display.conf).
+        # Falls back to 4K 16:9 until mpv has reported a size at least once.
+        TARGET_W=3840; TARGET_H=2160
+        DISPLAY_CONF="$HOME/Screensaver-App/display.conf"
+        if [ -s "$DISPLAY_CONF" ]; then
+            res="$(tr -dc '0-9x' < "$DISPLAY_CONF")"
+            if [[ "$res" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+                TARGET_W="${BASH_REMATCH[1]}"; TARGET_H="${BASH_REMATCH[2]}"
+            fi
+        fi
+        TARGET="${TARGET_W}x${TARGET_H}"
+
         # Clean output filenames — same name as source, just with .mp4 extension.
         # Matches what photo.lua's redirect lookup expects.
         out_file="$OPT_DIR/${base}.mp4"
         skip_marker="$OPT_DIR/.skip_${base}"
+        res_marker="$OPT_DIR/.res_${base}"
         tmp_file="$OPT_DIR/.tmp_${base}.mp4"
+        prev_res="$(cat "$res_marker" 2>/dev/null || true)"
 
-        # Re-encode if the source has been modified since we last optimized it.
-        if [ -f "$out_file" ] && [ "$vid" -nt "$out_file" ]; then
-            log "↻ Source newer than optimized — re-optimizing: $filename"
-            rm -f "$out_file" "$skip_marker"
+        # Redo prior work if the source changed OR the display resolution changed
+        # (a clip blur-filled for 16:9 is wrong once the target is 32:9, etc.).
+        if [ -f "$out_file" ]; then
+            if [ "$vid" -nt "$out_file" ] || [ "$prev_res" != "$TARGET" ]; then
+                if [ "$prev_res" != "$TARGET" ]; then
+                    log "↻ Re-optimizing (target ${prev_res:-none}→$TARGET): $filename"
+                else
+                    log "↻ Re-optimizing (source changed): $filename"
+                fi
+                rm -f "$out_file" "$skip_marker" "$res_marker"
+            fi
+        elif [ -f "$skip_marker" ]; then
+            if [ "$vid" -nt "$skip_marker" ] || [ "$prev_res" != "$TARGET" ]; then
+                rm -f "$skip_marker" "$res_marker"
+            fi
         fi
         [ -f "$out_file" ] && continue
         [ -f "$skip_marker" ] && continue
@@ -1386,10 +1416,11 @@ while command -v ffmpeg >/dev/null 2>&1; do
         # duration for the progress %. Rotation is detected here for the aspect-
         # ratio test, NOT to drive a transpose — ffmpeg auto-rotation handles
         # the pixels for us downstream.
-        PROBE=$(python3 - "$vid" <<'PY'
+        PROBE=$(python3 - "$vid" "$TARGET_W" "$TARGET_H" <<'PY'
 import sys, subprocess, json
 try:
     vid = sys.argv[1]
+    tw = float(sys.argv[2]); th = float(sys.argv[3])
     out = subprocess.check_output(
         ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
          '-show_streams', '-show_entries', 'format=duration',
@@ -1413,7 +1444,8 @@ try:
     if eff_h == 0:
         print("ERROR\t0"); sys.exit(0)
     ratio = eff_w / eff_h
-    needs = (abs(ratio - 16.0/9.0) > 0.02) or (eff_w > 3840) or (eff_h > 2160)
+    target_ratio = tw / th
+    needs = (abs(ratio - target_ratio) > 0.02) or (eff_w > tw) or (eff_h > th)
     print(f"{'YES' if needs else 'NO'}\t{int(dur)}")
 except Exception:
     print("ERROR\t0")
@@ -1427,18 +1459,19 @@ PY
         fi
         if [ "$STATUS" = "NO" ]; then
             touch "$skip_marker"
-            log "⏭ Skip (native ≤4K 16:9): $filename"
+            echo "$TARGET" > "$res_marker"
+            log "⏭ Skip (native, matches ${TARGET}): $filename"
             continue
         fi
 
         # No transpose: ffmpeg's default -autorotate handles orientation for us
         # using the display-matrix side data, so pixels arrive upright.
-        # Filter chain matches the photo blur (mpv.conf [extension.jpg] profile)
-        # exactly: scale to 640x360 → heavy gblur σ=50 → upscale to 4K. This order
-        # blurs at a medium resolution and then stretches, producing the smooth
-        # color-smear look. Reversing the order (upscale first) gives the blocky
-        # result we had before.
-        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=3840:2160[b];[fg]scale=3840:2160:force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2"
+        # Filter chain matches photo.lua's adaptive blur exactly: blur a cheap
+        # 640x360 downscale (σ=50) then upscale to the REAL display size; contain
+        # the sharp clip and center it over the blur. setsar=1 after each scale
+        # forces square pixels so a non-16:9 target (e.g. 32:9) isn't reinterpreted
+        # back to 16:9 by the encoder.
+        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
 
         log "⚙ Optimizing: $filename (dur=${DURATION_S}s)"
         echo "$filename — starting..." > "$STATUS_FILE"
@@ -1485,7 +1518,8 @@ PY
 
         if [ "$FF_RC" -eq 0 ]; then
             mv "$tmp_file" "$out_file"
-            log "✓ Done: $filename"
+            echo "$TARGET" > "$res_marker"
+            log "✓ Done ($TARGET): $filename"
             echo "$filename — done" > "$STATUS_FILE"
         else
             rm -f "$tmp_file"
