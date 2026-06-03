@@ -193,6 +193,7 @@ local MONTHS = {jan=1,feb=2,mar=3,apr=4,may=5,jun=6,jul=7,aug=8,sep=9,oct=10,nov
 -- Display-size detection (adapts the screensaver to ANY resolution / aspect)
 -- ----------------------------------------------------------------------------
 local DISPLAY_W, DISPLAY_H = nil, nil
+local BLUR_W, BLUR_H = nil, nil   -- dimensions of the blur filter currently applied
 
 local function refresh_display_size()
     -- display-width/height = the physical monitor the window is on (best).
@@ -227,6 +228,7 @@ local function apply_image_blur_vf()
         "[b][f]overlay=(W-w)/2:(H-h)/2]",
         w, h, w, h)
     mp.set_property("vf", vf)
+    BLUR_W, BLUR_H = w, h
 end
 
 -- ----------------------------------------------------------------------------
@@ -255,7 +257,16 @@ mp.add_hook("on_load", 10, function()
     end
 
     if image_ext[ext] then
-        apply_image_blur_vf()        -- images: adaptive blurred-fill background
+        -- Pre-apply the blur ONLY if we already know the real display size
+        -- (cached from a previous file). On Wayland the size is usually not
+        -- readable this early on the very first file, so we defer to file-loaded
+        -- rather than bake in a wrong 16:9 fallback.
+        refresh_display_size()
+        if DISPLAY_W then
+            apply_image_blur_vf()
+        else
+            mp.set_property("vf", "")
+        end
     end
 end)
 
@@ -691,6 +702,17 @@ mp.register_event("file-loaded", function()
     prewarmed[orig_path] = true
 
     local w, h, win_w, win_h = get_hud_size()
+
+    -- get_hud_size just refreshed the real display size. If this is an image and
+    -- the blur was applied at a different (fallback) size during on_load, redo it
+    -- now at the correct full-screen dimensions. No-op on every later image, so
+    -- there's no per-slide flicker — only the first image can ever re-trigger.
+    do
+        local pext = (path:match("%.([^%.]+)$") or ""):lower()
+        if image_ext[pext] and DISPLAY_W and (BLUR_W ~= DISPLAY_W or BLUR_H ~= DISPLAY_H) then
+            apply_image_blur_vf()
+        end
+    end
 
     resolve_meta(orig_path, function(m)
         if my_seq ~= seq then return end
