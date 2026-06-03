@@ -223,9 +223,9 @@ local function apply_image_blur_vf()
     local w, h = refresh_display_size()
     local vf = string.format(
         "lavfi=[split[bg][fg];" ..
-        "[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d[b];" ..
-        "[fg]scale=%d:%d:force_original_aspect_ratio=decrease[f];" ..
-        "[b][f]overlay=(W-w)/2:(H-h)/2]",
+        "[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d,setsar=1[b];" ..
+        "[fg]scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1[f];" ..
+        "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1]",
         w, h, w, h)
     mp.set_property("vf", vf)
     BLUR_W, BLUR_H = w, h
