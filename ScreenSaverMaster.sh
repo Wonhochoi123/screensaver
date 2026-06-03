@@ -1,6 +1,7 @@
 #!/bin/bash
 # =============================================================================
 #  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
+#  Dependencies are installed in ONE transaction and then VERIFIED.
 # =============================================================================
 set -u
 
@@ -40,6 +41,93 @@ find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -in
 
 echo "▶ Purging broken strides from cache..."
 find "$MAP_DIR" -type f -name '*.bgra' -delete 2>/dev/null || true
+
+# =============================================================================
+# 0. Dependencies (distro-aware, single transaction, VERIFIED)
+#    Done first so a missing tool is reported loudly before anything else.
+# =============================================================================
+echo "▶ Resolving and installing dependencies..."
+
+# Runtime tools the app actually calls. ImageMagick (magick OR convert) is
+# checked separately below since either binary satisfies it.
+REQUIRED_CMDS=(mpv exiftool python3 curl qrencode ffmpeg socat playerctl pactl fc-match)
+
+detect_pm() {
+    for pm in dnf apt-get pacman zypper; do
+        command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return; }
+    done
+    echo ""
+}
+PM="$(detect_pm)"
+
+INSTALL=""
+PKGS=""
+case "$PM" in
+  dnf)
+    PKGS="mpv perl-Image-ExifTool python3 curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
+    INSTALL="sudo dnf install -y"
+    ;;
+  apt-get)
+    PKGS="mpv libimage-exiftool-perl python3 curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool"
+    sudo apt-get update -y || true
+    INSTALL="sudo apt-get install -y"
+    ;;
+  pacman)
+    PKGS="mpv perl-image-exiftool python curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool"
+    INSTALL="sudo pacman -S --needed --noconfirm"
+    ;;
+  zypper)
+    PKGS="mpv exiftool python3 curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
+    INSTALL="sudo zypper install -y"
+    ;;
+  *)
+    echo "⚠ No supported package manager (dnf/apt/pacman/zypper) found."
+    echo "  Install manually: mpv exiftool imagemagick python3 curl qrencode ffmpeg socat playerctl pactl fontconfig"
+    ;;
+esac
+
+if [ -n "$INSTALL" ]; then
+    echo "▶ Using ${PM}: installing all packages in one go..."
+    echo "  $PKGS"
+    # NOTE: errors are intentionally NOT hidden. If install fails, you see why.
+    $INSTALL $PKGS || echo "⚠ Package manager reported errors — verifying what actually landed below."
+fi
+
+echo "▶ Verifying runtime tools..."
+MISSING=()
+for c in "${REQUIRED_CMDS[@]}"; do
+    if command -v "$c" >/dev/null 2>&1; then
+        printf '   ✓ %s\n' "$c"
+    else
+        printf '   ✗ %s  (MISSING)\n' "$c"
+        MISSING+=("$c")
+    fi
+done
+if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    printf '   ✓ ImageMagick (magick/convert)\n'
+else
+    printf '   ✗ ImageMagick (magick/convert)  (MISSING)\n'
+    MISSING+=("ImageMagick")
+fi
+
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo ""
+    echo "❌ Missing: ${MISSING[*]}"
+    echo "   Slideshow will still play, but the date/location HUD and minimaps"
+    echo "   depend on: exiftool, ImageMagick, qrencode, curl, python3."
+    echo "   Install the missing tools, then re-run this script."
+    echo ""
+else
+    echo "✅ All runtime tools present."
+fi
+
+# Font (independent of package install)
+if curl -fLo "$HOME/.local/share/fonts/Montserrat-SemiBold.ttf" --create-dirs "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-SemiBold.ttf" >/dev/null 2>&1; then
+    fc-cache -f >/dev/null 2>&1 || true
+    echo "▶ Montserrat font installed."
+else
+    echo "⚠ Could not fetch Montserrat font (HUD will fall back to NotoSans)."
+fi
 
 # =============================================================================
 # 1. input.conf
@@ -1420,6 +1508,10 @@ AUDIO_SOCK="/tmp/ss_audio.sock"
 MUSIC_DIR="$HOME/Music/ScreenSaver"
 MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
 
+# Non-fatal sanity check: if the HUD's core tool is missing, say so once.
+command -v exiftool >/dev/null 2>&1 || \
+    echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
+
 MUSIC_PID=""
 EXIF_PID=""
 VID_PID=""
@@ -1499,18 +1591,16 @@ Categories=Utility;
 EOF
 
 # =============================================================================
-# 10. Dependencies + font
+# 10. Done
 # =============================================================================
-PKGS="mpv xdotool playerctl pulseaudio-utils socat perl-Image-ExifTool curl ImageMagick python3 qrencode ffmpeg"
-echo "▶ Installing dependencies..."
-sudo dnf install -y $PKGS >/dev/null 2>&1 || true
-
-if curl -fLo "$HOME/.local/share/fonts/Montserrat-SemiBold.ttf" --create-dirs "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-SemiBold.ttf" >/dev/null 2>&1; then
-    fc-cache -f >/dev/null 2>&1 || true
-fi
-
+echo ""
 echo "✅ Migration and Deployment finished!"
-echo "Your new structure is:"
+echo "Your structure is:"
 echo "   App Code   : $APP_DIR"
 echo "   Media      : $MEDIA_DIR"
 echo "   Caches     : $MAP_DIR & $OPT_DIR"
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo ""
+    echo "⚠ Reminder: still missing -> ${MISSING[*]}"
+    echo "  Install those, then re-run this script before launching."
+fi
