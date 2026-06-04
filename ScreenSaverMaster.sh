@@ -932,34 +932,60 @@ QR_INNER=440
 # are now pure disc/card; the lat/lon strings are drawn separately as crisp
 # libass OSD text by photo.lua, so they are vector-sharp and never rescaled.
 
-if [ "$need_qr" = 1 ]; then
+ if [ "$need_qr" = 1 ]; then
+
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
+
     qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
 
+
     $IM "$TMP/qr_raw.png" -transparent white "$TMP/qr_transparent.png"
+
     $IM "$TMP/qr_transparent.png" -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png"
 
+
     # Base shadow
+
     $IM -size ${CANVAS}x${FULLH} xc:none -fill black \
+
         -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \
+
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
+
         
-    # QR Card base: Restored to 50% alpha (#ffffff80) for the semi-transparent look
+
+    # QR Card base: 0.5 alpha (#ffffff80) with a standard dark edge to keep it readable
+
     $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' \
+
         -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
 
-    QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
-    $IM -size ${CANVAS}x${FULLH} xc:none \
-        "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
 
-    # Card only — composited WITHOUT the shadow layer
+    QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
+
+    $IM -size ${CANVAS}x${FULLH} xc:none \
+
+
+        "$TMP/qr_scaled.png" -gravity northwest -geometry
+
++${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
+
+
+    # Card only — composited without the glowing ring layer
+
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-        "$TMP/QR_base.png" -composite \
+
+        "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite \
+
         "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
+
     
+
     # Final resize for HUD
+
     $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
-fi
+
+fi 
 
 if [ "$need_map" = 1 ]; then
     read XT YT PX PY < <(python3 - "$LAT" "$LON" "$Z" <<'PY'
