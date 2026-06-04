@@ -976,7 +976,7 @@ qr_img = qr.make_image(image_factory=StyledPilImage,
 
 canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
-draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 102))     # 0.4 alpha white disc
+draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 255))    
 
 # Maximize QR size while keeping corners safely inside the circular disc.
 # We calculate an exact integer cell size to guarantee pixel-perfect grid alignment.
