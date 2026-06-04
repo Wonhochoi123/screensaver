@@ -977,29 +977,42 @@ canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
 draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 255))      # 0.4 alpha white disc
 
-func = int(D * 0.50)                                          # functional QR core size
+# 1. Maximize QR size while keeping corners safely inside the circular disc.
+# We calculate an exact integer cell size to guarantee pixel-perfect grid alignment.
+cell = int((D * 0.68) / float(n))
+func = cell * n
+
 qr_img = qr_img.resize((func, func), Image.LANCZOS)
 cx = cy = D / 2.0
 R = D / 2.0
-cell = max(6.0, func / float(n))
-gap = D * 0.020
-half = func / 2.0 + gap
+half = func / 2.0    # Set gap to exactly 0
+
 dot = (17, 17, 17, 255)
-random.seed(len(url) * 7 + 13)                # deterministic decoration
-yy = cell / 2.0
+random.seed(len(url) * 7 + 13)
+
+# 2. Synchronize the fake background grid exactly with the real QR code grid
+first_mod_x = cx - half + (cell / 2.0)
+first_mod_y = cy - half + (cell / 2.0)
+start_x = first_mod_x - (int(first_mod_x / cell) * cell)
+start_y = first_mod_y - (int(first_mod_y / cell) * cell)
+
+yy = start_y
 while yy < D:
-    xx = cell / 2.0
+    xx = start_x
     while xx < D:
+        # If inside the main circular disc
         if (xx - cx) ** 2 + (yy - cy) ** 2 <= (R - cell * 1.3) ** 2:
-            if abs(xx - cx) > half or abs(yy - cy) > half:
+            # If OUTSIDE the real QR core bounds
+            if xx < (cx - half) or xx > (cx + half) or yy < (cy - half) or yy > (cy + half):
                 if random.random() < 0.5:
                     r = cell * 0.40
                     draw.ellipse([xx - r, yy - r, xx + r, yy + r], fill=dot)
         xx += cell
     yy += cell
-draw.rounded_rectangle([cx - half, cy - half, cx + half, cy + half],
-                       radius=cell * 1.4, fill=(255, 255, 255, 255))   # quiet-zone halo
-canvas.alpha_composite(qr_img, (int(cx - func / 2.0), int(cy - func / 2.0)))
+
+# 3. No rounded_rectangle (quiet zone) is drawn here so the alphas don't overlap.
+# This completely removes the border, making the dots bleed seamlessly.
+canvas.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
 canvas.save(out_png)
 PY
     then STYLED=1; fi
