@@ -973,12 +973,9 @@ mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(17, 17, 17
 qr_img = qr.make_image(image_factory=StyledPilImage,
                        module_drawer=CircleModuleDrawer(),
                        color_mask=mask).convert("RGBA")
-
-canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
-
 canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
-draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 242))     # white disc
+draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 102))      # 0.4 alpha white disc
 
 func = int(D * 0.50)                                          # functional QR core size
 qr_img = qr_img.resize((func, func), Image.LANCZOS)
@@ -1001,7 +998,7 @@ while yy < D:
         xx += cell
     yy += cell
 draw.rounded_rectangle([cx - half, cy - half, cx + half, cy + half],
-                       radius=cell * 1.4, fill=(255, 255, 255, 242))   # quiet-zone halo
+                       radius=cell * 1.4, fill=(255, 255, 255, 102))   # quiet-zone halo
 canvas.alpha_composite(qr_img, (int(cx - func / 2.0), int(cy - func / 2.0)))
 canvas.save(out_png)
 PY
