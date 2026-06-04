@@ -470,20 +470,31 @@ local function join_loc(landmark, city, state, country)
     return table.concat(p, ", ")
 end
 
--- HUD size scales with the real display (height-relative), so the minimap/QR
--- are proportional and correctly positioned on ANY resolution. Previously this
--- could lock in a 4K fallback taken before the window existed, which pushed the
--- overlays off-screen on non-4K displays. We now derive from refresh_display_size,
--- which only commits a value once a genuine reading is available.
-local function get_hud_size()
+-- HUD geometry, all derived from the REAL display size so it adapts to any
+-- resolution/aspect. The map/QR bitmaps are SQUARE (disc / card only — no baked
+-- text). The lat/lon strings are drawn separately as crisp libass OSD text just
+-- below each bitmap (draw_coord_labels): vector-sharp and, unlike a baked-in
+-- bitmap, never rescaled — which is what made the text rough before.
+local function hud_geom()
     local win_w, win_h = refresh_display_size()
+    local S   = math.floor(win_h * 0.27); S = S - (S % 4)
+    local pad = math.floor(win_h * 0.02)
+    local fs  = math.floor(win_h * 0.018 + 0.5)
+    local gap = math.floor(win_h * 0.006)
+    local text_cy = win_h - pad - math.floor(fs * 0.7)
+    local img_top = (text_cy - math.floor(fs * 0.7) - gap) - S
+    return {
+        win_w = win_w, win_h = win_h, S = S, pad = pad, fs = fs,
+        img_top = img_top, text_cy = text_cy,
+        qr_x  = pad,             qr_cx  = pad + math.floor(S / 2),
+        map_x = win_w - S - pad, map_cx = win_w - pad - math.floor(S / 2),
+    }
+end
 
-    local base_w, base_h = 552, 632
-    local target_h = math.floor(win_h * 0.30)
-    local target_w = math.floor(target_h * (base_w / base_h))
-    target_w = target_w - (target_w % 4)
-
-    return target_w, target_h, win_w, win_h
+-- Back-compat shim for callers that only need the bitmap side + display size.
+local function get_hud_size()
+    local L = hud_geom()
+    return L.S, L.S, L.win_w, L.win_h
 end
 
 local function map_path(mdir, z, lat, lon, w, h, color)
@@ -494,21 +505,53 @@ local function qr_path(mdir, lat, lon, w, h)
     return string.format("%s/hud_qr_%.5f_%.5f_%dx%d.bgra", mdir, lat, lon, w, h)
 end
 
+-- Coordinate strings (formatted here, drawn via libass) --------------------
+local function dms(v, pos, neg)
+    local sign = v >= 0 and pos or neg
+    v = math.abs(v)
+    local d = math.floor(v)
+    local m = math.floor((v - d) * 60)
+    local s = math.floor((v - d - m / 60) * 3600 + 0.5)
+    if s == 60 then s = 0; m = m + 1 end
+    if m == 60 then m = 0; d = d + 1 end
+    return string.format("%d°%d'%d\"%s", d, m, s, sign)
+end
+local function fmt_dms(lat, lon) return dms(lat, "N", "S") .. "   " .. dms(lon, "E", "W") end
+local function fmt_dd(lat, lon)
+    return string.format("%.5f°%s   %.5f°%s",
+        math.abs(lat), lat >= 0 and "N" or "S",
+        math.abs(lon), lon >= 0 and "E" or "W")
+end
+
+local function coord_tags(x, y, fs)
+    -- white fill, thin black outline + soft shadow so it reads over any imagery
+    return string.format(
+        "{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\1c&HFFFFFF&\\bord1\\3c&H000000&\\shad1\\4c&H000000&\\4a&H50&}",
+        x, y, fs)
+end
+
+local function draw_coord_labels(L, lat, lon)
+    qr_coord_ov.res_x  = L.win_w; qr_coord_ov.res_y  = L.win_h
+    map_coord_ov.res_x = L.win_w; map_coord_ov.res_y = L.win_h
+    qr_coord_ov.data  = coord_tags(L.qr_cx,  L.text_cy, L.fs) .. fmt_dms(lat, lon)
+    map_coord_ov.data = coord_tags(L.map_cx, L.text_cy, L.fs) .. fmt_dd(lat, lon)
+    qr_coord_ov:update()
+    map_coord_ov:update()
+end
+
 local function clear_hud_osd()
     pcall(mp.command_native, {"overlay-remove", 1})
     pcall(mp.command_native, {"overlay-remove", 2})
+    qr_coord_ov:remove()
+    map_coord_ov:remove()
 end
 
-local function apply_qr(bgra_path, w, h, win_w, win_h)
-    local pad = math.floor(win_h * 0.02)
-    local x, y = pad, win_h - h - pad
-    mp.command_native({"overlay-add", 1, x, y, bgra_path, 0, "bgra", w, h, w * 4})
+local function apply_qr(bgra_path, L)
+    mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
-local function apply_minimap(bgra_path, w, h, win_w, win_h)
-    local pad = math.floor(win_h * 0.02)
-    local x, y = win_w - w - pad, win_h - h - pad
-    mp.command_native({"overlay-add", 2, x, y, bgra_path, 0, "bgra", w, h, w * 4})
+local function apply_minimap(bgra_path, L)
+    mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
 local function build_one(lat, lon, z, w, h, color, mdir, cb)
@@ -642,10 +685,10 @@ local function show_current_zoom()
     local z = ZOOMS[cur.zidx]
     local color = RING_COLORS[cur.zidx]
     local s = cur.seq
-    local w, h, win_w, win_h = get_hud_size()
-    build_one(cur.lat, cur.lon, z, w, h, color, cur.mdir, function(ok)
+    local L = hud_geom()
+    build_one(cur.lat, cur.lon, z, L.S, L.S, color, cur.mdir, function(ok)
         if s ~= seq then return end
-        if ok then apply_minimap(map_path(cur.mdir, z, cur.lat, cur.lon, w, h, color), w, h, win_w, win_h) end
+        if ok then apply_minimap(map_path(cur.mdir, z, cur.lat, cur.lon, L.S, L.S, color), L) end
     end)
 end
 
@@ -676,21 +719,14 @@ mp.register_script_message("handle-left-click", function()
     local mouse = mp.get_property_native("mouse-pos")
     if not mouse then return end
 
-    local w, h, win_w, win_h = get_hud_size()
-    local pad = math.floor(win_h * 0.02)
-
-    local qr_x = pad
-    local qr_y = win_h - h - pad
-    local in_qr = (mouse.x >= qr_x) and (mouse.x <= qr_x + w) and
-                  (mouse.y >= qr_y) and (mouse.y <= qr_y + h)
-
-    local map_x = win_w - w - pad
-    local map_y = win_h - h - pad
-    local in_map = (mouse.x >= map_x) and (mouse.x <= map_x + w) and
-                   (mouse.y >= map_y) and (mouse.y <= map_y + h)
+    local L = hud_geom()
+    local in_qr = (mouse.x >= L.qr_x) and (mouse.x <= L.qr_x + L.S) and
+                  (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
+    local in_map = (mouse.x >= L.map_x) and (mouse.x <= L.map_x + L.S) and
+                   (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
 
     if in_qr then
-        local url = string.format("https://www.google.com/maps/place/...", cur.lat, cur.lon)
+        local url = string.format("https://www.google.com/maps/?q=%.6f,%.6f", cur.lat, cur.lon)
         mp.command_native_async({
             name = "subprocess",
             args = {"xdg-open", url}
@@ -724,7 +760,8 @@ mp.register_event("file-loaded", function()
     local my_seq = seq
     prewarmed[orig_path] = true
 
-    local w, h, win_w, win_h = get_hud_size()
+    local L = hud_geom()
+    local w, h, win_w, win_h = L.S, L.S, L.win_w, L.win_h
 
     -- get_hud_size just refreshed the real display size. If this is an image and
     -- the blur was applied at a different (fallback) size during on_load, redo it
@@ -820,11 +857,13 @@ mp.register_event("file-loaded", function()
         local z = ZOOMS[cur.zidx]
         local color = RING_COLORS[cur.zidx]
 
+        draw_coord_labels(L, m.lat, m.lon)
+
         build_one(m.lat, m.lon, z, w, h, color, mdir, function(ok)
             if my_seq ~= seq then return end
             if ok then
-                apply_qr(qr_path(mdir, m.lat, m.lon, w, h), w, h, win_w, win_h)
-                apply_minimap(map_path(mdir, z, m.lat, m.lon, w, h, color), w, h, win_w, win_h)
+                apply_qr(qr_path(mdir, m.lat, m.lon, w, h), L)
+                apply_minimap(map_path(mdir, z, m.lat, m.lon, w, h, color), L)
             end
 
             build_all(m.lat, m.lon, w, h, mdir, function()
@@ -883,58 +922,17 @@ MARKER_COLOR='#ff5a4d'
 RING=5
 PAD=26
 CANVAS=$(( D + PAD*2 ))
-TEXTH=80
-FULLH=$(( CANVAS + TEXTH ))
+FULLH=$CANVAS
 CX=$(( CANVAS/2 ))
 MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
 QR_INNER=440
 
-# Coordinate-label font: prefer the bundled Montserrat (matches the date/location
-# label) via direct .ttf path so it works even before fontconfig indexes it.
-FONT=""
-for f in \
-    "$HOME/.local/share/fonts/Montserrat-SemiBold.ttf" \
-    "$HOME/.local/share/fonts/Montserrat-Medium.ttf" \
-    "$HOME/.local/share/fonts/Montserrat-Regular.ttf"; do
-    [ -f "$f" ] && { FONT="$f"; break; }
-done
-[ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' "Montserrat:weight=semibold" 2>/dev/null)
-[ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' "DejaVu Sans" 2>/dev/null)
-[ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' sans 2>/dev/null)
-
-# Coordinate label rendered DIRECTLY at the final on-screen pixel size so it is
-# never rescaled afterward — rescaling already-rasterized text is what made the
-# digits rough while the QR/card (hard edges / simple shapes) stayed clean. 4x
-# supersample, then a single Lanczos downscale to the exact band, gives crisp,
-# evenly anti-aliased glyphs at any display resolution.
-LABEL_PT=34   # point size measured against the 552-wide base canvas
-make_label() {
-    local out="$1" txt="$2" bw="$3" bh="$4"
-    local ss=4 ps sx sy
-    ps=$(( LABEL_PT * bw * ss / CANVAS )); [ "$ps" -lt 8 ] && ps=8
-    sx=$ss; sy=$((2*ss))
-    $IM -size $((bw*ss))x$((bh*ss)) xc:none -gravity center \
-        ${FONT:+-font "$FONT"} -pointsize ${ps} \
-        -fill '#00000099' -annotate +${sx}+${sy} "$txt" \
-        -fill white       -annotate +0+0 "$txt" \
-        -filter Lanczos -resize ${bw}x${bh} \
-        "$out" 2>/dev/null
-}
+# NOTE: coordinate text is no longer baked into these bitmaps. The map/QR images
+# are now pure disc/card; the lat/lon strings are drawn separately as crisp
+# libass OSD text by photo.lua, so they are vector-sharp and never rescaled.
 
 if [ "$need_qr" = 1 ]; then
-    DMS_COORD=$(python3 - "$LAT" "$LON" <<'PY'
-import sys
-lat, lon = float(sys.argv[1]), float(sys.argv[2])
-def to_dms(v, suff):
-    v = abs(v)
-    d = int(v)
-    m = int((v - d) * 60)
-    s = round((v - d - m/60) * 3600)
-    return f"{d}°{m}'{s}\"{suff}"
-print(f"{to_dms(lat, 'N' if lat>=0 else 'S')}   {to_dms(lon, 'E' if lon>=0 else 'W')}")
-PY
-)
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
     qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
 
@@ -961,28 +959,12 @@ PY
         "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite "$TMP/QR_ringglow.png" -composite \
         "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
     
-    # Resize the card to the final size FIRST, then stamp the label at native
-    # resolution so the text is never rescaled.
-    $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! "$TMP/QR_hud.png" || exit 7
-    band_h=$(( TEXTH * HUD_H / FULLH )); [ "$band_h" -lt 1 ] && band_h=1
-    off_y=$(( 6 * HUD_H / FULLH ))
-    make_label "$TMP/QR_label.png" "$DMS_COORD" "$HUD_W" "$band_h"
-    if [ -s "$TMP/QR_label.png" ]; then
-        $IM "$TMP/QR_hud.png" "$TMP/QR_label.png" -gravity south -geometry +0+${off_y} -composite \
-            -depth 8 bgra:"$OUT_QR" || exit 7
-    else
-        $IM "$TMP/QR_hud.png" -depth 8 bgra:"$OUT_QR" || exit 7
-    fi
+    # Square card only — coordinates are drawn as crisp libass OSD text by
+    # photo.lua, not baked here.
+    $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
 fi
 
 if [ "$need_map" = 1 ]; then
-    DD_COORD=$(python3 - "$LAT" "$LON" <<'PY'
-import sys
-lat, lon = float(sys.argv[1]), float(sys.argv[2])
-print(f"{abs(lat):.5f}°{'N' if lat>=0 else 'S'}   {abs(lon):.5f}°{'E' if lon>=0 else 'W'}")
-PY
-)
-
     read XT YT PX PY < <(python3 - "$LAT" "$LON" "$Z" <<'PY'
 import math, sys
 lat, lon, z = float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
@@ -1051,16 +1033,7 @@ PY
         "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
         "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
     
-    $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! "$TMP/M_hud.png" || exit 7
-    band_h=$(( TEXTH * HUD_H / FULLH )); [ "$band_h" -lt 1 ] && band_h=1
-    off_y=$(( 6 * HUD_H / FULLH ))
-    make_label "$TMP/M_label.png" "$DD_COORD" "$HUD_W" "$band_h"
-    if [ -s "$TMP/M_label.png" ]; then
-        $IM "$TMP/M_hud.png" "$TMP/M_label.png" -gravity south -geometry +0+${off_y} -composite \
-            -depth 8 bgra:"$OUT_MAP" || exit 7
-    else
-        $IM "$TMP/M_hud.png" -depth 8 bgra:"$OUT_MAP" || exit 7
-    fi
+    $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP" || exit 7
 fi
 
 exit 0
