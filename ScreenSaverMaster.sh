@@ -944,8 +944,9 @@ if [ "$need_qr" = 1 ]; then
         -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
         
-    # QR Card base: 0.5 alpha (#ffffff80) with a standard dark edge to keep it readable
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' \
+    # QR Card base: CHANGE '#ffffff80' (50% transparent) to '#ffffff' (opaque)
+    # This makes the card a solid white shape, eliminating the glowing-edge perception.
+    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff' \
         -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
 
     QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
