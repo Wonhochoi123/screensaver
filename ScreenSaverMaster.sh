@@ -939,28 +939,25 @@ if [ "$need_qr" = 1 ]; then
     $IM "$TMP/qr_raw.png" -transparent white "$TMP/qr_transparent.png"
     $IM "$TMP/qr_transparent.png" -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png"
 
+    # Base shadow
     $IM -size ${CANVAS}x${FULLH} xc:none -fill black \
         -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffffB3' -stroke '#0d2236' -strokewidth 2 \
+        
+    # QR Card base: 0.5 alpha (#ffffff80) with a standard dark edge to keep it readable
+    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' -stroke '#0d2236' -strokewidth 2 \
         -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill none -stroke "#FFFFFF" -strokewidth ${RING} \
-        -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_ring.png"
-    $IM "$TMP/QR_ring.png" \( +clone -blur 0x4 -channel A -evaluate multiply 1.2 +channel \) \
-        -compose over -composite "$TMP/QR_ringglow.png"
 
     QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
     $IM -size ${CANVAS}x${FULLH} xc:none \
         "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
 
-    # Card only — the coordinate label is stamped later, AFTER the final resize,
-    # so the text is rendered once at native size and never rescaled.
+    # Card only — composited without the glowing ring layer
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-        "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite "$TMP/QR_ringglow.png" -composite \
+        "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite \
         "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
     
-    # Square card only — coordinates are drawn as crisp libass OSD text by
-    # photo.lua, not baked here.
+    # Final resize for HUD
     $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
 fi
 
