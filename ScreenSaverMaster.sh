@@ -1,5 +1,3 @@
-I have this so far
-
 #!/bin/bash
 # =============================================================================
 #  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
