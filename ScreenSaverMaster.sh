@@ -182,6 +182,10 @@ EOF
 # =============================================================================
 echo "▶ Writing photo.lua..."
 cat > "$CFG/photo.lua" << 'EOF'
+local sub_bg_ov = mp.create_osd_overlay("ass-events")
+local ov        = mp.create_osd_overlay("ass-events")
+local pause_ov  = mp.create_osd_overlay("ass-events")
+
 local utils = require "mp.utils"
 local msg   = require "mp.msg"
 
@@ -798,10 +802,38 @@ mp.register_event("file-loaded", function()
             if d and location ~= "" then text = d .. "  |  " .. location
             elseif d then text = d
             elseif location ~= "" then text = location end
-            if text ~= "" then
-                ov.data = "{\\an2\\fnMontserrat ExtraBold\\fs48\\bord0\\shad2}" .. text .. "\\N\\N\\N"
-                ov:update()
-            end
+
+            if text == "" then sub_bg_ov:remove(); ov:remove(); return end
+
+            local L  = hud_geom()
+            local fs = math.floor(L.win_h * 0.045)                  -- ~48 at 1080p, scales on 4K
+            local cx = math.floor(L.win_w / 2)
+            local baseline = L.win_h - math.floor(L.win_h * 0.085)  -- lower-third placement
+
+            -- Frosted scrim. libass can't blur the photo, so we feather a
+            -- translucent dark panel with \blur — the darkened-scrim look that
+            -- cinematic game subtitles actually use. Width is estimated since
+            -- libass text width isn't queryable; padding keeps the blur clear of glyphs.
+            local approx_w = math.floor(#text * fs * 0.58)
+            local half_w   = math.floor(approx_w / 2) + math.floor(fs * 1.4)
+            local half_h   = math.floor(fs * 1.05)
+            local x1, x2   = cx - half_w, cx + half_w
+            local y1, y2   = baseline - half_h, baseline + half_h
+
+            sub_bg_ov.res_x = L.win_w
+            sub_bg_ov.res_y = L.win_h
+            sub_bg_ov.data = string.format(
+                "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H55&\\blur20\\p1}" ..
+                "m %d %d l %d %d l %d %d l %d %d{\\p0}",
+                x1, y1, x2, y1, x2, y2, x1, y2)
+            sub_bg_ov:update()
+
+            ov.res_x = L.win_w
+            ov.res_y = L.win_h
+            ov.data = string.format(
+                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord1\\3c&H000000&\\shad2}%s",
+                cx, baseline, fs, text)
+            ov:update()
         end
         draw_text()
 
@@ -926,8 +958,6 @@ FULLH=$CANVAS
 CX=$(( CANVAS/2 ))
 MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
-QR_INNER=440
-
 # NOTE: coordinate text is no longer baked into these bitmaps. The map/QR images
 # are now pure disc/card; the lat/lon strings are drawn separately as crisp
 # libass OSD text by photo.lua, so they are vector-sharp and never rescaled.
@@ -936,28 +966,37 @@ if [ "$need_qr" = 1 ]; then
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
     qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
 
-    $IM "$TMP/qr_raw.png" -transparent white "$TMP/qr_transparent.png"
-    $IM "$TMP/qr_transparent.png" -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png"
+    # QR inscribed within the disc so its corners (the finder patterns) stay
+    # inside the circle. White made transparent → only black modules show, so the
+    # white disc itself acts as the QR quiet zone.
+    QR_FIT=330
+    $IM "$TMP/qr_raw.png" -transparent white -resize ${QR_FIT}x${QR_FIT} "$TMP/qr_scaled.png"
 
-    # Base shadow
+    # Translucent white disc, same DxD geometry as the minimap disc.
+    $IM -size ${D}x${D} xc:none -fill '#ffffffB3' -draw "circle $R,$R $R,1" "$TMP/qr_disc.png"
+    QR_OFF=$(( (D - QR_FIT) / 2 ))
+    $IM "$TMP/qr_disc.png" \
+        "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFF}+${QR_OFF} -compose over -composite \
+        "$TMP/qr_disc_qr.png"
+
+    # Shadow / disc / outer stroke / ring + glow — identical to the minimap so the
+    # two badges look like a set.
     $IM -size ${CANVAS}x${FULLH} xc:none -fill black \
-        -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \
+        -draw "circle ${CX},$((MY+4)) ${CX},$((MY+4-R))" \
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
-        
-    # QR Card base: 0.5 alpha (#ffffff80) with a standard dark edge to keep it readable
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80'\
-        -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
-
-    QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
     $IM -size ${CANVAS}x${FULLH} xc:none \
-        "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
+        "$TMP/qr_disc_qr.png" -gravity northwest -geometry +${PAD}+${PAD} -compose over -composite "$TMP/QR_disc.png"
+    $IM -size ${CANVAS}x${FULLH} xc:none -stroke '#0d2236' -strokewidth 2 -fill none \
+        -draw "circle ${CX},${MY} ${CX},$((MY-R-2))" "$TMP/QR_outer.png"
+    $IM -size ${CANVAS}x${FULLH} xc:none -stroke "#FFFFFF" -strokewidth ${RING} -fill none \
+        -draw "circle ${CX},${MY} ${CX},$((MY-R))" "$TMP/QR_ring.png"
+    $IM "$TMP/QR_ring.png" \( +clone -blur 0x4 -channel A -evaluate multiply 1.2 +channel \) \
+        -compose over -composite "$TMP/QR_ringglow.png"
 
-    # Card only — composited without the glowing ring layer
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-        "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite \
-        "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
-    
-    # Final resize for HUD
+        "$TMP/QR_shadow.png" -composite "$TMP/QR_disc.png" -composite \
+        "$TMP/QR_outer.png" -composite "$TMP/QR_ringglow.png" -composite "$TMP/QR_final.png" || exit 5
+
     $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
 fi
 
