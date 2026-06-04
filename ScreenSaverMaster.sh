@@ -957,9 +957,9 @@ try:
     import qrcode
     from qrcode.image.styledpil import StyledPilImage
     try:
-        from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
+        from qrcode.image.styles.moduledrawers.pil import CircleModuleDrawer
     except Exception:
-        from qrcode.image.styles.moduledrawers import RoundedModuleDrawer
+        from qrcode.image.styles.moduledrawers import CircleModuleDrawer
     from qrcode.image.styles.colormasks import SolidFillColorMask
     from PIL import Image, ImageDraw
 except Exception:
@@ -971,8 +971,10 @@ qr.add_data(url); qr.make(fit=True)
 n = qr.modules_count
 mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(17, 17, 17, 255))
 qr_img = qr.make_image(image_factory=StyledPilImage,
-                       module_drawer=RoundedModuleDrawer(),
+                       module_drawer=CircleModuleDrawer(),
                        color_mask=mask).convert("RGBA")
+
+canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 
 canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
