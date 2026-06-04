@@ -244,38 +244,12 @@ local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
 -- (16:9, 16:10, 21:9, 4:3, portrait, ...).
 local function apply_image_blur_vf()
     local w, h = refresh_display_size()
-    -- Frosted-glass subtitle panel geometry (MUST match draw_text below). The
-    -- panel is baked into the frame here so the actual PHOTO behind the text is
-    -- gaussian-blurred and gently darkened with feathered edges — the cinematic
-    -- "frosted scrim" look — instead of a flat box drawn on top of the image.
-    -- Built from standard filters only (crop/gblur/drawbox/alphamerge) so there
-    -- are no fragile expression-escaping issues inside the mpv filter string.
-    local fs  = math.floor(h * 0.045)
-    local PW  = math.floor(w * 0.52)            -- panel width
-    local PH  = math.floor(fs * 2.9)            -- panel height
-    local PX  = math.floor(w / 2 - PW / 2)
-    local PY  = math.floor(h - math.floor(h * 0.085) - PH / 2)
-    local SIG = math.max(10, math.floor(h / 42))  -- backdrop blur strength
-    local F   = math.floor(PH * 0.32)              -- feather inset
-    local IW2 = PW - 2 * F
-    local IH2 = PH - 2 * F
-    local FB  = math.max(2, math.floor(F * 0.6))   -- feather softness
     local vf = string.format(
         "lavfi=[split[bg][fg];" ..
         "[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d,setsar=1[b];" ..
         "[fg]scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1[f];" ..
-        "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1[fr];" ..
-        "[fr]split[base][reg];" ..
-        "[reg]crop=%d:%d:%d:%d,split[panc][panm];" ..
-        "[panc]gblur=sigma=%d,eq=brightness=-0.10:saturation=1.06[panb];" ..
-        "[panm]drawbox=0:0:%d:%d:black@1:t=fill,drawbox=%d:%d:%d:%d:white@1:t=fill,gblur=sigma=%d,format=gray[mask];" ..
-        "[panb][mask]alphamerge[pf];" ..
-        "[base][pf]overlay=%d:%d:format=auto,setsar=1]",
-        w, h, w, h,
-        PW, PH, PX, PY,
-        SIG,
-        PW, PH, F, F, IW2, IH2, FB,
-        PX, PY)
+        "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1]",
+        w, h, w, h)
     mp.set_property("vf", vf)
     BLUR_W, BLUR_H = w, h
 end
@@ -827,10 +801,6 @@ mp.register_event("file-loaded", function()
 
             if text == "" then ov:remove(); return end
 
-            -- The frosted backdrop is baked into the frame itself — by
-            -- apply_image_blur_vf for images, by the video daemon for videos — so
-            -- here we only lay the text on top, centered on the same baseline the
-            -- panel was built around. A thin outline + drop shadow keep it crisp.
             local L  = hud_geom()
             local fs = math.floor(L.win_h * 0.045)                   -- ~48 at 1080p, scales up on 4K
             local cx = math.floor(L.win_w / 2)
@@ -1008,7 +978,7 @@ canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
 draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 242))     # white disc
 
-func = int(D * 0.50)                          # functional QR core size
+func = int(D * 0.50)                                          # functional QR core size
 qr_img = qr_img.resize((func, func), Image.LANCZOS)
 cx = cy = D / 2.0
 R = D / 2.0
@@ -1601,16 +1571,7 @@ PY
         # subtitle panel photo.lua uses for images: the video behind the date/
         # location text is gaussian-blurred + gently darkened with feathered edges,
         # so videos get a live frosted-glass backdrop instead of a flat box.
-        SPF_FS=$(( TARGET_H * 45 / 1000 ))
-        SPF_PW=$(( TARGET_W * 52 / 100 ))
-        SPF_PH=$(( SPF_FS * 29 / 10 ))
-        SPF_PX=$(( TARGET_W / 2 - SPF_PW / 2 ))
-        SPF_PY=$(( TARGET_H - TARGET_H * 85 / 1000 - SPF_PH / 2 ))
-        SPF_SIG=$(( TARGET_H / 42 )); [ "$SPF_SIG" -lt 10 ] && SPF_SIG=10
-        SPF_F=$(( SPF_PH * 32 / 100 ))
-        SPF_IW2=$(( SPF_PW - 2 * SPF_F )); SPF_IH2=$(( SPF_PH - 2 * SPF_F ))
-        SPF_FB=$(( SPF_F * 60 / 100 )); [ "$SPF_FB" -lt 2 ] && SPF_FB=2
-        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1[fr];[fr]split[base][reg];[reg]crop=${SPF_PW}:${SPF_PH}:${SPF_PX}:${SPF_PY},split[panc][panm];[panc]gblur=sigma=${SPF_SIG},eq=brightness=-0.10:saturation=1.06[panb];[panm]drawbox=0:0:${SPF_PW}:${SPF_PH}:black@1:t=fill,drawbox=${SPF_F}:${SPF_F}:${SPF_IW2}:${SPF_IH2}:white@1:t=fill,gblur=sigma=${SPF_FB},format=gray[mask];[panb][mask]alphamerge[pf];[base][pf]overlay=${SPF_PX}:${SPF_PY}:format=auto,setsar=1"
+        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
 
         log "⚙ Optimizing: $filename (dur=${DURATION_S}s)"
         echo "$filename — starting..." > "$STATUS_FILE"
