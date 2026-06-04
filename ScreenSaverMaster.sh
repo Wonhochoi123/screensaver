@@ -903,18 +903,22 @@ done
 [ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' "DejaVu Sans" 2>/dev/null)
 [ -z "$FONT" ] && FONT=$(fc-match -f '%{file}' sans 2>/dev/null)
 
-# Smooth, high-quality coordinate label: render at 4x then Lanczos-downscale so
-# glyph edges are cleanly anti-aliased; a soft shadow keeps it legible over the
-# satellite imagery / QR.
-make_text_strip() {
-    local out="$1" txt="$2"
-    local ss=4 w h ps sx sy
-    w=$((CANVAS*ss)); h=$((TEXTH*ss)); ps=$((34*ss)); sx=$((1*ss)); sy=$((2*ss))
-    $IM -size ${w}x${h} xc:none -gravity center \
+# Coordinate label rendered DIRECTLY at the final on-screen pixel size so it is
+# never rescaled afterward — rescaling already-rasterized text is what made the
+# digits rough while the QR/card (hard edges / simple shapes) stayed clean. 4x
+# supersample, then a single Lanczos downscale to the exact band, gives crisp,
+# evenly anti-aliased glyphs at any display resolution.
+LABEL_PT=34   # point size measured against the 552-wide base canvas
+make_label() {
+    local out="$1" txt="$2" bw="$3" bh="$4"
+    local ss=4 ps sx sy
+    ps=$(( LABEL_PT * bw * ss / CANVAS )); [ "$ps" -lt 8 ] && ps=8
+    sx=$ss; sy=$((2*ss))
+    $IM -size $((bw*ss))x$((bh*ss)) xc:none -gravity center \
         ${FONT:+-font "$FONT"} -pointsize ${ps} \
         -fill '#00000099' -annotate +${sx}+${sy} "$txt" \
         -fill white       -annotate +0+0 "$txt" \
-        -filter Lanczos -resize ${CANVAS}x${TEXTH} \
+        -filter Lanczos -resize ${bw}x${bh} \
         "$out" 2>/dev/null
 }
 
@@ -951,18 +955,24 @@ PY
     $IM -size ${CANVAS}x${FULLH} xc:none \
         "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
 
-    make_text_strip "$TMP/QR_text.png" "$DMS_COORD"
-    if [ -s "$TMP/QR_text.png" ]; then
-        $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-            "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite "$TMP/QR_ringglow.png" -composite \
-            "$TMP/QR_body.png" -composite "$TMP/QR_text.png" -gravity south -geometry +0+6 -composite "$TMP/QR_final.png" || exit 5
-    else
-        $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-            "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite "$TMP/QR_ringglow.png" -composite \
-            "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
-    fi
+    # Card only — the coordinate label is stamped later, AFTER the final resize,
+    # so the text is rendered once at native size and never rescaled.
+    $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
+        "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite "$TMP/QR_ringglow.png" -composite \
+        "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
     
-    $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
+    # Resize the card to the final size FIRST, then stamp the label at native
+    # resolution so the text is never rescaled.
+    $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! "$TMP/QR_hud.png" || exit 7
+    band_h=$(( TEXTH * HUD_H / FULLH )); [ "$band_h" -lt 1 ] && band_h=1
+    off_y=$(( 6 * HUD_H / FULLH ))
+    make_label "$TMP/QR_label.png" "$DMS_COORD" "$HUD_W" "$band_h"
+    if [ -s "$TMP/QR_label.png" ]; then
+        $IM "$TMP/QR_hud.png" "$TMP/QR_label.png" -gravity south -geometry +0+${off_y} -composite \
+            -depth 8 bgra:"$OUT_QR" || exit 7
+    else
+        $IM "$TMP/QR_hud.png" -depth 8 bgra:"$OUT_QR" || exit 7
+    fi
 fi
 
 if [ "$need_map" = 1 ]; then
@@ -1036,19 +1046,21 @@ PY
         -fill "$MARKER_COLOR" -draw "circle ${CX},${MY} ${CX},$((MY-7))" \
         -fill white          -draw "circle ${CX},${MY} ${CX},$((MY-3))" "$TMP/M_marker.png"
 
-    make_text_strip "$TMP/M_text.png" "$DD_COORD"
-    if [ -s "$TMP/M_text.png" ]; then
-        $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-            "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
-            "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite \
-            "$TMP/M_text.png" -gravity south -geometry +0+6 -composite "$TMP/M_final.png" || exit 5
-    else
-        $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-            "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
-            "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
-    fi
+    # Disc only — the coordinate label is stamped after the final resize (below).
+    $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
+        "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
+        "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
     
-    $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP" || exit 7
+    $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! "$TMP/M_hud.png" || exit 7
+    band_h=$(( TEXTH * HUD_H / FULLH )); [ "$band_h" -lt 1 ] && band_h=1
+    off_y=$(( 6 * HUD_H / FULLH ))
+    make_label "$TMP/M_label.png" "$DD_COORD" "$HUD_W" "$band_h"
+    if [ -s "$TMP/M_label.png" ]; then
+        $IM "$TMP/M_hud.png" "$TMP/M_label.png" -gravity south -geometry +0+${off_y} -composite \
+            -depth 8 bgra:"$OUT_MAP" || exit 7
+    else
+        $IM "$TMP/M_hud.png" -depth 8 bgra:"$OUT_MAP" || exit 7
+    fi
 fi
 
 exit 0
