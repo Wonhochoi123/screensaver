@@ -945,7 +945,7 @@ if [ "$need_qr" = 1 ]; then
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
         
     # QR Card base: 0.5 alpha (#ffffff80) with a standard dark edge to keep it readable
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' -stroke '#0d2236' -strokewidth 2 \
+    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' \
         -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
 
     QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
