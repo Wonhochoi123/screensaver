@@ -198,6 +198,8 @@ local ov       = mp.create_osd_overlay("ass-events")
 local pause_ov = mp.create_osd_overlay("ass-events")
 pause_ov.res_x = 1920
 pause_ov.res_y = 1080
+local qr_coord_ov  = mp.create_osd_overlay("ass-events")
+local map_coord_ov = mp.create_osd_overlay("ass-events")
 
 local seq       = 0
 local prewarmed = {}
@@ -476,8 +478,8 @@ end
 local function get_hud_size()
     local win_w, win_h = refresh_display_size()
 
-    local base_w, base_h = 552, 616
-    local target_h = math.floor(win_h * 0.28)
+    local base_w, base_h = 552, 632
+    local target_h = math.floor(win_h * 0.30)
     local target_w = math.floor(target_h * (base_w / base_h))
     target_w = target_w - (target_w % 4)
 
@@ -881,7 +883,7 @@ MARKER_COLOR='#ff5a4d'
 RING=5
 PAD=26
 CANVAS=$(( D + PAD*2 ))
-TEXTH=64
+TEXTH=80
 FULLH=$(( CANVAS + TEXTH ))
 CX=$(( CANVAS/2 ))
 MY=$(( PAD + D/2 ))
@@ -907,7 +909,7 @@ done
 make_text_strip() {
     local out="$1" txt="$2"
     local ss=4 w h ps sx sy
-    w=$((CANVAS*ss)); h=$((TEXTH*ss)); ps=$((26*ss)); sx=$((1*ss)); sy=$((2*ss))
+    w=$((CANVAS*ss)); h=$((TEXTH*ss)); ps=$((34*ss)); sx=$((1*ss)); sy=$((2*ss))
     $IM -size ${w}x${h} xc:none -gravity center \
         ${FONT:+-font "$FONT"} -pointsize ${ps} \
         -fill '#00000099' -annotate +${sx}+${sy} "$txt" \
