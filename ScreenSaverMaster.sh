@@ -939,35 +939,24 @@ QR_INNER=440
     qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
 
 
-    $IM "$TMP/qr_raw.png" -transparent white "$TMP/qr_transparent.png" 
-    $IM "$TMP/qr_transparent.png" -filter point -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png"
+    # 1. Cleanly remove the pure white from the raw QR code
+    $IM "$TMP/qr_raw.png" -fuzz 2% -transparent white "$TMP/qr_transparent.png" 
+    
+    # 2. Resize with point filter to keep the black edges razor-sharp
+    $IM "$TMP/qr_transparent.png" -filter point -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png" 
 
-
-    # Base shadow
-
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill black \
-
-        -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \
-
-        -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
-
+    # Base shadow (Unchanged)
+    $IM -size ${CANVAS}x${FULLH} xc:none -fill black \ 
+        -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \ 
+        -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png" 
         
+    # 3. QR Card base: Use rgba() to guarantee 0.5 alpha
+    $IM -size ${CANVAS}x${FULLH} xc:none -fill "rgba(255, 255, 255, 0.5)" \ 
+        -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png" 
 
-    # QR Card base: 0.5 alpha (#ffffff80) with a standard dark edge to keep it readable
-
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' \
-
-        -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
-
-
-    QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
-
-    $IM -size ${CANVAS}x${FULLH} xc:none \
-
-
-        "$TMP/qr_scaled.png" -gravity northwest -geometry
-
-+${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
+    QR_OFFSET=$(( PAD + (D - QR_INNER)/2 )) 
+    $IM -size ${CANVAS}x${FULLH} xc:none \ 
+        "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
 
 
     # Card only — composited without the glowing ring layer
