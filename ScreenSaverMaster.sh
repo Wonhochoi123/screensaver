@@ -64,20 +64,20 @@ INSTALL=""
 PKGS=""
 case "$PM" in
   dnf)
-    PKGS="mpv perl-Image-ExifTool python3 curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
+    PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
     INSTALL="sudo dnf install -y"
     ;;
   apt-get)
-    PKGS="mpv libimage-exiftool-perl python3 curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool"
+    PKGS="mpv libimage-exiftool-perl python3 python3-qrcode python3-pil curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool"
     sudo apt-get update -y || true
     INSTALL="sudo apt-get install -y"
     ;;
   pacman)
-    PKGS="mpv perl-image-exiftool python curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool"
+    PKGS="mpv perl-image-exiftool python python-qrcode python-pillow curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool"
     INSTALL="sudo pacman -S --needed --noconfirm"
     ;;
   zypper)
-    PKGS="mpv exiftool python3 curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
+    PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
     INSTALL="sudo zypper install -y"
     ;;
   *)
@@ -182,10 +182,6 @@ EOF
 # =============================================================================
 echo "▶ Writing photo.lua..."
 cat > "$CFG/photo.lua" << 'EOF'
-local sub_bg_ov = mp.create_osd_overlay("ass-events")
-local ov        = mp.create_osd_overlay("ass-events")
-local pause_ov  = mp.create_osd_overlay("ass-events")
-
 local utils = require "mp.utils"
 local msg   = require "mp.msg"
 
@@ -248,12 +244,38 @@ local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
 -- (16:9, 16:10, 21:9, 4:3, portrait, ...).
 local function apply_image_blur_vf()
     local w, h = refresh_display_size()
+    -- Frosted-glass subtitle panel geometry (MUST match draw_text below). The
+    -- panel is baked into the frame here so the actual PHOTO behind the text is
+    -- gaussian-blurred and gently darkened with feathered edges — the cinematic
+    -- "frosted scrim" look — instead of a flat box drawn on top of the image.
+    -- Built from standard filters only (crop/gblur/drawbox/alphamerge) so there
+    -- are no fragile expression-escaping issues inside the mpv filter string.
+    local fs  = math.floor(h * 0.045)
+    local PW  = math.floor(w * 0.52)            -- panel width
+    local PH  = math.floor(fs * 2.9)            -- panel height
+    local PX  = math.floor(w / 2 - PW / 2)
+    local PY  = math.floor(h - math.floor(h * 0.085) - PH / 2)
+    local SIG = math.max(10, math.floor(h / 42))  -- backdrop blur strength
+    local F   = math.floor(PH * 0.32)              -- feather inset
+    local IW2 = PW - 2 * F
+    local IH2 = PH - 2 * F
+    local FB  = math.max(2, math.floor(F * 0.6))   -- feather softness
     local vf = string.format(
         "lavfi=[split[bg][fg];" ..
         "[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d,setsar=1[b];" ..
         "[fg]scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1[f];" ..
-        "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1]",
-        w, h, w, h)
+        "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1[fr];" ..
+        "[fr]split[base][reg];" ..
+        "[reg]crop=%d:%d:%d:%d,split[panc][panm];" ..
+        "[panc]gblur=sigma=%d,eq=brightness=-0.10:saturation=1.06[panb];" ..
+        "[panm]drawbox=0:0:%d:%d:black@1:t=fill,drawbox=%d:%d:%d:%d:white@1:t=fill,gblur=sigma=%d,format=gray[mask];" ..
+        "[panb][mask]alphamerge[pf];" ..
+        "[base][pf]overlay=%d:%d:format=auto,setsar=1]",
+        w, h, w, h,
+        PW, PH, PX, PY,
+        SIG,
+        PW, PH, F, F, IW2, IH2, FB,
+        PX, PY)
     mp.set_property("vf", vf)
     BLUR_W, BLUR_H = w, h
 end
@@ -803,35 +825,21 @@ mp.register_event("file-loaded", function()
             elseif d then text = d
             elseif location ~= "" then text = location end
 
-            if text == "" then sub_bg_ov:remove(); ov:remove(); return end
+            if text == "" then ov:remove(); return end
 
+            -- The frosted backdrop is baked into the frame itself — by
+            -- apply_image_blur_vf for images, by the video daemon for videos — so
+            -- here we only lay the text on top, centered on the same baseline the
+            -- panel was built around. A thin outline + drop shadow keep it crisp.
             local L  = hud_geom()
-            local fs = math.floor(L.win_h * 0.045)                  -- ~48 at 1080p, scales on 4K
+            local fs = math.floor(L.win_h * 0.045)                   -- ~48 at 1080p, scales up on 4K
             local cx = math.floor(L.win_w / 2)
-            local baseline = L.win_h - math.floor(L.win_h * 0.085)  -- lower-third placement
-
-            -- Frosted scrim. libass can't blur the photo, so we feather a
-            -- translucent dark panel with \blur — the darkened-scrim look that
-            -- cinematic game subtitles actually use. Width is estimated since
-            -- libass text width isn't queryable; padding keeps the blur clear of glyphs.
-            local approx_w = math.floor(#text * fs * 0.58)
-            local half_w   = math.floor(approx_w / 2) + math.floor(fs * 1.4)
-            local half_h   = math.floor(fs * 1.05)
-            local x1, x2   = cx - half_w, cx + half_w
-            local y1, y2   = baseline - half_h, baseline + half_h
-
-            sub_bg_ov.res_x = L.win_w
-            sub_bg_ov.res_y = L.win_h
-            sub_bg_ov.data = string.format(
-                "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H55&\\blur20\\p1}" ..
-                "m %d %d l %d %d l %d %d l %d %d{\\p0}",
-                x1, y1, x2, y1, x2, y2, x1, y2)
-            sub_bg_ov:update()
+            local baseline = L.win_h - math.floor(L.win_h * 0.085)   -- lower-third placement
 
             ov.res_x = L.win_w
             ov.res_y = L.win_h
             ov.data = string.format(
-                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord1\\3c&H000000&\\shad2}%s",
+                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord1\\3c&H000000&\\shad2\\4c&H000000&}%s",
                 cx, baseline, fs, text)
             ov:update()
         end
@@ -958,34 +966,93 @@ FULLH=$CANVAS
 CX=$(( CANVAS/2 ))
 MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
+
 # NOTE: coordinate text is no longer baked into these bitmaps. The map/QR images
-# are now pure disc/card; the lat/lon strings are drawn separately as crisp
-# libass OSD text by photo.lua, so they are vector-sharp and never rescaled.
+# are now pure disc; the lat/lon strings are drawn separately as crisp libass
+# OSD text by photo.lua, so they are vector-sharp and never rescaled.
 
 if [ "$need_qr" = 1 ]; then
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
-    qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
 
-    # QR inscribed within the disc so its corners (the finder patterns) stay
-    # inside the circle. White made transparent → only black modules show, so the
-    # white disc itself acts as the QR quiet zone.
-    QR_FIT=330
-    $IM "$TMP/qr_raw.png" -transparent white -resize ${QR_FIT}x${QR_FIT} "$TMP/qr_scaled.png"
+    # Stylish circular QR: rounded modules + a decorative dot-fill so the pattern
+    # fills the whole disc. The surround is purely decorative (no finder patterns,
+    # so scanners ignore it); the actual scannable code is the high error-
+    # correction core, isolated by its own white quiet-zone halo. Needs python3 +
+    # qrcode + Pillow. If any are missing we fall back to a plain qrencode square
+    # on a white disc so the HUD never breaks.
+    STYLED=0
+    if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
+import sys, random
+try:
+    import qrcode
+    from qrcode.image.styledpil import StyledPilImage
+    try:
+        from qrcode.image.styles.moduledrawers.pil import RoundedModuleDrawer
+    except Exception:
+        from qrcode.image.styles.moduledrawers import RoundedModuleDrawer
+    from qrcode.image.styles.colormasks import SolidFillColorMask
+    from PIL import Image, ImageDraw
+except Exception:
+    sys.exit(2)
 
-    # Translucent white disc, same DxD geometry as the minimap disc.
-    $IM -size ${D}x${D} xc:none -fill '#ffffffB3' -draw "circle $R,$R $R,1" "$TMP/qr_disc.png"
-    QR_OFF=$(( (D - QR_FIT) / 2 ))
-    $IM "$TMP/qr_disc.png" \
-        "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFF}+${QR_OFF} -compose over -composite \
-        "$TMP/qr_disc_qr.png"
+url, out_png, D = sys.argv[1], sys.argv[2], int(sys.argv[3])
+qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, border=0)
+qr.add_data(url); qr.make(fit=True)
+n = qr.modules_count
+mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(17, 17, 17, 255))
+qr_img = qr.make_image(image_factory=StyledPilImage,
+                       module_drawer=RoundedModuleDrawer(),
+                       color_mask=mask).convert("RGBA")
 
-    # Shadow / disc / outer stroke / ring + glow — identical to the minimap so the
-    # two badges look like a set.
+canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+draw = ImageDraw.Draw(canvas)
+draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 242))     # white disc
+
+func = int(D * 0.50)                          # functional QR core size
+qr_img = qr_img.resize((func, func), Image.LANCZOS)
+cx = cy = D / 2.0
+R = D / 2.0
+cell = max(6.0, func / float(n))
+gap = D * 0.020
+half = func / 2.0 + gap
+dot = (17, 17, 17, 255)
+random.seed(len(url) * 7 + 13)                # deterministic decoration
+yy = cell / 2.0
+while yy < D:
+    xx = cell / 2.0
+    while xx < D:
+        if (xx - cx) ** 2 + (yy - cy) ** 2 <= (R - cell * 1.3) ** 2:
+            if abs(xx - cx) > half or abs(yy - cy) > half:
+                if random.random() < 0.5:
+                    r = cell * 0.40
+                    draw.ellipse([xx - r, yy - r, xx + r, yy + r], fill=dot)
+        xx += cell
+    yy += cell
+draw.rounded_rectangle([cx - half, cy - half, cx + half, cy + half],
+                       radius=cell * 1.4, fill=(255, 255, 255, 242))   # quiet-zone halo
+canvas.alpha_composite(qr_img, (int(cx - func / 2.0), int(cy - func / 2.0)))
+canvas.save(out_png)
+PY
+    then STYLED=1; fi
+
+    if [ "$STYLED" != 1 ]; then
+        # Fallback: plain square QR inscribed on a white disc.
+        qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
+        QR_FIT=330
+        $IM "$TMP/qr_raw.png" -transparent white -resize ${QR_FIT}x${QR_FIT} "$TMP/qr_scaled.png"
+        $IM -size ${D}x${D} xc:none -fill '#ffffffF2' -draw "circle $R,$R $R,1" "$TMP/qr_disc.png"
+        QR_OFF=$(( (D - QR_FIT) / 2 ))
+        $IM "$TMP/qr_disc.png" "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFF}+${QR_OFF} \
+            -compose over -composite "$TMP/qr_styled.png"
+    fi
+
+    # Shadow / disc / outer stroke / ring + glow — identical treatment to the
+    # minimap so the two badges read as a matched pair.
     $IM -size ${CANVAS}x${FULLH} xc:none -fill black \
         -draw "circle ${CX},$((MY+4)) ${CX},$((MY+4-R))" \
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
     $IM -size ${CANVAS}x${FULLH} xc:none \
-        "$TMP/qr_disc_qr.png" -gravity northwest -geometry +${PAD}+${PAD} -compose over -composite "$TMP/QR_disc.png"
+        "$TMP/qr_styled.png" -gravity northwest -geometry +${PAD}+${PAD} -compose over -composite "$TMP/QR_disc.png"
     $IM -size ${CANVAS}x${FULLH} xc:none -stroke '#0d2236' -strokewidth 2 -fill none \
         -draw "circle ${CX},${MY} ${CX},$((MY-R-2))" "$TMP/QR_outer.png"
     $IM -size ${CANVAS}x${FULLH} xc:none -stroke "#FFFFFF" -strokewidth ${RING} -fill none \
@@ -1064,7 +1131,7 @@ PY
         -fill "$MARKER_COLOR" -draw "circle ${CX},${MY} ${CX},$((MY-7))" \
         -fill white          -draw "circle ${CX},${MY} ${CX},$((MY-3))" "$TMP/M_marker.png"
 
-    # Disc only — the coordinate label is stamped after the final resize (below).
+    # Disc only — coordinates are drawn as crisp libass OSD text by photo.lua.
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
         "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
         "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
@@ -1443,7 +1510,7 @@ while command -v ffmpeg >/dev/null 2>&1; do
                 TARGET_W="${BASH_REMATCH[1]}"; TARGET_H="${BASH_REMATCH[2]}"
             fi
         fi
-        TARGET="${TARGET_W}x${TARGET_H}"
+        TARGET="fp1-${TARGET_W}x${TARGET_H}"
 
         # Clean output filenames — same name as source, just with .mp4 extension.
         # Matches what photo.lua's redirect lookup expects.
@@ -1530,8 +1597,20 @@ PY
         # 640x360 downscale (σ=50) then upscale to the REAL display size; contain
         # the sharp clip and center it over the blur. setsar=1 after each scale
         # forces square pixels so a non-16:9 target (e.g. 32:9) isn't reinterpreted
-        # back to 16:9 by the encoder.
-        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
+        # back to 16:9 by the encoder. The trailing stages bake in the SAME frosted
+        # subtitle panel photo.lua uses for images: the video behind the date/
+        # location text is gaussian-blurred + gently darkened with feathered edges,
+        # so videos get a live frosted-glass backdrop instead of a flat box.
+        SPF_FS=$(( TARGET_H * 45 / 1000 ))
+        SPF_PW=$(( TARGET_W * 52 / 100 ))
+        SPF_PH=$(( SPF_FS * 29 / 10 ))
+        SPF_PX=$(( TARGET_W / 2 - SPF_PW / 2 ))
+        SPF_PY=$(( TARGET_H - TARGET_H * 85 / 1000 - SPF_PH / 2 ))
+        SPF_SIG=$(( TARGET_H / 42 )); [ "$SPF_SIG" -lt 10 ] && SPF_SIG=10
+        SPF_F=$(( SPF_PH * 32 / 100 ))
+        SPF_IW2=$(( SPF_PW - 2 * SPF_F )); SPF_IH2=$(( SPF_PH - 2 * SPF_F ))
+        SPF_FB=$(( SPF_F * 60 / 100 )); [ "$SPF_FB" -lt 2 ] && SPF_FB=2
+        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1[fr];[fr]split[base][reg];[reg]crop=${SPF_PW}:${SPF_PH}:${SPF_PX}:${SPF_PY},split[panc][panm];[panc]gblur=sigma=${SPF_SIG},eq=brightness=-0.10:saturation=1.06[panb];[panm]drawbox=0:0:${SPF_PW}:${SPF_PH}:black@1:t=fill,drawbox=${SPF_F}:${SPF_F}:${SPF_IW2}:${SPF_IH2}:white@1:t=fill,gblur=sigma=${SPF_FB},format=gray[mask];[panb][mask]alphamerge[pf];[base][pf]overlay=${SPF_PX}:${SPF_PY}:format=auto,setsar=1"
 
         log "⚙ Optimizing: $filename (dur=${DURATION_S}s)"
         echo "$filename — starting..." > "$STATUS_FILE"
