@@ -944,18 +944,17 @@ if [ "$need_qr" = 1 ]; then
         -draw "roundrectangle ${PAD},$((PAD+4)) $((PAD+D)),$((PAD+D+4)) 70,70" \
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
         
-    # QR Card base: CHANGE '#ffffff80' (50% transparent) to '#ffffff' (opaque)
-    # This makes the card a solid white shape, eliminating the glowing-edge perception.
-    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff' \
+    # QR Card base: Restored to 50% alpha (#ffffff80) for the semi-transparent look
+    $IM -size ${CANVAS}x${FULLH} xc:none -fill '#ffffff80' \
         -draw "roundrectangle ${PAD},${PAD} $((PAD+D)),$((PAD+D)) 70,70" "$TMP/QR_base.png"
 
     QR_OFFSET=$(( PAD + (D - QR_INNER)/2 ))
     $IM -size ${CANVAS}x${FULLH} xc:none \
         "$TMP/qr_scaled.png" -gravity northwest -geometry +${QR_OFFSET}+${QR_OFFSET} -compose over -composite "$TMP/QR_body.png"
 
-    # Card only — composited without the glowing ring layer
+    # Card only — composited WITHOUT the shadow layer
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-        "$TMP/QR_shadow.png" -composite "$TMP/QR_base.png" -composite \
+        "$TMP/QR_base.png" -composite \
         "$TMP/QR_body.png" -composite "$TMP/QR_final.png" || exit 5
     
     # Final resize for HUD
