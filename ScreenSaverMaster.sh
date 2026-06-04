@@ -479,7 +479,7 @@ local function hud_geom()
     local win_w, win_h = refresh_display_size()
     local S   = math.floor(win_h * 0.27); S = S - (S % 4)
     local pad = math.floor(win_h * 0.02)
-    local fs  = math.floor(win_h * 0.025 + 0.5)
+    local fs  = math.floor(win_h * 0.25)
     local gap = math.floor(win_h * 0.006)
     local text_cy = win_h - pad - math.floor(fs * 0.7)
     local img_top = (text_cy - math.floor(fs * 0.7) - gap) - S
