@@ -973,11 +973,12 @@ mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(17, 17, 17
 qr_img = qr.make_image(image_factory=StyledPilImage,
                        module_drawer=CircleModuleDrawer(),
                        color_mask=mask).convert("RGBA")
+
 canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
-draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 255))      # 0.4 alpha white disc
+draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 102))     # 0.4 alpha white disc
 
-# 1. Maximize QR size while keeping corners safely inside the circular disc.
+# Maximize QR size while keeping corners safely inside the circular disc.
 # We calculate an exact integer cell size to guarantee pixel-perfect grid alignment.
 cell = int((D * 0.68) / float(n))
 func = cell * n
@@ -990,7 +991,7 @@ half = func / 2.0    # Set gap to exactly 0
 dot = (17, 17, 17, 255)
 random.seed(len(url) * 7 + 13)
 
-# 2. Synchronize the fake background grid exactly with the real QR code grid
+# Synchronize the fake background grid exactly with the real QR code grid
 first_mod_x = cx - half + (cell / 2.0)
 first_mod_y = cy - half + (cell / 2.0)
 start_x = first_mod_x - (int(first_mod_x / cell) * cell)
@@ -1010,8 +1011,6 @@ while yy < D:
         xx += cell
     yy += cell
 
-# 3. No rounded_rectangle (quiet zone) is drawn here so the alphas don't overlap.
-# This completely removes the border, making the dots bleed seamlessly.
 canvas.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
 canvas.save(out_png)
 PY
@@ -1035,8 +1034,6 @@ PY
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
     $IM -size ${CANVAS}x${FULLH} xc:none \
         "$TMP/qr_styled.png" -gravity northwest -geometry +${PAD}+${PAD} -compose over -composite "$TMP/QR_disc.png"
-    $IM -size ${CANVAS}x${FULLH} xc:none -stroke '#0d2236' -strokewidth 2 -fill none \
-        -draw "circle ${CX},${MY} ${CX},$((MY-R-2))" "$TMP/QR_outer.png"
     $IM -size ${CANVAS}x${FULLH} xc:none -stroke "#FFFFFF" -strokewidth ${RING} -fill none \
         -draw "circle ${CX},${MY} ${CX},$((MY-R))" "$TMP/QR_ring.png"
     $IM "$TMP/QR_ring.png" \( +clone -blur 0x4 -channel A -evaluate multiply 1.2 +channel \) \
@@ -1044,7 +1041,7 @@ PY
 
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
         "$TMP/QR_shadow.png" -composite "$TMP/QR_disc.png" -composite \
-        "$TMP/QR_outer.png" -composite "$TMP/QR_ringglow.png" -composite "$TMP/QR_final.png" || exit 5
+        "$TMP/QR_ringglow.png" -composite "$TMP/QR_final.png" || exit 5
 
     $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
 fi
@@ -1103,8 +1100,6 @@ PY
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/M_shadow.png"
     $IM -size ${CANVAS}x${FULLH} xc:none \
         "$TMP/disc.png" -gravity northwest -geometry +${PAD}+${PAD} -compose over -composite "$TMP/M_disc.png"
-    $IM -size ${CANVAS}x${FULLH} xc:none -stroke '#0d2236' -strokewidth 2 -fill none \
-        -draw "circle ${CX},${MY} ${CX},$((MY-R-2))" "$TMP/M_outer.png"
     $IM -size ${CANVAS}x${FULLH} xc:none -stroke "$MAP_RING_COLOR" -strokewidth ${RING} -fill none \
         -draw "circle ${CX},${MY} ${CX},$((MY-R))" "$TMP/M_ring.png"
     $IM "$TMP/M_ring.png" \( +clone -blur 0x4 -channel A -evaluate multiply 1.2 +channel \) \
@@ -1115,7 +1110,7 @@ PY
 
     # Disc only — coordinates are drawn as crisp libass OSD text by photo.lua.
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-        "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite "$TMP/M_outer.png" -composite \
+        "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite \
         "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
     
     $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP" || exit 7
