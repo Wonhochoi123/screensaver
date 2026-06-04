@@ -969,7 +969,7 @@ url, out_png, D = sys.argv[1], sys.argv[2], int(sys.argv[3])
 qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, border=0)
 qr.add_data(url); qr.make(fit=True)
 n = qr.modules_count
-mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(17, 17, 17, 255))
+mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(0, 0, 128, 255))
 qr_img = qr.make_image(image_factory=StyledPilImage,
                        module_drawer=CircleModuleDrawer(),
                        color_mask=mask).convert("RGBA")
@@ -988,7 +988,7 @@ cx = cy = D / 2.0
 R = D / 2.0
 half = func / 2.0    # Set gap to exactly 0
 
-dot = (17, 17, 17, 255)
+dot = (0, 0, 128, 255)
 random.seed(len(url) * 7 + 13)
 
 # Synchronize the fake background grid exactly with the real QR code grid
