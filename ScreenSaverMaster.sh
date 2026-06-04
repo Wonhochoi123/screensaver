@@ -939,9 +939,8 @@ QR_INNER=440
     qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
 
 
-    $IM "$TMP/qr_raw.png" -transparent white "$TMP/qr_transparent.png"
-
-    $IM "$TMP/qr_transparent.png" -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png"
+    $IM "$TMP/qr_raw.png" -transparent white "$TMP/qr_transparent.png" 
+    $IM "$TMP/qr_transparent.png" -filter point -resize ${QR_INNER}x${QR_INNER} "$TMP/qr_scaled.png"
 
 
     # Base shadow
