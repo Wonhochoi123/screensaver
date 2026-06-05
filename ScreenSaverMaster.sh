@@ -1672,7 +1672,7 @@ echo "▶ Writing mpv.conf..."
 cat > "$CFG/mpv.conf" << 'EOF'
 fullscreen=yes
 loop-playlist=inf
-shuffle=yes
+shuffle=no
 image-display-duration=7
 osc=no
 osd-bar=no
@@ -1699,6 +1699,7 @@ pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 AUDIO_SOCK="/tmp/ss_audio.sock"
 MUSIC_DIR="$HOME/Music/ScreenSaver"
 MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
+PLAYLIST="$HOME/Screensaver-App/config/playlist.m3u"
 
 # Non-fatal sanity check: if the HUD's core tool is missing, say so once.
 command -v exiftool >/dev/null 2>&1 || \
@@ -1729,7 +1730,31 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
     MUSIC_PID=$!
 fi
 
-mpv --config-dir="$HOME/Screensaver-App/config" "$MEDIA_DIR"
+# =============================================================================
+# CHRONOLOGICAL PLAYLIST BUILDER
+# Rebuilds the playlist only if a media file is newer than the current playlist
+# =============================================================================
+if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
+    echo "▶ Compiling chronological playlist..."
+    
+    # Use -fast2 to strictly read headers without scanning image data.
+    # Pulls DateTimeOriginal -> CreateDate -> Path, sorts numerically, strips dates, outputs .m3u
+    exiftool -fast2 -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreateDate -FilePath \
+        -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
+        "$MEDIA_DIR" 2>/dev/null | \
+    awk -F'\t' '{
+        d = $1
+        if (d == "-" || d == "") d = $2
+        # If no date is found, push to the absolute end of the playlist
+        if (d == "-" || d == "") d = "99999999999999"
+        print d "|" $3
+    }' | sort -n | cut -d'|' -f2- > "$PLAYLIST.tmp"
+    
+    mv "$PLAYLIST.tmp" "$PLAYLIST"
+fi
+
+# Launch mpv using the generated chronological playlist
+mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
 LAUNCH_EOF
 chmod +x "$APP_DIR/launch.sh"
 
