@@ -635,11 +635,28 @@ local function build_all(lat, lon, w, h, mdir, cb, i)
     end)
 end
 
+-- Parse a capture date from a YYYYMMDD_HHMMSS... filename (phone/export naming).
+-- Mirrors the builder's filename fallback so the on-screen label matches the
+-- order the playlist was sorted in. Returns a "%b %d, %Y" string or nil.
+local function date_from_filename(path)
+    local name = path:match("([^/]+)$") or path
+    local y, mo, d = name:match("^(%d%d%d%d)(%d%d)(%d%d)_%d%d%d%d%d%d")
+    if not y then return nil end
+    y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
+    if mo < 1 or mo > 12 or d < 1 or d > 31 then return nil end
+    local t = os.time{ year = y, month = mo, day = d, hour = 12 }
+    return t and os.date("%b %d, %Y", t) or nil
+end
+
 local function resolve_meta(orig_path, cb)
     local sc = parse_sidecar(orig_path)
-    local fallback_date
-    local fi = utils.file_info(orig_path)
-    if fi and fi.mtime then fallback_date = os.date("%b %d, %Y", fi.mtime) end
+    -- Fallback date precedence: filename date (matches the playlist sort key)
+    -- first, then file mtime as a final resort.
+    local fallback_date = date_from_filename(orig_path)
+    if not fallback_date then
+        local fi = utils.file_info(orig_path)
+        if fi and fi.mtime then fallback_date = os.date("%b %d, %Y", fi.mtime) end
+    end
 
     local mdir = BASE_DIR .. "/Maps"
 
@@ -1980,7 +1997,18 @@ if [ ! -s "$PLAYLIST" ] || [ ! -s "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxde
         if (d == "-" || d == "") d = $2
         if (d == "-" || d == "") d = $3
         if (d == "-" || d == "") d = $4
-        # No usable timestamp anywhere -> send to the very end of the playlist.
+        # Last resort before giving up: phones/exports commonly name files
+        # YYYYMMDD_HHMMSS... — pull the date straight from the filename so EXIF-
+        # less shots (screenshots, edited exports) still sort chronologically and
+        # stay in their real month/year group instead of piling up at the end.
+        if (d == "-" || d == "") {
+            n = $5; sub(/.*\//, "", n)
+            ymd = substr(n, 1, 8); sep = substr(n, 9, 1); hms = substr(n, 10, 6)
+            ok1 = (ymd ~ /^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$/)
+            ok2 = (hms ~ /^[0-9][0-9][0-9][0-9][0-9][0-9]$/)
+            if (ok1 && sep == "_" && ok2) d = ymd hms
+        }
+        # Still nothing usable -> send to the very end of the playlist.
         if (d == "-" || d == "") d = "99999999999999"
         print d "|" $5
     }' | sort -n > "$COMBINED"
