@@ -950,7 +950,72 @@ mp.register_event("shutdown", function()
     ov:remove()
     pause_ov:remove()
 end)
+
+-- ----------------------------------------------------------------------------
+-- Playlist Chapters (Jump by Month)
+-- ----------------------------------------------------------------------------
+local function jump_month(direction)
+    local pl = mp.get_property_native("playlist")
+    local pos = mp.get_property_number("playlist-pos") -- 0-based
+    if not pl or not pos then return end
+    
+    local current_idx = pos + 1 -- 1-based Lua table index
+    local current_title = pl[current_idx].title or ""
+    local target_idx = nil
+    
+    if direction > 0 then
+        -- Forward: Find first item with a different month title
+        for i = current_idx + 1, #pl do
+            local t = pl[i].title
+            if t and t ~= "" and t ~= current_title and t ~= "Unknown Date" then
+                target_idx = i
+                break
+            end
+        end
+    else
+        -- Backward: Find the title of the previous month
+        local prev_title = nil
+        local scan_idx = current_idx - 1
+        while scan_idx >= 1 do
+            local t = pl[scan_idx].title
+            if t and t ~= "" and t ~= current_title and t ~= "Unknown Date" then
+                prev_title = t
+                break
+            end
+            scan_idx = scan_idx - 1
+        end
+        
+        -- Backtrack to the VERY FIRST item of that previous month
+        if prev_title then
+            target_idx = scan_idx
+            while target_idx > 1 do
+                if pl[target_idx - 1].title ~= prev_title then
+                    break
+                end
+                target_idx = target_idx - 1
+            end
+        else
+            target_idx = 1 -- Just jump to the very beginning if no previous month exists
+        end
+    end
+    
+    if target_idx then
+        mp.set_property_number("playlist-pos", target_idx - 1)
+        local t = pl[target_idx].title or ""
+        mp.osd_message("⏭ Chapter: " .. t, 3)
+    else
+        mp.osd_message(direction > 0 and "End of Playlist" or "Start of Playlist", 2)
+    end
+end
+
+mp.register_script_message("month-next", function() jump_month(1) end)
+mp.register_script_message("month-prev", function() jump_month(-1) end)
+
+
+
 EOF
+
+
 
 # =============================================================================
 # 3. build-minimap.sh
@@ -1770,13 +1835,16 @@ fi
 # CHRONOLOGICAL PLAYLIST BUILDER
 # Rebuilds the playlist only if a media file is newer than the current playlist
 # =============================================================================
+# =============================================================================
+# CHRONOLOGICAL PLAYLIST BUILDER (EXTM3U Chapters)
+# =============================================================================
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
     
-    TITLE_DIR="$HOME/Screensaver-App/TitleCards"
-    mkdir -p "$TITLE_DIR"
+    # Clean up the old title cards if they exist
+    rm -rf "$HOME/Screensaver-App/TitleCards" 2>/dev/null || true
 
-    # 1. Expanded tag list so MP4s don't slip through, plus relaxed -fast2 to -fast
+    # Extract dates and file paths
     exiftool -fast -T -d "%Y%m%d%H%M%S" \
         -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
@@ -1789,8 +1857,7 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
         
         path = $5
         
-        # 2. Filename fallback if EXIF is completely missing
-        # Standardizes based on your "YYYYMMDD_HHMMSS" and "PXL_YYYYMMDD_HHMMSS" file structures
+        # Filename fallback if EXIF is completely missing
         if (d == "-" || d == "") {
             if (match(path, /([0-9]{8}_[0-9]{6})/)) {
                 d = substr(path, RSTART, 15)
@@ -1805,42 +1872,32 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
         print d "|" path
     }' | sort -n > "$PLAYLIST.raw"
 
-    # 3. Process the sorted list, generate title cards, and build final .m3u
-    > "$PLAYLIST.tmp"
-    LAST_YM=""
+    # Build the EXTM3U file with month/year chapter tags
+    echo "#EXTM3U" > "$PLAYLIST.tmp"
     declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
 
     while IFS='|' read -r D PATH_STR; do
+        TITLE="Unknown Date"
         if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
-            YM="${D:0:6}"
-            if [[ "$YM" != "$LAST_YM" ]]; then
-                LAST_YM="$YM"
-                Y="${YM:0:4}"
-                M="${YM:4:2}"
-                M_NAME="${M_NAMES[$M]}"
-                
-                CARD_PATH="$TITLE_DIR/${Y}-${M}.png"
-                if [ ! -f "$CARD_PATH" ]; then
-                    echo "  Generating Title Card: $M_NAME $Y..."
-                    if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
-                    
-                    # Generate a clean 1080p black title card using your downloaded font
-                    $IM -size 1920x1080 xc:black \
-                        -font "$HOME/.local/share/fonts/Montserrat-ExtraBold.ttf" \
-                        -pointsize 140 -fill white -gravity center \
-                        -draw "text 0,0 '$M_NAME $Y'" \
-                        "$CARD_PATH" 2>/dev/null || true
-                fi
-                # Inject the title card into the playlist stream
-                [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
+            Y="${D:0:4}"
+            M="${D:4:2}"
+            M_NAME="${M_NAMES[$M]}"
+            if [ -n "$M_NAME" ]; then
+                TITLE="$M_NAME $Y"
             fi
         fi
+        
+        # Inject the invisible title tag for mpv to read as a chapter name
+        echo "#EXTINF:-1,$TITLE" >> "$PLAYLIST.tmp"
         echo "$PATH_STR" >> "$PLAYLIST.tmp"
     done < "$PLAYLIST.raw"
 
     mv "$PLAYLIST.tmp" "$PLAYLIST"
     rm -f "$PLAYLIST.raw"
 fi
+
+# Launch mpv using the generated chronological playlist
+mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
 
 # Launch mpv using the generated chronological playlist
 mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
