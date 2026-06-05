@@ -82,7 +82,7 @@ case "$PM" in
     ;;
   *)
     echo "⚠ No supported package manager (dnf/apt/pacman/zypper) found."
-    echo "  Install manually: mpv exiftool imagemagick python3 curl qrencode ffmpeg socat playerctl pactl fontconfig xdotool"
+    echo "  Install manually: mpv exiftool imagemagick python3 curl qrencode ffmpeg socat playerctl pactl fontconfig"
     ;;
 esac
 
@@ -121,7 +121,11 @@ else
     echo "✅ All runtime tools present."
 fi
 
-# Fonts (independent of package install).
+# Fonts (independent of package install). The old google/fonts static URLs now
+# 404 because Montserrat ships as a variable font, which neither libass nor
+# ImageMagick weight-select reliably — so we pull STATIC weights from the
+# official designer's repo: ExtraBold for the date/location label, SemiBold for
+# the map/QR coordinate strips.
 FONT_DIR="$HOME/.local/share/fonts"
 FONT_BASE="https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf"
 got_font=0
@@ -132,6 +136,7 @@ for w in ExtraBold SemiBold; do
         echo "⚠ Could not fetch Montserrat-$w."
     fi
 done
+# Clean up any zero-byte leftovers from the previously-broken download.
 find "$FONT_DIR" -name 'Montserrat-*.ttf' -size 0 -delete 2>/dev/null || true
 if [ "$got_font" = 1 ]; then
     fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
@@ -209,6 +214,9 @@ local DISPLAY_W, DISPLAY_H = nil, nil
 local BLUR_W, BLUR_H, BLUR_ROT = nil, nil, nil
 
 local function refresh_display_size()
+    -- display-width/height = the physical monitor the window is on (best).
+    -- osd-width/height     = the render surface (good fallback once VO exists).
+    -- Both are stable across files, unlike per-image osd-dimensions.
     local w = mp.get_property_number("display-width") or 0
     local h = mp.get_property_number("display-height") or 0
     if w < 320 or h < 320 then
@@ -217,16 +225,20 @@ local function refresh_display_size()
     end
     if w >= 320 and h >= 320 then
         if DISPLAY_W ~= w or DISPLAY_H ~= h then
-            DISPLAY_W, DISPLAY_H = w, h
+            DISPLAY_W, DISPLAY_H = w, h          -- remember the last good reading
+            -- Publish it for the video daemon (which has no display access).
             local f = io.open(APP_DIR .. "/display.conf", "w")
             if f then f:write(string.format("%dx%d", w, h)); f:close() end
         end
     end
-    return DISPLAY_W or 1920, DISPLAY_H or 1080
+    return DISPLAY_W or 1920, DISPLAY_H or 1080  -- 1080p only until first real read
 end
 
-local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true, tif=true, tiff=true, gif=true, jfif=true}
+local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
+                   tif=true, tiff=true, gif=true, jfif=true}
 
+-- Safely read the rotation metadata.
+-- If mpv doesn't know yet (during on_load), it reads EXIF synchronously.
 local function get_video_rotation(path)
     local rot = mp.get_property_number("video-params/rotate")
     if not rot then
@@ -241,6 +253,7 @@ local function get_video_rotation(path)
         end
     end
     
+    -- If STILL nil (happens on Frame 1), check EXIF explicitly
     if not rot and path then
         local pext = (path:match("%.([^%.]+)$") or ""):lower()
         if image_ext[pext] then
@@ -263,12 +276,19 @@ local function get_video_rotation(path)
     return ((rot % 360) + 360) % 360
 end
 
+-- Blur-fill background sized to the ACTUAL display, not a fixed 4K/16:9 canvas.
+-- Blur is computed cheaply at 640x360 then upscaled to the real WxH; the sharp
+-- photo is contained and centered over it. Because the output frame matches the
+-- display aspect exactly, mpv fills the screen with no black bars on any ratio
+-- (16:9, 16:10, 21:9, 4:3, portrait, ...).
 local function apply_image_blur_vf(path)
     local w, h = refresh_display_size()
     local rot = get_video_rotation(path)
     
+    -- Keep track of the unswapped sizes to avoid infinite loops
     BLUR_W, BLUR_H, BLUR_ROT = w, h, rot
 
+    -- If mpv is going to rotate the frame 90 or 270 degrees, swap the canvas
     if rot == 90 or rot == 270 then
         w, h = h, w
     end
@@ -295,6 +315,7 @@ mp.add_hook("on_load", 10, function()
     if is_video[ext] then
         local dir, file = path:match("^(.-)/([^/]+)$")
         if dir and file and not dir:match("/Optimized_Vids$") then
+            -- Strip the original extension to match the strict .mp4 naming
             local base_name = file:match("(.+)%.[^%.]+$") or file
             local opt_path = BASE_DIR .. "/Optimized_Vids/" .. base_name .. ".mp4"
             local fi = utils.file_info(opt_path)
@@ -302,11 +323,12 @@ mp.add_hook("on_load", 10, function()
                 mp.set_property("stream-open-filename", opt_path)
             end
         end
-        mp.set_property("vf", "")
+        mp.set_property("vf", "")    -- videos: framed already / blur baked by daemon
         return
     end
 
     if image_ext[ext] then
+        -- Pre-apply the blur ONLY if we already know the real display size
         refresh_display_size()
         if DISPLAY_W then
             apply_image_blur_vf(path)
@@ -493,6 +515,11 @@ local function join_loc(landmark, city, state, country)
     return table.concat(p, ", ")
 end
 
+-- HUD geometry, all derived from the REAL display size so it adapts to any
+-- resolution/aspect. The map/QR bitmaps are SQUARE (disc / card only — no baked
+-- text). The lat/lon strings are drawn separately as crisp libass OSD text just
+-- below each bitmap (draw_coord_labels): vector-sharp and, unlike a baked-in
+-- bitmap, never rescaled — which is what made the text rough before.
 local function hud_geom()
     local win_w, win_h = refresh_display_size()
     local S   = math.floor(win_h * 0.27); S = S - (S % 4)
@@ -509,6 +536,12 @@ local function hud_geom()
     }
 end
 
+-- Back-compat shim for callers that only need the bitmap side + display size.
+local function get_hud_size()
+    local L = hud_geom()
+    return L.S, L.S, L.win_w, L.win_h
+end
+
 local function map_path(mdir, z, lat, lon, w, h, color)
     local c = color:gsub("#", "")
     return string.format("%s/hud_sat_%d_%.5f_%.5f_%dx%d_%s.bgra", mdir, z, lat, lon, w, h, c)
@@ -517,6 +550,7 @@ local function qr_path(mdir, lat, lon, w, h)
     return string.format("%s/hud_qr_%.5f_%.5f_%dx%d.bgra", mdir, lat, lon, w, h)
 end
 
+-- Coordinate strings (formatted here, drawn via libass) --------------------
 local function dms(v, pos, neg)
     local sign = v >= 0 and pos or neg
     v = math.abs(v)
@@ -535,6 +569,7 @@ local function fmt_dd(lat, lon)
 end
 
 local function coord_tags(x, y, fs)
+    -- white fill, thin black outline + soft shadow so it reads over any imagery
     return string.format(
         "{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\1c&HFFFFFF&\\bord1\\3c&H000000&\\shad1\\4c&H000000&\\4a&H50&}",
         x, y, fs)
@@ -773,6 +808,9 @@ mp.register_event("file-loaded", function()
     local L = hud_geom()
     local w, h, win_w, win_h = L.S, L.S, L.win_w, L.win_h
 
+    -- get_hud_size just refreshed the real display size. If this is an image and
+    -- the blur was applied at a different (fallback) size OR incorrect rotation 
+    -- during on_load, redo it now at the correct full-screen dimensions.
     do
         local pext = (path:match("%.([^%.]+)$") or ""):lower()
         if image_ext[pext] and DISPLAY_W then
@@ -811,9 +849,9 @@ mp.register_event("file-loaded", function()
             if text == "" then ov:remove(); return end
 
             local L  = hud_geom()
-            local fs = math.floor(L.win_h * 0.045)
+            local fs = math.floor(L.win_h * 0.045)                   -- ~48 at 1080p, scales up on 4K
             local cx = math.floor(L.win_w / 2)
-            local baseline = L.win_h - math.floor(L.win_h * 0.085)
+            local baseline = L.win_h - math.floor(L.win_h * 0.085)   -- lower-third placement
 
             ov.res_x = L.win_w
             ov.res_y = L.win_h
@@ -946,9 +984,19 @@ CX=$(( CANVAS/2 ))
 MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
 
+# NOTE: coordinate text is no longer baked into these bitmaps. The map/QR images
+# are now pure disc; the lat/lon strings are drawn separately as crisp libass
+# OSD text by photo.lua, so they are vector-sharp and never rescaled.
+
 if [ "$need_qr" = 1 ]; then
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
 
+    # Stylish circular QR: rounded modules + a decorative dot-fill so the pattern
+    # fills the whole disc. The surround is purely decorative (no finder patterns,
+    # so scanners ignore it); the actual scannable code is the high error-
+    # correction core, isolated by its own white quiet-zone halo. Needs python3 +
+    # qrcode + Pillow. If any are missing we fall back to a plain qrencode square
+    # on a white disc so the HUD never breaks.
     STYLED=0
     if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
 import sys, random
@@ -977,17 +1025,20 @@ canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
 draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 255))    
 
+# Maximize QR size while keeping corners safely inside the circular disc.
+# We calculate an exact integer cell size to guarantee pixel-perfect grid alignment.
 cell = int((D * 0.68) / float(n))
 func = cell * n
 
 qr_img = qr_img.resize((func, func), Image.LANCZOS)
 cx = cy = D / 2.0
 R = D / 2.0
-half = func / 2.0
+half = func / 2.0    # Set gap to exactly 0
 
 dot = (80, 0, 128, 255)
 random.seed(len(url) * 7 + 13)
 
+# Synchronize the fake background grid exactly with the real QR code grid
 first_mod_x = cx - half + (cell / 2.0)
 first_mod_y = cy - half + (cell / 2.0)
 start_x = first_mod_x - (int(first_mod_x / cell) * cell)
@@ -997,7 +1048,9 @@ yy = start_y
 while yy < D:
     xx = start_x
     while xx < D:
+        # If inside the main circular disc
         if (xx - cx) ** 2 + (yy - cy) ** 2 <= (R - cell * 1.3) ** 2:
+            # If OUTSIDE the real QR core bounds
             if xx < (cx - half) or xx > (cx + half) or yy < (cy - half) or yy > (cy + half):
                 if random.random() < 0.5:
                     r = cell * 0.40
@@ -1011,6 +1064,7 @@ PY
     then STYLED=1; fi
 
     if [ "$STYLED" != 1 ]; then
+        # Fallback: plain square QR inscribed on a white disc.
         qrencode -s 12 -m 2 -o "$TMP/qr_raw.png" "$G_MAPS_URL" || exit 6
         QR_FIT=330
         $IM "$TMP/qr_raw.png" -transparent white -resize ${QR_FIT}x${QR_FIT} "$TMP/qr_scaled.png"
@@ -1020,6 +1074,8 @@ PY
             -compose over -composite "$TMP/qr_styled.png"
     fi
 
+    # Shadow / disc / outer stroke / ring + glow — identical treatment to the
+    # minimap so the two badges read as a matched pair.
     $IM -size ${CANVAS}x${FULLH} xc:none -fill black \
         -draw "circle ${CX},$((MY+4)) ${CX},$((MY+4-R))" \
         -blur 0x9 -channel A -evaluate multiply 0.5 +channel "$TMP/QR_shadow.png"
@@ -1064,9 +1120,11 @@ PY
             url="https://${sub}.tile.openstreetmap.org/${Z}/${tx}/${ty}.png"
         fi
         
+        # 1. Download base tile
         if [ ! -s "$tf" ]; then
             curl -sf --max-time 8 --create-dirs -A "$UA" -o "$tf" "$url" &
         fi
+        # 2. Download label tile (only for satellite imagery)
         if [ "$MAP_STYLE" = "satellite" ] && [ ! -s "$tf_lab" ]; then
             curl -sf --max-time 8 --create-dirs -A "$UA" -o "$tf_lab" "$url_lab" &
         fi
@@ -1078,6 +1136,7 @@ PY
         if [ "$MAP_STYLE" = "satellite" ]; then
             tf="$CACHE/sat_${Z}_${tx}_${ty}.png"
             tf_lab="$CACHE/lab_${Z}_${tx}_${ty}.png"
+            # 3. Composite labels over the satellite base if a label tile exists
             if [ -s "$tf_lab" ]; then
                 $IM "$tf" "$tf_lab" -compose over -composite "$TMP/t_${dx}_${dy}.png"
             else
@@ -1114,6 +1173,7 @@ PY
         -fill "$MARKER_COLOR" -draw "circle ${CX},${MY} ${CX},$((MY-7))" \
         -fill white          -draw "circle ${CX},${MY} ${CX},$((MY-3))" "$TMP/M_marker.png"
 
+    # Disc only — coordinates are drawn as crisp libass OSD text by photo.lua.
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
         "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite \
         "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
@@ -1431,6 +1491,9 @@ touch "$LOG_FILE"
 
 log() { echo "[$(date +'%H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# Signal handling — trap so Ctrl+C cleanly stops mid-encode and so the daemon
+# dies with its parent shell instead of orphaning. huponexit is off by default
+# on Fedora bash, which is the other half of why orphans happened before.
 FFMPEG_PID=""
 WATCHER_PID=""
 SLEEP_PID=""
@@ -1456,12 +1519,16 @@ echo "idle" > "$STATUS_FILE"
 
 while command -v ffmpeg >/dev/null 2>&1; do
 
+    # Process substitution (not pipe) so the loop runs in THIS shell, where
+    # the trap can actually reach the active ffmpeg child.
     while IFS= read -r -d '' vid; do
         [ -f "$vid" ] || continue
 
         filename="$(basename "$vid")"
         base="${filename%.*}"
 
+        # Target = the real display size published by photo.lua (display.conf).
+        # Falls back to 4K 16:9 until mpv has reported a size at least once.
         TARGET_W=3840; TARGET_H=2160
         DISPLAY_CONF="$HOME/Screensaver-App/display.conf"
         if [ -s "$DISPLAY_CONF" ]; then
@@ -1472,12 +1539,16 @@ while command -v ffmpeg >/dev/null 2>&1; do
         fi
         TARGET="fp1-${TARGET_W}x${TARGET_H}"
 
+        # Clean output filenames — same name as source, just with .mp4 extension.
+        # Matches what photo.lua's redirect lookup expects.
         out_file="$OPT_DIR/${base}.mp4"
         skip_marker="$OPT_DIR/.skip_${base}"
         res_marker="$OPT_DIR/.res_${base}"
         tmp_file="$OPT_DIR/.tmp_${base}.mp4"
         prev_res="$(cat "$res_marker" 2>/dev/null || true)"
 
+        # Redo prior work if the source changed OR the display resolution changed
+        # (a clip blur-filled for 16:9 is wrong once the target is 32:9, etc.).
         if [ -f "$out_file" ]; then
             if [ "$vid" -nt "$out_file" ] || [ "$prev_res" != "$TARGET" ]; then
                 if [ "$prev_res" != "$TARGET" ]; then
@@ -1495,6 +1566,10 @@ while command -v ffmpeg >/dev/null 2>&1; do
         [ -f "$out_file" ] && continue
         [ -f "$skip_marker" ] && continue
 
+        # Probe ONLY to decide whether the video needs optimization and to grab
+        # duration for the progress %. Rotation is detected here for the aspect-
+        # ratio test, NOT to drive a transpose — ffmpeg auto-rotation handles
+        # the pixels for us downstream.
         PROBE=$(python3 - "$vid" "$TARGET_W" "$TARGET_H" <<'PY'
 import sys, subprocess, json
 try:
@@ -1518,6 +1593,7 @@ try:
         if 'rotation' in sd:
             rot = int(float(sd['rotation']))
     rot = ((rot % 360) + 360) % 360
+    # Effective dimensions are what the user sees AFTER ffmpeg auto-rotates.
     eff_w, eff_h = (h, w) if rot in (90, 270) else (w, h)
     if eff_h == 0:
         print("ERROR\t0"); sys.exit(0)
@@ -1542,12 +1618,25 @@ PY
             continue
         fi
 
+        # No transpose: ffmpeg's default -autorotate handles orientation for us
+        # using the display-matrix side data, so pixels arrive upright.
+        # Filter chain matches photo.lua's adaptive blur exactly: blur a cheap
+        # 640x360 downscale (σ=50) then upscale to the REAL display size; contain
+        # the sharp clip and center it over the blur. setsar=1 after each scale
+        # forces square pixels so a non-16:9 target (e.g. 32:9) isn't reinterpreted
+        # back to 16:9 by the encoder. The trailing stages bake in the SAME frosted
+        # subtitle panel photo.lua uses for images: the video behind the date/
+        # location text is gaussian-blurred + gently darkened with feathered edges,
+        # so videos get a live frosted-glass backdrop instead of a flat box.
         FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
 
         log "⚙ Optimizing: $filename (dur=${DURATION_S}s)"
         echo "$filename — starting..." > "$STATUS_FILE"
         rm -f "$STATUS_FILE.raw"
 
+        # </dev/null hard-disconnects stdin so ffmpeg can never drop into the
+        # interactive "Enter command:" mode. -map_metadata -1 + rotate=0 strips
+        # any stale rotation tags — pixels are already upright in the output.
         ffmpeg -nostdin -y -v error \
             -i "$vid" \
             -filter_complex "$FILTER" \
@@ -1559,6 +1648,8 @@ PY
             "$tmp_file" </dev/null 2>>"$LOG_FILE" &
         FFMPEG_PID=$!
 
+        # Progress watcher: reads -progress key=value output, writes percent
+        # to STATUS_FILE every 2s. Tail it with: watch -n1 cat ~/Screensaver-App/vid-status
         (
             while kill -0 "$FFMPEG_PID" 2>/dev/null; do
                 if [ -s "$STATUS_FILE.raw" ] && [ "$DURATION_S" -gt 0 ]; then
@@ -1622,6 +1713,11 @@ input-conf=~~/input.conf
 script=~~/photo.lua
 hwdec=auto-safe
 volume=70
+
+# Per-file video filters are now set dynamically by photo.lua (on_load), sized
+# to the REAL display so the blurred-fill background adapts to any aspect ratio.
+# Static vf profiles are intentionally omitted here — they would override the
+# adaptive filter and force a fixed 4K/16:9 canvas.
 EOF
 
 # =============================================================================
@@ -1637,6 +1733,7 @@ MUSIC_DIR="$HOME/Music/ScreenSaver"
 MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
 PLAYLIST="$HOME/Screensaver-App/config/playlist.m3u"
 
+# Non-fatal sanity check: if the HUD's core tool is missing, say so once.
 command -v exiftool >/dev/null 2>&1 || \
     echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
@@ -1667,14 +1764,33 @@ fi
 
 # =============================================================================
 # CHRONOLOGICAL PLAYLIST BUILDER
-# Rebuilds the playlist only if a media file is newer than the current playlist
+# Rebuilds the playlist only if a media file is newer than the current playlist.
+# Photos AND videos share ONE timeline, sorted strictly by capture date with no
+# regard to file type.
 # =============================================================================
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
-    
-    # Use -fast to correctly skip MakerNotes without skipping video moov atoms.
-    # Pulls DateTimeOriginal -> CreationDate -> CreateDate -> FileModifyDate -> Path
-    exiftool -fast -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreationDate -CreateDate -FileModifyDate -FilePath \
+
+    # IMPORTANT: do NOT use -fast/-fast2 here. This was the bug that pushed every
+    # video to the end of the list. In unprocessed MP4/MOV files the moov atom —
+    # which holds CreateDate — usually sits at the END of the file, so -fast2
+    # stops reading before it ever sees the timestamp. Every video then returned
+    # "-" for both date tags, hit the 99999999999999 fallback, and got dumped
+    # after all the photos. Reading the files normally costs a little more time
+    # but is the only way to pull video timestamps reliably.
+    #
+    # Date precedence is deliberately type-agnostic so stills and clips interleave
+    # on a single timeline:
+    #   DateTimeOriginal  — stills / EXIF (and Matroska DateUTC for mkv/webm)
+    #   CreateDate        — stills AND the standard MP4/MOV creation atom
+    #   MediaCreateDate   — QuickTime media-header fallback
+    #   TrackCreateDate   — QuickTime track-header fallback
+    #
+    # QuickTimeUTC=1 converts the UTC-stored QuickTime/MP4 atoms to local time so
+    # they line up against the local-time EXIF dates instead of drifting by the
+    # timezone offset (which would scramble the interleave by a few hours).
+    exiftool -api QuickTimeUTC=1 -T -d "%Y%m%d%H%M%S" \
+        -DateTimeOriginal -CreateDate -MediaCreateDate -TrackCreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
         "$MEDIA_DIR" 2>/dev/null | \
     awk -F'\t' '{
@@ -1682,11 +1798,11 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
         if (d == "-" || d == "") d = $2
         if (d == "-" || d == "") d = $3
         if (d == "-" || d == "") d = $4
-        # If absolutely no date is found, push to the absolute end of the playlist
+        # No usable timestamp anywhere -> send to the very end of the playlist.
         if (d == "-" || d == "") d = "99999999999999"
         print d "|" $5
     }' | sort -n | cut -d'|' -f2- > "$PLAYLIST.tmp"
-    
+
     mv "$PLAYLIST.tmp" "$PLAYLIST"
 fi
 
