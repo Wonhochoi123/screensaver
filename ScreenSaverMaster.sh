@@ -1771,7 +1771,7 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
     
     # Use -fast (not -fast2) so we don't skip the moov atom in MP4s where dates live.
     # Fallback chain: DateTimeOriginal -> CreationDate -> CreateDate -> ModifyDate -> FileModifyDate
-    exiftool -fast -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreationDate -CreateDate -ModifyDate -FileModifyDate -FilePath \
+    exiftool -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreationDate -CreateDate -ModifyDate -FileModifyDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
         "$MEDIA_DIR" 2>/dev/null | \
     awk -F'\t' '{
