@@ -7,11 +7,11 @@ set -u
 APP_DIR="$HOME/Screensaver-App"
 CFG="$APP_DIR/config"
 BASE_DIR="$HOME/Pictures/Screensavers"
-MEDIA_DIR="$BASE_DIR/Media"
-MAP_DIR="$BASE_DIR/Maps"
-OPT_DIR="$BASE_DIR/Optimized_Vids"
-MUSIC_DIR="$HOME/Music/ScreenSaver"
-TITLE_DIR="$APP_DIR/TitleCards"
+MEDIA_DIR="$APP_DIR/Data/Media"
+MAP_DIR="$APP_DIR/Data/Maps"
+OPT_DIR="$APP_DIR/Data/Optimized_Vids"
+MUSIC_DIR="$APP_DIR/Data/Music"
+TITLE_DIR="$APP_DIR/Data/TitleCards"
 
 echo "▶ Preparing strict folder architecture..."
 
