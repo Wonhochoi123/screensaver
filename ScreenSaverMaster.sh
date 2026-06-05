@@ -12,6 +12,7 @@ MAP_DIR="$APP_DIR/Data/Maps"
 OPT_DIR="$APP_DIR/Data/Optimized_Vids"
 MUSIC_DIR="$APP_DIR/Data/Music"
 TITLE_DIR="$APP_DIR/Data/TitleCards"
+PLAYLIST_DIR="$APP_DIR/Data/Playlist"
 
 echo "▶ Preparing strict folder architecture..."
 
@@ -26,8 +27,10 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
-mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
+# Create the new Data architecture including the Playlist folder
+mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
 
+# Migrate old paths to the new Data architecture if they exist
 if [ -d "$BASE_DIR/_map" ]; then
     mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
     rm -rf "$BASE_DIR/_map"
@@ -36,8 +39,12 @@ if [ -d "$BASE_DIR/optimized_vids" ]; then
     mv "$BASE_DIR/optimized_vids"/* "$OPT_DIR/" 2>/dev/null || true
     rm -rf "$BASE_DIR/optimized_vids"
 fi
-
+if [ -d "$BASE_DIR/Media" ]; then
+    find "$BASE_DIR/Media" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
+fi
+# Catch anything still sitting directly in the old BASE_DIR
 find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
+
 
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
@@ -163,7 +170,11 @@ local utils = require "mp.utils"
 local msg   = require "mp.msg"
 
 local APP_DIR    = (os.getenv("HOME") or "~") .. "/Screensaver-App"
-local BASE_DIR   = (os.getenv("HOME") or "~") .. "/Pictures/Screensavers"
+local DATA_DIR   = APP_DIR .. "/Data"
+local MEDIA_DIR  = DATA_DIR .. "/Media"
+local OPT_DIR    = DATA_DIR .. "/Optimized_Vids"
+local MAP_DIR    = DATA_DIR .. "/Maps"
+
 local builder    = APP_DIR .. "/config/build-minimap.sh"
 local AUDIO_SOCK = "/tmp/ss_audio.sock"
 
@@ -267,7 +278,6 @@ mp.add_hook("on_load", 10, function()
     local path = mp.get_property("stream-open-filename")
     if not path then return end
 
-    -- Turn off all filters so Cinematic Title Cards play cleanly in pure black
     if path:find("/TitleCards/") then
         mp.set_property("vf", "")
         return
@@ -279,7 +289,7 @@ mp.add_hook("on_load", 10, function()
         local dir, file = path:match("^(.-)/([^/]+)$")
         if dir and file and not dir:match("/Optimized_Vids$") then
             local base_name = file:match("(.+)%.[^%.]+$") or file
-            local opt_path = BASE_DIR .. "/Optimized_Vids/" .. base_name .. ".mp4"
+            local opt_path = OPT_DIR .. "/" .. base_name .. ".mp4"
             local fi = utils.file_info(opt_path)
             if fi and fi.size and fi.size > 0 then
                 mp.set_property("stream-open-filename", opt_path)
@@ -587,7 +597,7 @@ local function resolve_meta(orig_path, cb)
     local fi = utils.file_info(orig_path)
     if fi and fi.mtime then fallback_date = os.date("%b %d, %Y", fi.mtime) end
 
-    local mdir = BASE_DIR .. "/Maps"
+    local mdir = MAP_DIR
 
     mp.command_native_async({
         name = "subprocess", capture_stdout = true,
@@ -748,7 +758,7 @@ mp.register_event("file-loaded", function()
     if path:find("/Optimized_Vids/") then
         local orig_file = path:match("([^/]+)%.mp4$")
         if orig_file then
-            orig_path = BASE_DIR .. "/Media/" .. orig_file
+            orig_path = MEDIA_DIR .. "/" .. orig_file
         end
     end
 
@@ -758,7 +768,6 @@ mp.register_event("file-loaded", function()
     local my_seq = seq
     prewarmed[orig_path] = true
 
-    -- Fast fail out of map rendering if this is a Title Card
     if path:find("/TitleCards/") then
         return
     end
@@ -911,7 +920,7 @@ end)
 -- ----------------------------------------------------------------------------
 local function jump_month(direction)
     local pl = mp.get_property_native("playlist")
-    local pos = mp.get_property_number("playlist-pos") -- 0-based
+    local pos = mp.get_property_number("playlist-pos")
     if not pl or not pos then return end
     
     local current_idx = pos + 1
@@ -1084,18 +1093,15 @@ qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, border=0)
 qr.add_data(url); qr.make(fit=True)
 n = qr.modules_count
 
-# 1. Generate the QR code in pure BLACK so we can use it as a stencil (Alpha Mask)
 mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(0, 0, 0, 255))
 qr_img = qr.make_image(image_factory=StyledPilImage,
                        module_drawer=CircleModuleDrawer(),
                        color_mask=mask).convert("RGBA")
 
-# 2. Setup the final canvas (Solid white background disc)
 canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
 draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 255))    
 
-# 3. Setup a transparent "Pattern" layer to hold our black dots
 pattern = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 pdraw = ImageDraw.Draw(pattern)
 
@@ -1114,7 +1120,6 @@ first_mod_y = cy - half + (cell / 2.0)
 start_x = first_mod_x - (int(first_mod_x / cell) * cell)
 start_y = first_mod_y - (int(first_mod_y / cell) * cell)
 
-# Draw the outer decorative dots in pure BLACK onto the pattern layer
 yy = start_y
 while yy < D:
     xx = start_x
@@ -1127,18 +1132,14 @@ while yy < D:
         xx += cell
     yy += cell
 
-# Paste the black QR core onto the pattern layer
 pattern.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
 
-# 4. Create the Radial Gradient layer
 gradient = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 gdraw = ImageDraw.Draw(gradient)
 
-# Define the gradient colors (RGB)
-center_color = (130, 40, 180)  # Lighter purple (scannable)
-edge_color = (30, 0, 60)       # Deep, dark purple
+center_color = (130, 40, 180)
+edge_color = (30, 0, 60)
 
-# Draw concentric circles from the outside in
 for rad in range(int(R), 0, -1):
     ratio = rad / R
     ease = ratio ** 1.5 
@@ -1147,10 +1148,8 @@ for rad in range(int(R), 0, -1):
     b_col = int(center_color[2] + (edge_color[2] - center_color[2]) * ease)
     gdraw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=(r_col, g_col, b_col, 255))
 
-# 5. Apply the black pattern's alpha channel to the gradient
 gradient.putalpha(pattern.getchannel("A"))
 
-# 6. Composite the perfectly colored dots onto the white canvas
 canvas.alpha_composite(gradient)
 canvas.save(out_png)
 PY
@@ -1345,7 +1344,7 @@ echo "▶ Writing apply-overrides.sh..."
 cat > "$APP_DIR/apply-overrides.sh" << 'EOF'
 #!/bin/bash
 set -u
-PHOTO_DIR="${1:-$HOME/Pictures/Screensavers/Media}"
+PHOTO_DIR="${1:-$HOME/Screensaver-App/Data/Media}"
 KEEP_BACKUP="${KEEP_BACKUP:-1}"
 
 command -v exiftool >/dev/null 2>&1 || { echo "exiftool not installed"; exit 1; }
@@ -1500,7 +1499,7 @@ echo "▶ Writing exif-daemon.sh..."
 cat > "$APP_DIR/exif-daemon.sh" << 'EOF'
 #!/bin/bash
 set -u
-PHOTO_DIR="$HOME/Pictures/Screensavers/Media"
+PHOTO_DIR="$HOME/Screensaver-App/Data/Media"
 
 while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
 
@@ -1634,8 +1633,8 @@ echo "▶ Writing vid-daemon.sh..."
 cat > "$APP_DIR/vid-daemon.sh" << 'EOF'
 #!/bin/bash
 set -u
-MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
-OPT_DIR="$HOME/Pictures/Screensavers/Optimized_Vids"
+MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
+OPT_DIR="$HOME/Screensaver-App/Data/Optimized_Vids"
 LOG_FILE="$HOME/Screensaver-App/vid-daemon.log"
 STATUS_FILE="$HOME/Screensaver-App/vid-status"
 
@@ -1846,10 +1845,10 @@ cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
 pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 
 AUDIO_SOCK="/tmp/ss_audio.sock"
-MUSIC_DIR="$HOME/Music/ScreenSaver"
-MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
-PLAYLIST="$HOME/Screensaver-App/config/playlist.m3u"
-TITLE_DIR="$HOME/Screensaver-App/TitleCards"
+MUSIC_DIR="$HOME/Screensaver-App/Data/Music"
+MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
+PLAYLIST="$HOME/Screensaver-App/Data/Playlist/playlist.m3u"
+TITLE_DIR="$HOME/Screensaver-App/Data/TitleCards"
 
 command -v exiftool >/dev/null 2>&1 || \
     echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
@@ -1939,7 +1938,6 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
             fi
         fi
         
-        # Don't add a title tag directly to the photos, the title card handles the chapter marking
         echo "$PATH_STR" >> "$PLAYLIST.tmp"
     done < "$PLAYLIST.raw"
 
