@@ -168,11 +168,6 @@ LEFT  playlist-prev
 UP    script-message hud-zoom-in
 DOWN  script-message hud-zoom-out
 
-PGDWN script-message hud-next-month
-PGUP  script-message hud-prev-month
-END   script-message hud-next-year
-HOME  script-message hud-prev-year
-
 NEXT run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
 PREV run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
 ]    run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
@@ -194,7 +189,6 @@ local APP_DIR    = (os.getenv("HOME") or "~") .. "/Screensaver-App"
 local BASE_DIR   = (os.getenv("HOME") or "~") .. "/Pictures/Screensavers"
 local builder    = APP_DIR .. "/config/build-minimap.sh"
 local AUDIO_SOCK = "/tmp/ss_audio.sock"
-local DATES_FILE = APP_DIR .. "/config/playlist.dates"
 
 local ZOOMS        = {11, 14, 16}
 local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
@@ -206,7 +200,6 @@ pause_ov.res_x = 1920
 pause_ov.res_y = 1080
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
-local meas_ov      = mp.create_osd_overlay("ass-events")  -- hidden; used only to measure text bounds
 
 local seq       = 0
 local prewarmed = {}
@@ -635,28 +628,11 @@ local function build_all(lat, lon, w, h, mdir, cb, i)
     end)
 end
 
--- Parse a capture date from a YYYYMMDD_HHMMSS... filename (phone/export naming).
--- Mirrors the builder's filename fallback so the on-screen label matches the
--- order the playlist was sorted in. Returns a "%b %d, %Y" string or nil.
-local function date_from_filename(path)
-    local name = path:match("([^/]+)$") or path
-    local y, mo, d = name:match("^(%d%d%d%d)(%d%d)(%d%d)_%d%d%d%d%d%d")
-    if not y then return nil end
-    y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
-    if mo < 1 or mo > 12 or d < 1 or d > 31 then return nil end
-    local t = os.time{ year = y, month = mo, day = d, hour = 12 }
-    return t and os.date("%b %d, %Y", t) or nil
-end
-
 local function resolve_meta(orig_path, cb)
     local sc = parse_sidecar(orig_path)
-    -- Fallback date precedence: filename date (matches the playlist sort key)
-    -- first, then file mtime as a final resort.
-    local fallback_date = date_from_filename(orig_path)
-    if not fallback_date then
-        local fi = utils.file_info(orig_path)
-        if fi and fi.mtime then fallback_date = os.date("%b %d, %Y", fi.mtime) end
-    end
+    local fallback_date
+    local fi = utils.file_info(orig_path)
+    if fi and fi.mtime then fallback_date = os.date("%b %d, %Y", fi.mtime) end
 
     local mdir = BASE_DIR .. "/Maps"
 
@@ -779,170 +755,36 @@ mp.register_script_message("hud-zoom-out", function()
     show_current_zoom()
 end)
 
--- ----------------------------------------------------------------------------
--- Text measurement. mpv can return the libass bounding box of an OSD overlay
--- when compute_bounds is set; we render to a HIDDEN overlay purely to read the
--- pixel width/height of a string. Used to locate the clickable month/year
--- tokens inside the centered date label. If the mpv build doesn't return bounds
--- this just yields nil and the tokens fall back to not being clickable — the
--- keyboard shortcuts still work either way.
--- ----------------------------------------------------------------------------
-local function measure_text(win_w, win_h, fs, fontname, s)
-    if not s or s == "" then return 0, 0 end
-    meas_ov.res_x = win_w
-    meas_ov.res_y = win_h
-    meas_ov.hidden = true
-    meas_ov.compute_bounds = true
-    meas_ov.data = string.format("{\\an7\\pos(0,0)\\fn%s\\fs%d\\bord1\\shad2}%s", fontname, fs, s)
-    local ok, r = pcall(function() return meas_ov:update() end)
-    if ok and r and r.x1 and r.x0 then
-        return (r.x1 - r.x0), ((r.y1 or 0) - (r.y0 or 0))
-    end
-    return nil, nil
-end
-
--- ----------------------------------------------------------------------------
--- Month / year navigation across the chronologically sorted playlist.
---
--- mpv "chapters" are per-FILE (timestamps inside one clip) and don't span a
--- playlist, so they can't express "next month" across separate photos. Instead
--- we use the playlist itself: launch.sh writes config/playlist.dates as
--- DATE<TAB>PATH from the exact same sort that produced the .m3u, so the order
--- lines up 1:1. We group consecutive entries into months and years (the list is
--- already ascending) and step between each group's FIRST entry, wrapping at the
--- ends. "Current month" is taken from the playlist index, never from the on-
--- screen label, so jumping stays consistent with playback order.
--- ----------------------------------------------------------------------------
-local date_by_path = {}
-local idx_dates    = {}
-
-local function load_date_index()
-    date_by_path = {}
-    idx_dates    = {}
-    local f = io.open(DATES_FILE, "r")
-    if not f then return end
-    for line in f:lines() do
-        local d, p = line:match("^(%S+)\t(.+)$")
-        if d and p then
-            idx_dates[#idx_dates + 1] = d
-            date_by_path[p] = d
-        end
-    end
-    f:close()
-end
-
-local NAV = { built = false, count = -1 }
-
-local function build_nav()
-    local n = mp.get_property_number("playlist-count") or 0
-    if next(date_by_path) == nil and #idx_dates == 0 then load_date_index() end
-
-    local pos_date = {}
-    local months, years = {}, {}
-    local month_first, year_first = {}, {}
-    local month_index, year_index = {}, {}
-    local seen_m, seen_y = {}, {}
-
-    for i = 0, n - 1 do
-        local fn = mp.get_property("playlist/" .. i .. "/filename")
-        -- Path lookup is primary (robust if mpv skips an unreadable file);
-        -- positional is the fallback (guaranteed-aligned same-sort order).
-        local d  = (fn and date_by_path[fn]) or idx_dates[i + 1] or "99999999999999"
-        pos_date[i + 1] = d
-        local mk = d:sub(1, 6)   -- YYYYMM
-        local yk = d:sub(1, 4)   -- YYYY
-        if not seen_m[mk] then
-            seen_m[mk] = true
-            months[#months + 1] = mk
-            month_first[mk] = i
-            month_index[mk] = #months
-        end
-        if not seen_y[yk] then
-            seen_y[yk] = true
-            years[#years + 1] = yk
-            year_first[yk] = i
-            year_index[yk] = #years
-        end
-    end
-
-    NAV = {
-        built = true, count = n, pos_date = pos_date,
-        months = months, month_first = month_first, month_index = month_index,
-        years  = years,  year_first  = year_first,  year_index  = year_index,
-    }
-end
-
-local function ensure_nav()
-    local n = mp.get_property_number("playlist-count") or 0
-    if (not NAV.built) or NAV.count ~= n then build_nav() end
-end
-
--- kind = "month" | "year"; delta = +1 (next) or -1 (prev). Cycles at the ends.
-local function jump_group(kind, delta)
-    ensure_nav()
-    local list  = (kind == "year") and NAV.years      or NAV.months
-    local first = (kind == "year") and NAV.year_first  or NAV.month_first
-    local imap  = (kind == "year") and NAV.year_index  or NAV.month_index
-    if not list or #list == 0 then return end
-
-    local pos = mp.get_property_number("playlist-pos") or 0
-    local d   = NAV.pos_date[pos + 1] or "99999999999999"
-    local key = (kind == "year") and d:sub(1, 4) or d:sub(1, 6)
-    local idx = imap[key]
-    if not idx then return end
-
-    local ni     = ((idx - 1 + delta) % #list) + 1
-    local target = first[list[ni]]
-    if target and target ~= pos then
-        mp.set_property_number("playlist-pos", target)
-    end
-end
-
-mp.register_script_message("hud-next-month", function() jump_group("month",  1) end)
-mp.register_script_message("hud-prev-month", function() jump_group("month", -1) end)
-mp.register_script_message("hud-next-year",  function() jump_group("year",   1) end)
-mp.register_script_message("hud-prev-year",  function() jump_group("year",  -1) end)
-
-local function pt_in(m, b)
-    return b ~= nil and m.x >= b.x0 and m.x <= b.x1 and m.y >= b.y0 and m.y <= b.y1
-end
-
 mp.register_script_message("handle-left-click", function()
-    local mouse = mp.get_property_native("mouse-pos")
-    if not mouse then
+    if not (cur.lat and cur.lon) then
         mp.command("script-message ss-toggle-pause")
         return
     end
 
-    -- Date-label tokens are clickable whether or not the photo has GPS:
-    --   month value -> next month (same as PgDn)
-    --   year  value -> next year  (same as End)
-    if pt_in(mouse, cur.month_box) then jump_group("month", 1); return end
-    if pt_in(mouse, cur.year_box)  then jump_group("year",  1); return end
+    local mouse = mp.get_property_native("mouse-pos")
+    if not mouse then return end
 
-    if cur.lat and cur.lon then
-        local L = hud_geom()
-        local in_qr = (mouse.x >= L.qr_x) and (mouse.x <= L.qr_x + L.S) and
-                      (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
-        local in_map = (mouse.x >= L.map_x) and (mouse.x <= L.map_x + L.S) and
-                       (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
+    local L = hud_geom()
+    local in_qr = (mouse.x >= L.qr_x) and (mouse.x <= L.qr_x + L.S) and
+                  (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
+    local in_map = (mouse.x >= L.map_x) and (mouse.x <= L.map_x + L.S) and
+                   (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
 
-        if in_qr then
-            local url = string.format("https://www.google.com/maps/?q=%.6f,%.6f", cur.lat, cur.lon)
-            mp.command_native_async({
-                name = "subprocess",
-                args = {"xdg-open", url}
-            }, function() end)
-            return
-        elseif in_map then
-            cur.auto = false
-            cur.zidx = (cur.zidx % #ZOOMS) + 1
-            show_current_zoom()
-            return
-        end
+    if in_qr then
+        local url = string.format("https://www.google.com/maps/?q=%.6f,%.6f", cur.lat, cur.lon)
+        mp.command_native_async({
+            name = "subprocess",
+            args = {"xdg-open", url}
+        }, function() end)
+
+    elseif in_map then
+        cur.auto = false
+        cur.zidx = (cur.zidx % #ZOOMS) + 1
+        show_current_zoom()
+
+    else
+        mp.command("script-message ss-toggle-pause")
     end
-
-    mp.command("script-message ss-toggle-pause")
 end)
 
 mp.register_event("file-loaded", function()
@@ -1004,9 +846,6 @@ mp.register_event("file-loaded", function()
             elseif d then text = d
             elseif location ~= "" then text = location end
 
-            cur.month_box = nil
-            cur.year_box  = nil
-
             if text == "" then ov:remove(); return end
 
             local L  = hud_geom()
@@ -1020,35 +859,6 @@ mp.register_event("file-loaded", function()
                 "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord1\\3c&H000000&\\shad2\\4c&H000000&}%s",
                 cx, baseline, fs, text)
             ov:update()
-
-            -- Locate the month + year tokens within the centered date label so
-            -- they can be clicked (month -> next month, year -> next year). The
-            -- date is the leftmost part of the line; the year is its rightmost
-            -- token, so: left edge = cx - width(whole line)/2, the date span ends
-            -- at left + width(date), and the year sits flush against that end.
-            if d then
-                local mon  = d:match("^%s*(%a+)")
-                local year = d:match("(%d%d%d%d)")
-                if mon and year then
-                    local FN = "Montserrat ExtraBold"
-                    local w_full, h_full = measure_text(L.win_w, L.win_h, fs, FN, text)
-                    local w_date         = measure_text(L.win_w, L.win_h, fs, FN, d)
-                    local w_mon          = measure_text(L.win_w, L.win_h, fs, FN, mon)
-                    local w_year         = measure_text(L.win_w, L.win_h, fs, FN, year)
-                    meas_ov:remove()
-                    if w_full and h_full and w_date and w_mon and w_year then
-                        local left = cx - w_full / 2
-                        local pad  = math.floor(fs * 0.30)
-                        local top  = baseline - h_full / 2 - pad
-                        local bot  = baseline + h_full / 2 + pad
-                        cur.month_box = { x0 = left - pad, x1 = left + w_mon + pad,
-                                          y0 = top, y1 = bot }
-                        local yr_x1 = left + w_date
-                        cur.year_box  = { x0 = yr_x1 - w_year - pad, x1 = yr_x1 + pad,
-                                          y0 = top, y1 = bot }
-                    end
-                end
-            end
         end
         draw_text()
 
@@ -1922,7 +1732,6 @@ AUDIO_SOCK="/tmp/ss_audio.sock"
 MUSIC_DIR="$HOME/Music/ScreenSaver"
 MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
 PLAYLIST="$HOME/Screensaver-App/config/playlist.m3u"
-DATES="$HOME/Screensaver-App/config/playlist.dates"
 
 # Non-fatal sanity check: if the HUD's core tool is missing, say so once.
 command -v exiftool >/dev/null 2>&1 || \
@@ -1955,12 +1764,11 @@ fi
 
 # =============================================================================
 # CHRONOLOGICAL PLAYLIST BUILDER
-# Rebuilds when the playlist OR its date index is MISSING-OR-EMPTY (-s, not -f:
-# an empty file must never be accepted as a valid cached playlist), or when any
-# media file is newer than the current playlist. Photos AND videos share ONE
-# timeline, sorted strictly by capture date with no regard to file type.
+# Rebuilds the playlist only if a media file is newer than the current playlist.
+# Photos AND videos share ONE timeline, sorted strictly by capture date with no
+# regard to file type.
 # =============================================================================
-if [ ! -s "$PLAYLIST" ] || [ ! -s "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
+if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
 
     # IMPORTANT: do NOT use -fast/-fast2 here. This was the bug that pushed every
@@ -1981,13 +1789,6 @@ if [ ! -s "$PLAYLIST" ] || [ ! -s "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxde
     # QuickTimeUTC=1 converts the UTC-stored QuickTime/MP4 atoms to local time so
     # they line up against the local-time EXIF dates instead of drifting by the
     # timezone offset (which would scramble the interleave by a few hours).
-    #
-    # The sorted "DATE|PATH" stream is emitted ONCE to a temp file, then split two
-    # ways from that single source so the two outputs stay perfectly aligned:
-    #   playlist.m3u    — PATHs only, what mpv plays (chronological)
-    #   playlist.dates  — DATE<TAB>PATH in the SAME order, the index photo.lua
-    #                     uses to step between months/years (PgUp/PgDn/Home/End).
-    COMBINED="$PLAYLIST.combined.tmp"
     exiftool -api QuickTimeUTC=1 -T -d "%Y%m%d%H%M%S" \
         -DateTimeOriginal -CreateDate -MediaCreateDate -TrackCreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
@@ -1997,53 +1798,12 @@ if [ ! -s "$PLAYLIST" ] || [ ! -s "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxde
         if (d == "-" || d == "") d = $2
         if (d == "-" || d == "") d = $3
         if (d == "-" || d == "") d = $4
-        # Last resort before giving up: phones/exports commonly name files
-        # YYYYMMDD_HHMMSS... — pull the date straight from the filename so EXIF-
-        # less shots (screenshots, edited exports) still sort chronologically and
-        # stay in their real month/year group instead of piling up at the end.
-        if (d == "-" || d == "") {
-            n = $5; sub(/.*\//, "", n)
-            ymd = substr(n, 1, 8); sep = substr(n, 9, 1); hms = substr(n, 10, 6)
-            ok1 = (ymd ~ /^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$/)
-            ok2 = (hms ~ /^[0-9][0-9][0-9][0-9][0-9][0-9]$/)
-            if (ok1 && sep == "_" && ok2) d = ymd hms
-        }
-        # Still nothing usable -> send to the very end of the playlist.
+        # No usable timestamp anywhere -> send to the very end of the playlist.
         if (d == "-" || d == "") d = "99999999999999"
         print d "|" $5
-    }' | sort -n > "$COMBINED"
+    }' | sort -n | cut -d'|' -f2- > "$PLAYLIST.tmp"
 
-    # GUARD: if exiftool found nothing, do NOT install an empty playlist — that
-    # would get cached and silently skip every future rebuild. Leave the old
-    # playlist (if any) untouched and tell the user exactly what to fix.
-    if [ ! -s "$COMBINED" ]; then
-        echo "⚠ No media found in: $MEDIA_DIR"
-        echo "  Add photos/videos there (jpg/jpeg/png/webp/mp4/mkv/mov/m4v/webm) and relaunch."
-        echo "  (If your files are loose in ~/Pictures/Screensavers/, re-run setup-screensaver.sh"
-        echo "   once — it migrates them into Media/.)"
-        rm -f "$COMBINED"
-    else
-        # Paths for mpv. cut -f2- keeps everything after the first '|', so a path
-        # that itself contains '|' survives intact (the date field never does).
-        cut -d'|' -f2- "$COMBINED" > "$PLAYLIST.tmp"
-
-        # Date index for photo.lua: DATE<TAB>PATH. index($0,"|") finds the FIRST
-        # '|' only, so again paths containing '|' are preserved.
-        awk -F'|' 'BEGIN{OFS="\t"} { d=$1; p=substr($0, index($0,"|")+1); print d, p }' \
-            "$COMBINED" > "$DATES.tmp"
-
-        mv "$PLAYLIST.tmp" "$PLAYLIST"
-        mv "$DATES.tmp" "$DATES"
-        rm -f "$COMBINED"
-        echo "▶ Playlist compiled: $(wc -l < "$PLAYLIST") item(s)."
-    fi
-fi
-
-# Final guard: never hand mpv an empty/missing playlist (it would just print its
-# usage screen and quit). Fail loudly with the cause instead.
-if [ ! -s "$PLAYLIST" ]; then
-    echo "❌ Playlist is empty — no playable media in $MEDIA_DIR. Aborting."
-    exit 1
+    mv "$PLAYLIST.tmp" "$PLAYLIST"
 fi
 
 # Launch mpv using the generated chronological playlist
