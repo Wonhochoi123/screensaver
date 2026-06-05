@@ -150,12 +150,12 @@ fi
 # =============================================================================
 echo "▶ Writing input.conf..."
 cat > "$CFG/input.conf" << 'EOF'
-MBTN_LEFT    script-message handle-left-click
-MBTN_RIGHT   quit
-WHEEL_UP     quit
-WHEEL_DOWN   quit
-ESC          quit
-q            quit
+MBTN_LEFT   script-message handle-left-click
+MBTN_RIGHT  quit
+WHEEL_UP    quit
+WHEEL_DOWN  quit
+ESC         quit
+q           quit
 
 SPACE      script-message ss-toggle-pause
 PLAY       script-message ss-toggle-pause
@@ -211,7 +211,7 @@ local MONTHS = {jan=1,feb=2,mar=3,apr=4,may=5,jun=6,jul=7,aug=8,sep=9,oct=10,nov
 -- Display-size detection (adapts the screensaver to ANY resolution / aspect)
 -- ----------------------------------------------------------------------------
 local DISPLAY_W, DISPLAY_H = nil, nil
-local BLUR_W, BLUR_H = nil, nil   -- dimensions of the blur filter currently applied
+local BLUR_W, BLUR_H, BLUR_ROT = nil, nil, nil
 
 local function refresh_display_size()
     -- display-width/height = the physical monitor the window is on (best).
@@ -234,6 +234,24 @@ local function refresh_display_size()
     return DISPLAY_W or 1920, DISPLAY_H or 1080  -- 1080p only until first real read
 end
 
+-- Safely read the rotation metadata mpv is planning to apply
+local function get_video_rotation()
+    local rot = mp.get_property_number("video-params/rotate")
+    if not rot then
+        local tracks = mp.get_property_native("track-list")
+        if tracks then
+            for _, t in ipairs(tracks) do
+                if t.type == "video" and t.selected then
+                    rot = t["demux-rotation"]
+                    break
+                end
+            end
+        end
+    end
+    rot = rot or 0
+    return ((rot % 360) + 360) % 360
+end
+
 local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
                    tif=true, tiff=true, gif=true, jfif=true}
 
@@ -244,6 +262,17 @@ local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
 -- (16:9, 16:10, 21:9, 4:3, portrait, ...).
 local function apply_image_blur_vf()
     local w, h = refresh_display_size()
+    local rot = get_video_rotation()
+    
+    -- Keep track of the unswapped sizes to avoid infinite loops
+    BLUR_W, BLUR_H, BLUR_ROT = w, h, rot
+
+    -- If mpv is going to rotate the frame 90 or 270 degrees, we pre-swap the filter 
+    -- canvas dimensions so it rotates cleanly into the correct horizontal layout.
+    if rot == 90 or rot == 270 then
+        w, h = h, w
+    end
+
     local vf = string.format(
         "lavfi=[split[bg][fg];" ..
         "[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d,setsar=1[b];" ..
@@ -251,7 +280,6 @@ local function apply_image_blur_vf()
         "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1]",
         w, h, w, h)
     mp.set_property("vf", vf)
-    BLUR_W, BLUR_H = w, h
 end
 
 -- ----------------------------------------------------------------------------
@@ -764,13 +792,15 @@ mp.register_event("file-loaded", function()
     local w, h, win_w, win_h = L.S, L.S, L.win_w, L.win_h
 
     -- get_hud_size just refreshed the real display size. If this is an image and
-    -- the blur was applied at a different (fallback) size during on_load, redo it
-    -- now at the correct full-screen dimensions. No-op on every later image, so
-    -- there's no per-slide flicker — only the first image can ever re-trigger.
+    -- the blur was applied at a different (fallback) size OR incorrect rotation 
+    -- during on_load, redo it now at the correct full-screen dimensions.
     do
         local pext = (path:match("%.([^%.]+)$") or ""):lower()
-        if image_ext[pext] and DISPLAY_W and (BLUR_W ~= DISPLAY_W or BLUR_H ~= DISPLAY_H) then
-            apply_image_blur_vf()
+        if image_ext[pext] and DISPLAY_W then
+            local current_rot = get_video_rotation()
+            if BLUR_W ~= DISPLAY_W or BLUR_H ~= DISPLAY_H or BLUR_ROT ~= current_rot then
+                apply_image_blur_vf()
+            end
         end
     end
 
@@ -1374,21 +1404,6 @@ while true; do
         fi
 
         [ -z "$media_file" ] && continue
-        
-        # --- NEW: Auto-orient anomalous EXIF rotations ---
-        if [ "${ext,,}" = "jpg" ] || [ "${ext,,}" = "jpeg" ]; then
-            # Check if Orientation exists and is NOT 1 (Normal)
-            ORIENT=$(exiftool -s -s -s -Orientation -n "$media_file" 2>/dev/null)
-            if [ -n "$ORIENT" ] && [ "$ORIENT" -ne 1 ]; then
-                if command -v magick >/dev/null 2>&1; then
-                    magick mogrify -auto-orient "$media_file"
-                    touch "$media_file" # Update timestamp so mpv picks up the change
-                fi
-            fi
-        fi
-        # -------------------------------------------------
-        
-        
 
         if [ "$txt_file" -nt "$media_file" ]; then
             IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$txt_file")
