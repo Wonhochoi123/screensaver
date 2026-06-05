@@ -1,7 +1,6 @@
 #!/bin/bash
 # =============================================================================
 #  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
-#  Dependencies are installed in ONE transaction and then VERIFIED.
 # =============================================================================
 set -u
 
@@ -12,6 +11,7 @@ MEDIA_DIR="$BASE_DIR/Media"
 MAP_DIR="$BASE_DIR/Maps"
 OPT_DIR="$BASE_DIR/Optimized_Vids"
 MUSIC_DIR="$HOME/Music/ScreenSaver"
+TITLE_DIR="$APP_DIR/TitleCards"
 
 echo "▶ Preparing strict folder architecture..."
 
@@ -26,7 +26,7 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
-mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
+mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
 
 if [ -d "$BASE_DIR/_map" ]; then
     mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
@@ -39,15 +39,11 @@ fi
 
 find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
-
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
-#    Done first so a missing tool is reported loudly before anything else.
 # =============================================================================
 echo "▶ Resolving and installing dependencies..."
 
-# Runtime tools the app actually calls. ImageMagick (magick OR convert) is
-# checked separately below since either binary satisfies it.
 REQUIRED_CMDS=(mpv exiftool python3 curl qrencode ffmpeg socat playerctl pactl fc-match)
 
 detect_pm() {
@@ -80,14 +76,11 @@ case "$PM" in
     ;;
   *)
     echo "⚠ No supported package manager (dnf/apt/pacman/zypper) found."
-    echo "  Install manually: mpv exiftool imagemagick python3 curl qrencode ffmpeg socat playerctl pactl fontconfig"
     ;;
 esac
 
 if [ -n "$INSTALL" ]; then
     echo "▶ Using ${PM}: installing all packages in one go..."
-    echo "  $PKGS"
-    # NOTE: errors are intentionally NOT hidden. If install fails, you see why.
     $INSTALL $PKGS || echo "⚠ Package manager reported errors — verifying what actually landed below."
 fi
 
@@ -108,22 +101,6 @@ else
     MISSING+=("ImageMagick")
 fi
 
-if [ "${#MISSING[@]}" -gt 0 ]; then
-    echo ""
-    echo "❌ Missing: ${MISSING[*]}"
-    echo "   Slideshow will still play, but the date/location HUD and minimaps"
-    echo "   depend on: exiftool, ImageMagick, qrencode, curl, python3."
-    echo "   Install the missing tools, then re-run this script."
-    echo ""
-else
-    echo "✅ All runtime tools present."
-fi
-
-# Fonts (independent of package install). The old google/fonts static URLs now
-# 404 because Montserrat ships as a variable font, which neither libass nor
-# ImageMagick weight-select reliably — so we pull STATIC weights from the
-# official designer's repo: ExtraBold for the date/location label, SemiBold for
-# the map/QR coordinate strips.
 FONT_DIR="$HOME/.local/share/fonts"
 FONT_BASE="https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf"
 got_font=0
@@ -134,13 +111,10 @@ for w in ExtraBold SemiBold; do
         echo "⚠ Could not fetch Montserrat-$w."
     fi
 done
-# Clean up any zero-byte leftovers from the previously-broken download.
 find "$FONT_DIR" -name 'Montserrat-*.ttf' -size 0 -delete 2>/dev/null || true
 if [ "$got_font" = 1 ]; then
     fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
     echo "▶ Montserrat fonts installed (ExtraBold + SemiBold)."
-else
-    echo "⚠ Montserrat unavailable — text will fall back to a system sans."
 fi
 
 # =============================================================================
@@ -210,9 +184,6 @@ local cur       = { seq = 0, path = nil, orig = nil, lat = nil, lon = nil, mdir 
 
 local MONTHS = {jan=1,feb=2,mar=3,apr=4,may=5,jun=6,jul=7,aug=8,sep=9,oct=10,nov=11,dec=12}
 
--- ----------------------------------------------------------------------------
--- Display-size detection (adapts the screensaver to ANY resolution / aspect)
--- ----------------------------------------------------------------------------
 local DISPLAY_W, DISPLAY_H = nil, nil
 local BLUR_W, BLUR_H, BLUR_ROT = nil, nil, nil
 
@@ -295,6 +266,12 @@ local is_video = {mp4=true, mkv=true, mov=true, m4v=true, webm=true}
 mp.add_hook("on_load", 10, function()
     local path = mp.get_property("stream-open-filename")
     if not path then return end
+
+    -- Turn off all filters so Cinematic Title Cards play cleanly in pure black
+    if path:find("/TitleCards/") then
+        mp.set_property("vf", "")
+        return
+    end
 
     local ext = (path:match("%.([^%.]+)$") or ""):lower()
 
@@ -781,6 +758,11 @@ mp.register_event("file-loaded", function()
     local my_seq = seq
     prewarmed[orig_path] = true
 
+    -- Fast fail out of map rendering if this is a Title Card
+    if path:find("/TitleCards/") then
+        return
+    end
+
     local L = hud_geom()
     local w, h, win_w, win_h = L.S, L.S, L.win_w, L.win_h
 
@@ -932,12 +914,11 @@ local function jump_month(direction)
     local pos = mp.get_property_number("playlist-pos") -- 0-based
     if not pl or not pos then return end
     
-    local current_idx = pos + 1 -- 1-based Lua table index
+    local current_idx = pos + 1
     local current_title = pl[current_idx].title or ""
     local target_idx = nil
     
     if direction > 0 then
-        -- Forward: Find first item with a different month title
         for i = current_idx + 1, #pl do
             local t = pl[i].title
             if t and t ~= "" and t ~= current_title and t ~= "Unknown Date" then
@@ -946,7 +927,6 @@ local function jump_month(direction)
             end
         end
     else
-        -- Backward: Find the title of the previous month
         local prev_title = nil
         local scan_idx = current_idx - 1
         while scan_idx >= 1 do
@@ -957,8 +937,6 @@ local function jump_month(direction)
             end
             scan_idx = scan_idx - 1
         end
-        
-        -- Backtrack to the VERY FIRST item of that previous month
         if prev_title then
             target_idx = scan_idx
             while target_idx > 1 do
@@ -968,7 +946,7 @@ local function jump_month(direction)
                 target_idx = target_idx - 1
             end
         else
-            target_idx = 1 -- Just jump to the very beginning if no previous month exists
+            target_idx = 1
         end
     end
     
@@ -989,13 +967,12 @@ mp.register_script_message("month-prev", function() jump_month(-1) end)
 -- ----------------------------------------------------------------------------
 local function extract_year(title)
     if not title or title == "" or title == "Unknown Date" then return nil end
-    -- Grabs the 4-digit year at the end of titles like "April 2022"
     return title:match("(%d%d%d%d)$")
 end
 
 local function jump_year(direction)
     local pl = mp.get_property_native("playlist")
-    local pos = mp.get_property_number("playlist-pos") -- 0-based
+    local pos = mp.get_property_number("playlist-pos")
     if not pl or not pos then return end
     
     local current_idx = pos + 1
@@ -1004,7 +981,6 @@ local function jump_year(direction)
     local target_idx = nil
     
     if direction > 0 then
-        -- Forward: Find first item with a different year
         for i = current_idx + 1, #pl do
             local t = pl[i].title or ""
             local y = extract_year(t)
@@ -1014,7 +990,6 @@ local function jump_year(direction)
             end
         end
     else
-        -- Backward: Find the year of the previous year block
         local prev_year = nil
         local scan_idx = current_idx - 1
         while scan_idx >= 1 do
@@ -1026,8 +1001,6 @@ local function jump_year(direction)
             end
             scan_idx = scan_idx - 1
         end
-        
-        -- Backtrack to the VERY FIRST item of that previous year
         if prev_year then
             target_idx = scan_idx
             while target_idx > 1 do
@@ -1038,7 +1011,7 @@ local function jump_year(direction)
                 target_idx = target_idx - 1
             end
         else
-            target_idx = 1 -- Jump to start if no previous year exists
+            target_idx = 1
         end
     end
     
@@ -1092,7 +1065,7 @@ if [ "$need_qr" = 1 ]; then
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
 
     STYLED=0
-if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
+    if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
 import sys, random
 try:
     import qrcode
@@ -1162,24 +1135,19 @@ gradient = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 gdraw = ImageDraw.Draw(gradient)
 
 # Define the gradient colors (RGB)
-center_color = (130, 40, 180)  # Lighter purple (dark enough to easily scan)
+center_color = (130, 40, 180)  # Lighter purple (scannable)
 edge_color = (30, 0, 60)       # Deep, dark purple
 
-# Draw concentric circles from the outside in to build a smooth gradient
+# Draw concentric circles from the outside in
 for rad in range(int(R), 0, -1):
     ratio = rad / R
-    # Apply a slight easing curve so the center stays lighter longer, 
-    # then quickly darkens at the extreme edges for the 3D effect.
     ease = ratio ** 1.5 
-    
     r_col = int(center_color[0] + (edge_color[0] - center_color[0]) * ease)
     g_col = int(center_color[1] + (edge_color[1] - center_color[1]) * ease)
     b_col = int(center_color[2] + (edge_color[2] - center_color[2]) * ease)
-    
     gdraw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=(r_col, g_col, b_col, 255))
 
-# 5. The Magic Trick: Apply the black pattern's alpha channel to the gradient.
-# This makes the entire gradient transparent EXCEPT where a dot exists.
+# 5. Apply the black pattern's alpha channel to the gradient
 gradient.putalpha(pattern.getchannel("A"))
 
 # 6. Composite the perfectly colored dots onto the white canvas
@@ -1302,6 +1270,73 @@ fi
 exit 0
 EOF
 chmod +x "$CFG/build-minimap.sh"
+
+# =============================================================================
+# 3b. build-title.sh (Animated Cinematic Title Generator)
+# =============================================================================
+echo "▶ Writing build-title.sh..."
+cat > "$CFG/build-title.sh" << 'EOF'
+#!/bin/bash
+set -u
+YEAR="$1"
+MONTH="$2"
+OUT_FILE="$3"
+TMP_ASS="/tmp/title_$$.ass"
+
+python3 - "$YEAR" "$MONTH" "$TMP_ASS" <<'PY'
+import sys, random
+year, month, out_ass = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# Create wide spaced blocks automatically with ASS \fsp tags
+tokens = ["{\\fs50\\fsp40}"] + list(year) + ["\\N", "\\N", "{\\fs120\\fsp50}"] + list(month.upper())
+target_indices = [i for i, t in enumerate(tokens) if not t.startswith("{") and t != "\\N"]
+
+ass_header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Montserrat ExtraBold,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+lines = []
+random.seed(year + month)
+
+for target_i in target_indices:
+    start_t = random.randint(100, 1500)
+    end_t = start_t + random.randint(500, 800)
+    
+    line_str = ""
+    for i, t in enumerate(tokens):
+        if t.startswith("{") or t == "\\N":
+            line_str += t
+        elif i == target_i:
+            line_str += f"{{\\alpha&HFF&\\t({start_t},{end_t},\\alpha&H00&)}}{t}{{\\alpha&HFF&}}"
+        else:
+            line_str += f"{{\\alpha&HFF&}}{t}{{\\alpha&HFF&}}"
+    
+    lines.append(f"Dialogue: 0,00:00:00.00,00:00:04.00,Default,,0,0,0,,{{\\an5\\pos(960,540)}}{line_str}")
+
+with open(out_ass, "w") as f:
+    f.write(ass_header)
+    f.write("\n".join(lines))
+PY
+
+# Render the ASS file directly into an mp4 on a black background
+ffmpeg -v error -nostdin -y \
+    -f lavfi -i color=c=black:s=1920x1080:d=4 \
+    -f lavfi -i anullsrc=r=44100:cl=stereo:d=4 \
+    -vf "ass='${TMP_ASS}':fontsdir='$HOME/.local/share/fonts',fade=t=out:st=3.2:d=0.8" \
+    -c:v libx264 -preset fast -crf 22 -c:a aac -shortest "$OUT_FILE"
+
+rm -f "$TMP_ASS"
+EOF
+chmod +x "$CFG/build-title.sh"
 
 # =============================================================================
 # 4. apply-overrides.sh 
@@ -1800,11 +1835,6 @@ input-conf=~~/input.conf
 script=~~/photo.lua
 hwdec=auto-safe
 volume=70
-
-# Per-file video filters are now set dynamically by photo.lua (on_load), sized
-# to the REAL display so the blurred-fill background adapts to any aspect ratio.
-# Static vf profiles are intentionally omitted here — they would override the
-# adaptive filter and force a fixed 4K/16:9 canvas.
 EOF
 
 # =============================================================================
@@ -1819,8 +1849,8 @@ AUDIO_SOCK="/tmp/ss_audio.sock"
 MUSIC_DIR="$HOME/Music/ScreenSaver"
 MEDIA_DIR="$HOME/Pictures/Screensavers/Media"
 PLAYLIST="$HOME/Screensaver-App/config/playlist.m3u"
+TITLE_DIR="$HOME/Screensaver-App/TitleCards"
 
-# Non-fatal sanity check: if the HUD's core tool is missing, say so once.
 command -v exiftool >/dev/null 2>&1 || \
     echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
@@ -1850,15 +1880,11 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
 fi
 
 # =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER (EXTM3U Chapters)
+# CHRONOLOGICAL PLAYLIST BUILDER (With Animated Title Cards)
 # =============================================================================
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
-    
-    # Clean up the old title cards if they exist
-    rm -rf "$HOME/Screensaver-App/TitleCards" 2>/dev/null || true
 
-    # Extract dates and file paths
     exiftool -fast -T -d "%Y%m%d%H%M%S" \
         -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
@@ -1871,7 +1897,6 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
         
         path = $5
         
-        # Filename fallback if EXIF is completely missing
         if (d == "-" || d == "") {
             if (match(path, /([0-9]{8}_[0-9]{6})/)) {
                 d = substr(path, RSTART, 15)
@@ -1886,23 +1911,35 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
         print d "|" path
     }' | sort -n > "$PLAYLIST.raw"
 
-    # Build the EXTM3U file with month/year chapter tags
     echo "#EXTM3U" > "$PLAYLIST.tmp"
     declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
+
+    LAST_YM=""
 
     while IFS='|' read -r D PATH_STR; do
         TITLE="Unknown Date"
         if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
-            Y="${D:0:4}"
-            M="${D:4:2}"
-            M_NAME="${M_NAMES[$M]}"
-            if [ -n "$M_NAME" ]; then
-                TITLE="$M_NAME $Y"
+            YM="${D:0:6}"
+            if [[ "$YM" != "$LAST_YM" ]]; then
+                LAST_YM="$YM"
+                Y="${YM:0:4}"
+                M="${YM:4:2}"
+                M_NAME="${M_NAMES[$M]}"
+                
+                if [ -n "$M_NAME" ]; then
+                    CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
+                    if [ ! -f "$CARD_PATH" ]; then
+                        echo "  🎬 Generating Animated Title Card: $M_NAME $Y..."
+                        "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
+                    fi
+                    
+                    echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
+                    [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
+                fi
             fi
         fi
         
-        # Inject the invisible title tag for mpv to read as a chapter name
-        echo "#EXTINF:-1,$TITLE" >> "$PLAYLIST.tmp"
+        # Don't add a title tag directly to the photos, the title card handles the chapter marking
         echo "$PATH_STR" >> "$PLAYLIST.tmp"
     done < "$PLAYLIST.raw"
 
@@ -1910,7 +1947,6 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
     rm -f "$PLAYLIST.raw"
 fi
 
-# Launch mpv using the generated chronological playlist
 mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
 
 LAUNCH_EOF
