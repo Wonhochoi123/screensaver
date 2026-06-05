@@ -39,8 +39,6 @@ fi
 
 find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
-echo "▶ Purging broken strides from cache..."
-find "$MAP_DIR" -type f -name '*.bgra' -delete 2>/dev/null || true
 
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
