@@ -167,8 +167,10 @@ RIGHT playlist-next
 LEFT  playlist-prev
 UP    script-message hud-zoom-in
 DOWN  script-message hud-zoom-out
-PGUP   script-message month-next
-PGDWN  script-message month-prev
+
+PGDWN   script-message month-next
+PGUP  script-message month-prev
+
 END   script-message month-next
 HOME  script-message month-prev
 
