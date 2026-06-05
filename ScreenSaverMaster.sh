@@ -234,41 +234,61 @@ local function refresh_display_size()
     return DISPLAY_W or 1920, DISPLAY_H or 1080  -- 1080p only until first real read
 end
 
--- Safely read the rotation metadata mpv is planning to apply
-local function get_video_rotation()
+local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
+                   tif=true, tiff=true, gif=true, jfif=true}
+
+-- Safely read the rotation metadata.
+-- If mpv doesn't know yet (during on_load), it reads EXIF synchronously.
+local function get_video_rotation(path)
     local rot = mp.get_property_number("video-params/rotate")
     if not rot then
         local tracks = mp.get_property_native("track-list")
         if tracks then
             for _, t in ipairs(tracks) do
-                if t.type == "video" and t.selected then
+                if t.type == "video" and t.selected and t["demux-rotation"] then
                     rot = t["demux-rotation"]
                     break
                 end
             end
         end
     end
+    
+    -- If STILL nil (happens on Frame 1), check EXIF explicitly
+    if not rot and path then
+        local pext = (path:match("%.([^%.]+)$") or ""):lower()
+        if image_ext[pext] then
+            local safe_path = path:gsub("'", "'\\''")
+            local cmd = string.format("exiftool -s3 -n -Orientation '%s' 2>/dev/null", safe_path)
+            local f = io.popen(cmd)
+            if f then
+                local val = f:read("*a")
+                f:close()
+                local o = tonumber(val and val:match("%d+"))
+                if o == 6 then rot = 90
+                elseif o == 8 then rot = 270
+                elseif o == 3 then rot = 180
+                end
+            end
+        end
+    end
+
     rot = rot or 0
     return ((rot % 360) + 360) % 360
 end
-
-local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
-                   tif=true, tiff=true, gif=true, jfif=true}
 
 -- Blur-fill background sized to the ACTUAL display, not a fixed 4K/16:9 canvas.
 -- Blur is computed cheaply at 640x360 then upscaled to the real WxH; the sharp
 -- photo is contained and centered over it. Because the output frame matches the
 -- display aspect exactly, mpv fills the screen with no black bars on any ratio
 -- (16:9, 16:10, 21:9, 4:3, portrait, ...).
-local function apply_image_blur_vf()
+local function apply_image_blur_vf(path)
     local w, h = refresh_display_size()
-    local rot = get_video_rotation()
+    local rot = get_video_rotation(path)
     
     -- Keep track of the unswapped sizes to avoid infinite loops
     BLUR_W, BLUR_H, BLUR_ROT = w, h, rot
 
-    -- If mpv is going to rotate the frame 90 or 270 degrees, we pre-swap the filter 
-    -- canvas dimensions so it rotates cleanly into the correct horizontal layout.
+    -- If mpv is going to rotate the frame 90 or 270 degrees, swap the canvas
     if rot == 90 or rot == 270 then
         w, h = h, w
     end
@@ -309,12 +329,9 @@ mp.add_hook("on_load", 10, function()
 
     if image_ext[ext] then
         -- Pre-apply the blur ONLY if we already know the real display size
-        -- (cached from a previous file). On Wayland the size is usually not
-        -- readable this early on the very first file, so we defer to file-loaded
-        -- rather than bake in a wrong 16:9 fallback.
         refresh_display_size()
         if DISPLAY_W then
-            apply_image_blur_vf()
+            apply_image_blur_vf(path)
         else
             mp.set_property("vf", "")
         end
@@ -797,9 +814,9 @@ mp.register_event("file-loaded", function()
     do
         local pext = (path:match("%.([^%.]+)$") or ""):lower()
         if image_ext[pext] and DISPLAY_W then
-            local current_rot = get_video_rotation()
+            local current_rot = get_video_rotation(path)
             if BLUR_W ~= DISPLAY_W or BLUR_H ~= DISPLAY_H or BLUR_ROT ~= current_rot then
-                apply_image_blur_vf()
+                apply_image_blur_vf(path)
             end
         end
     end
