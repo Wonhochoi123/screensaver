@@ -1764,45 +1764,24 @@ fi
 
 # =============================================================================
 # CHRONOLOGICAL PLAYLIST BUILDER
-# Rebuilds the playlist only if a media file is newer than the current playlist.
-# Photos AND videos share ONE timeline, sorted strictly by capture date with no
-# regard to file type.
+# Rebuilds the playlist only if a media file is newer than the current playlist
 # =============================================================================
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
-
-    # IMPORTANT: do NOT use -fast/-fast2 here. This was the bug that pushed every
-    # video to the end of the list. In unprocessed MP4/MOV files the moov atom —
-    # which holds CreateDate — usually sits at the END of the file, so -fast2
-    # stops reading before it ever sees the timestamp. Every video then returned
-    # "-" for both date tags, hit the 99999999999999 fallback, and got dumped
-    # after all the photos. Reading the files normally costs a little more time
-    # but is the only way to pull video timestamps reliably.
-    #
-    # Date precedence is deliberately type-agnostic so stills and clips interleave
-    # on a single timeline:
-    #   DateTimeOriginal  — stills / EXIF (and Matroska DateUTC for mkv/webm)
-    #   CreateDate        — stills AND the standard MP4/MOV creation atom
-    #   MediaCreateDate   — QuickTime media-header fallback
-    #   TrackCreateDate   — QuickTime track-header fallback
-    #
-    # QuickTimeUTC=1 converts the UTC-stored QuickTime/MP4 atoms to local time so
-    # they line up against the local-time EXIF dates instead of drifting by the
-    # timezone offset (which would scramble the interleave by a few hours).
-    exiftool -api QuickTimeUTC=1 -T -d "%Y%m%d%H%M%S" \
-        -DateTimeOriginal -CreateDate -MediaCreateDate -TrackCreateDate -FilePath \
+    
+    # Use -fast2 to strictly read headers without scanning image data.
+    # Pulls DateTimeOriginal -> CreateDate -> Path, sorts numerically, strips dates, outputs .m3u
+    exiftool -fast2 -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
         "$MEDIA_DIR" 2>/dev/null | \
     awk -F'\t' '{
         d = $1
         if (d == "-" || d == "") d = $2
-        if (d == "-" || d == "") d = $3
-        if (d == "-" || d == "") d = $4
-        # No usable timestamp anywhere -> send to the very end of the playlist.
+        # If no date is found, push to the absolute end of the playlist
         if (d == "-" || d == "") d = "99999999999999"
-        print d "|" $5
+        print d "|" $3
     }' | sort -n | cut -d'|' -f2- > "$PLAYLIST.tmp"
-
+    
     mv "$PLAYLIST.tmp" "$PLAYLIST"
 fi
 
