@@ -777,9 +777,7 @@ mp.register_event("file-loaded", function()
     resolve_meta(orig_path, function(m)
         if my_seq ~= seq then return end
 
-        cur = { seq = my_seq, path = path, orig = orig_path,
-                lat = m.lat, lon = m.lon, mdir = m.mdir,
-                zidx = 1, w = w, h = h, auto = true }
+        cur = { seq = my_seq, path = path, orig = orig_path, lat = m.lat, lon = m.lon, mdir = m.mdir, zidx = 1, w = w, h = h, auto = true }
 
         local date     = m.date
         local location = m.location or ""
@@ -1061,125 +1059,53 @@ print(xt, yt, round((xf-(xt-1))*256), round((yf-(yt-1))*256))
 PY
 ) || exit 1
 
-    # -------------------------------------------------------------------------
-    # Tile fetch. For satellite we build a GOOGLE-STYLE HYBRID: imagery base +
-    # Esri's transparent reference overlays. Two things matter for legibility:
-    #
-    #  1. PLACE NAMES use the *_Alternate* reference layer. The standard
-    #     World_Boundaries_and_Places renders DARK text meant for light
-    #     basemaps — invisible over dark satellite. The _Alternate variant uses
-    #     WHITE text with dark halos, designed specifically to overlay imagery
-    #     (this is what makes names readable at every zoom). Labels are fetched
-    #     per-z, so what shows changes with zoom like Google: regions/cities at
-    #     z=11, towns at z=14, streets/POIs at z=16.
-    #
-    #  2. ROADS (World_Transportation) ship as bright colored highways + shields,
-    #     which are distracting over a small disc. We recolor the whole road
-    #     layer to flat WHITE and drop it to ROAD_OPACITY so it reads as a faint
-    #     network rather than loud orange lines. Set SHOW_ROADS=0 to omit roads
-    #     entirely (names only).
-    #
-    # Draw order (bottom→top): imagery → faint white roads → white place names.
-    # NOTE: cache prefixes are intentionally NEW (names_/roads_) so any tiles
-    # cached by the earlier dark-label version are not reused.
-    ARCGIS="https://server.arcgisonline.com/ArcGIS/rest/services"
-    SAT_SVC="World_Imagery"
-    NAMES_SVC="Reference/World_Boundaries_and_Places_Alternate"   # white labels
-    ROADS_SVC="Reference/World_Transportation"
-    SHOW_ROADS=1            # 0 = names only, no road network
-    ROAD_OPACITY=0.30       # faint white roads; raise toward 1.0 for bolder
-
     SUBS=(a b c)
     for dy in -1 0 1; do for dx in -1 0 1; do
         tx=$((XT+dx)); ty=$((YT+dy))
         if [ "$MAP_STYLE" = "satellite" ]; then
-            sf="$CACHE/sat_${Z}_${tx}_${ty}.png"
-            [ -s "$sf" ] || curl -sf --max-time 8 --create-dirs -A "$UA" \
-                -o "$sf" "${ARCGIS}/${SAT_SVC}/MapServer/tile/${Z}/${ty}/${tx}" &
-            nf="$CACHE/names_${Z}_${tx}_${ty}.png"
-            [ -s "$nf" ] || curl -sf --max-time 8 --create-dirs -A "$UA" \
-                -o "$nf" "${ARCGIS}/${NAMES_SVC}/MapServer/tile/${Z}/${ty}/${tx}" &
-            if [ "$SHOW_ROADS" = 1 ]; then
-                rf="$CACHE/roads_${Z}_${tx}_${ty}.png"
-                [ -s "$rf" ] || curl -sf --max-time 8 --create-dirs -A "$UA" \
-                    -o "$rf" "${ARCGIS}/${ROADS_SVC}/MapServer/tile/${Z}/${ty}/${tx}" &
-            fi
+            tf="$CACHE/sat_${Z}_${tx}_${ty}.png"
+            tf_lab="$CACHE/lab_${Z}_${tx}_${ty}.png"
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${Z}/${ty}/${tx}"
+            url_lab="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/${Z}/${ty}/${tx}"
         else
             tf="$CACHE/${Z}_${tx}_${ty}.png"
             sub=${SUBS[$(( (tx+ty) % 3 ))]}
-            [ -s "$tf" ] || curl -sf --max-time 8 --create-dirs -A "$UA" \
-                -o "$tf" "https://${sub}.tile.openstreetmap.org/${Z}/${tx}/${ty}.png" &
+            url="https://${sub}.tile.openstreetmap.org/${Z}/${tx}/${ty}.png"
+        fi
+        
+        # 1. Download base tile
+        if [ ! -s "$tf" ]; then
+            curl -sf --max-time 8 --create-dirs -A "$UA" -o "$tf" "$url" &
+        fi
+        # 2. Download label tile (only for satellite imagery)
+        if [ "$MAP_STYLE" = "satellite" ] && [ ! -s "$tf_lab" ]; then
+            curl -sf --max-time 8 --create-dirs -A "$UA" -o "$tf_lab" "$url_lab" &
         fi
     done; done
-    wait
+    wait 
 
-    # Stage each tile into TMP. Overlay tiles that failed to download (network
-    # blocked, ocean tiles with no labels, etc.) are replaced by a transparent
-    # 256×256 placeholder so the +append grid never breaks — a missing overlay
-    # just yields plainer imagery, it never aborts the build.
     for dy in -1 0 1; do for dx in -1 0 1; do
         tx=$((XT+dx)); ty=$((YT+dy))
         if [ "$MAP_STYLE" = "satellite" ]; then
-            cp "$CACHE/sat_${Z}_${tx}_${ty}.png" "$TMP/t_${dx}_${dy}.png"
-            for layer in names roads; do
-                [ "$layer" = roads ] && [ "$SHOW_ROADS" != 1 ] && continue
-                lf="$CACHE/${layer}_${Z}_${tx}_${ty}.png"
-                if [ -s "$lf" ]; then
-                    cp "$lf" "$TMP/${layer}_${dx}_${dy}.png"
-                else
-                    $IM -size 256x256 xc:none "$TMP/${layer}_${dx}_${dy}.png"
-                fi
-            done
+            tf="$CACHE/sat_${Z}_${tx}_${ty}.png"
+            tf_lab="$CACHE/lab_${Z}_${tx}_${ty}.png"
+            # 3. Composite labels over the satellite base if a label tile exists
+            if [ -s "$tf_lab" ]; then
+                $IM "$tf" "$tf_lab" -compose over -composite "$TMP/t_${dx}_${dy}.png"
+            else
+                cp "$tf" "$TMP/t_${dx}_${dy}.png"
+            fi
         else
-            cp "$CACHE/${Z}_${tx}_${ty}.png" "$TMP/t_${dx}_${dy}.png"
+            tf="$CACHE/${Z}_${tx}_${ty}.png"
+            cp "$tf" "$TMP/t_${dx}_${dy}.png"
         fi
     done; done
 
-    # Base imagery stitch (3×3 grid → 768×768).
     $IM \
       \( "$TMP/t_-1_-1.png" "$TMP/t_0_-1.png" "$TMP/t_1_-1.png" +append \) \
       \( "$TMP/t_-1_0.png"  "$TMP/t_0_0.png"  "$TMP/t_1_0.png"  +append \) \
       \( "$TMP/t_-1_1.png"  "$TMP/t_0_1.png"  "$TMP/t_1_1.png"  +append \) \
       -append "$TMP/stitch.png" || exit 3
-
-    # Composite reference overlays over the imagery (satellite only).
-    if [ "$MAP_STYLE" = "satellite" ]; then
-        # Roads: stitch, recolor RGB→white, knock alpha down to ROAD_OPACITY.
-        if [ "$SHOW_ROADS" = 1 ]; then
-            $IM \
-              \( "$TMP/roads_-1_-1.png" "$TMP/roads_0_-1.png" "$TMP/roads_1_-1.png" +append \) \
-              \( "$TMP/roads_-1_0.png"  "$TMP/roads_0_0.png"  "$TMP/roads_1_0.png"  +append \) \
-              \( "$TMP/roads_-1_1.png"  "$TMP/roads_0_1.png"  "$TMP/roads_1_1.png"  +append \) \
-              -append "$TMP/roads_stitch.png" || true
-            if [ -s "$TMP/roads_stitch.png" ]; then
-                # -channel RGB -fill white -colorize 100 → repaint every visible
-                # pixel white, preserving the line shapes via the original alpha;
-                # then multiply alpha so the network is subtle, not loud.
-                $IM "$TMP/roads_stitch.png" \
-                    -channel RGB -fill white -colorize 100 +channel \
-                    -channel A -evaluate multiply ${ROAD_OPACITY} +channel \
-                    "$TMP/roads_white.png" || rm -f "$TMP/roads_white.png"
-            fi
-        fi
-
-        # Place names: stitch (already white-on-dark-halo from the Alternate svc).
-        $IM \
-          \( "$TMP/names_-1_-1.png" "$TMP/names_0_-1.png" "$TMP/names_1_-1.png" +append \) \
-          \( "$TMP/names_-1_0.png"  "$TMP/names_0_0.png"  "$TMP/names_1_0.png"  +append \) \
-          \( "$TMP/names_-1_1.png"  "$TMP/names_0_1.png"  "$TMP/names_1_1.png"  +append \) \
-          -append "$TMP/names_stitch.png" || true
-
-        # Layer them on: imagery → faint roads → names. Each step is optional and
-        # silently skipped if its stitch is missing, so the build never aborts.
-        if [ -s "$TMP/roads_white.png" ]; then
-            $IM "$TMP/stitch.png" "$TMP/roads_white.png" -compose over -composite \
-                "$TMP/stitch_r.png" && mv "$TMP/stitch_r.png" "$TMP/stitch.png"
-        fi
-        if [ -s "$TMP/names_stitch.png" ]; then
-            $IM "$TMP/stitch.png" "$TMP/names_stitch.png" -compose over -composite \
-                "$TMP/stitch_n.png" && mv "$TMP/stitch_n.png" "$TMP/stitch.png"
-        fi
-    fi
 
     OFFX=$(( PX - D/2 )); OFFY=$(( PY - D/2 ))
     $IM "$TMP/stitch.png" -crop ${D}x${D}+${OFFX}+${OFFY} +repage \
@@ -1200,13 +1126,11 @@ PY
         -fill "$MARKER_COLOR" -draw "circle ${CX},${MY} ${CX},$((MY-7))" \
         -fill white          -draw "circle ${CX},${MY} ${CX},$((MY-3))" "$TMP/M_marker.png"
 
-    # Disc only — the satellite imagery already carries its own native labels
-    # (city/road/water names baked in by the hybrid overlay above). Coordinates
-    # are drawn separately as crisp libass OSD text by photo.lua.
+    # Disc only — coordinates are drawn as crisp libass OSD text by photo.lua.
     $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
         "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite \
         "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
-
+    
     $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP" || exit 7
 fi
 
@@ -1463,6 +1387,8 @@ while true; do
             fi
         fi
         # -------------------------------------------------
+        
+        
 
         if [ "$txt_file" -nt "$media_file" ]; then
             IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$txt_file")
@@ -1870,7 +1796,3 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "⚠ Reminder: still missing -> ${MISSING[*]}"
     echo "  Install those, then re-run this script before launching."
 fi
-echo ""
-echo "⚠ NOTE: Existing minimap BGRAs were purged at the top of this run."
-echo "  They regenerate as hybrids (satellite + white place names that scale"
-echo "  with zoom, plus a faint white road network) on next launch."
