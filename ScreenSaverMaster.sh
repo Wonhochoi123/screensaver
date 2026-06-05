@@ -167,6 +167,9 @@ RIGHT playlist-next
 LEFT  playlist-prev
 UP    script-message hud-zoom-in
 DOWN  script-message hud-zoom-out
+PGUP   script-message month-next
+PGDWN  script-message month-prev
+
 
 NEXT run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
 PREV run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
