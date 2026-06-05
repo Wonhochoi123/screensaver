@@ -1092,7 +1092,7 @@ if [ "$need_qr" = 1 ]; then
     G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
 
     STYLED=0
-    if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
+if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
 import sys, random
 try:
     import qrcode
@@ -1110,14 +1110,21 @@ url, out_png, D = sys.argv[1], sys.argv[2], int(sys.argv[3])
 qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, border=0)
 qr.add_data(url); qr.make(fit=True)
 n = qr.modules_count
-mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(80, 0, 128, 255))
+
+# 1. Generate the QR code in pure BLACK so we can use it as a stencil (Alpha Mask)
+mask = SolidFillColorMask(back_color=(255, 255, 255, 0), front_color=(0, 0, 0, 255))
 qr_img = qr.make_image(image_factory=StyledPilImage,
                        module_drawer=CircleModuleDrawer(),
                        color_mask=mask).convert("RGBA")
 
+# 2. Setup the final canvas (Solid white background disc)
 canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 draw = ImageDraw.Draw(canvas)
 draw.ellipse([0, 0, D - 1, D - 1], fill=(255, 255, 255, 255))    
+
+# 3. Setup a transparent "Pattern" layer to hold our black dots
+pattern = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+pdraw = ImageDraw.Draw(pattern)
 
 cell = int((D * 0.68) / float(n))
 func = cell * n
@@ -1127,7 +1134,6 @@ cx = cy = D / 2.0
 R = D / 2.0
 half = func / 2.0
 
-dot = (80, 0, 128, 255)
 random.seed(len(url) * 7 + 13)
 
 first_mod_x = cx - half + (cell / 2.0)
@@ -1135,6 +1141,7 @@ first_mod_y = cy - half + (cell / 2.0)
 start_x = first_mod_x - (int(first_mod_x / cell) * cell)
 start_y = first_mod_y - (int(first_mod_y / cell) * cell)
 
+# Draw the outer decorative dots in pure BLACK onto the pattern layer
 yy = start_y
 while yy < D:
     xx = start_x
@@ -1143,11 +1150,40 @@ while yy < D:
             if xx < (cx - half) or xx > (cx + half) or yy < (cy - half) or yy > (cy + half):
                 if random.random() < 0.5:
                     r = cell * 0.40
-                    draw.ellipse([xx - r, yy - r, xx + r, yy + r], fill=dot)
+                    pdraw.ellipse([xx - r, yy - r, xx + r, yy + r], fill=(0, 0, 0, 255))
         xx += cell
     yy += cell
 
-canvas.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
+# Paste the black QR core onto the pattern layer
+pattern.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
+
+# 4. Create the Radial Gradient layer
+gradient = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+gdraw = ImageDraw.Draw(gradient)
+
+# Define the gradient colors (RGB)
+center_color = (130, 40, 180)  # Lighter purple (dark enough to easily scan)
+edge_color = (30, 0, 60)       # Deep, dark purple
+
+# Draw concentric circles from the outside in to build a smooth gradient
+for rad in range(int(R), 0, -1):
+    ratio = rad / R
+    # Apply a slight easing curve so the center stays lighter longer, 
+    # then quickly darkens at the extreme edges for the 3D effect.
+    ease = ratio ** 1.5 
+    
+    r_col = int(center_color[0] + (edge_color[0] - center_color[0]) * ease)
+    g_col = int(center_color[1] + (edge_color[1] - center_color[1]) * ease)
+    b_col = int(center_color[2] + (edge_color[2] - center_color[2]) * ease)
+    
+    gdraw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=(r_col, g_col, b_col, 255))
+
+# 5. The Magic Trick: Apply the black pattern's alpha channel to the gradient.
+# This makes the entire gradient transparent EXCEPT where a dot exists.
+gradient.putalpha(pattern.getchannel("A"))
+
+# 6. Composite the perfectly colored dots onto the white canvas
+canvas.alpha_composite(gradient)
 canvas.save(out_png)
 PY
     then STYLED=1; fi
