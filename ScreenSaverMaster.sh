@@ -1938,11 +1938,12 @@ fi
 
 # =============================================================================
 # CHRONOLOGICAL PLAYLIST BUILDER
-# Rebuilds the playlist only if a media file is newer than the current playlist.
-# Photos AND videos share ONE timeline, sorted strictly by capture date with no
-# regard to file type.
+# Rebuilds when the playlist OR its date index is MISSING-OR-EMPTY (-s, not -f:
+# an empty file must never be accepted as a valid cached playlist), or when any
+# media file is newer than the current playlist. Photos AND videos share ONE
+# timeline, sorted strictly by capture date with no regard to file type.
 # =============================================================================
-if [ ! -f "$PLAYLIST" ] || [ ! -f "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
+if [ ! -s "$PLAYLIST" ] || [ ! -s "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
 
     # IMPORTANT: do NOT use -fast/-fast2 here. This was the bug that pushed every
@@ -1984,18 +1985,37 @@ if [ ! -f "$PLAYLIST" ] || [ ! -f "$DATES" ] || [ -n "$(find "$MEDIA_DIR" -maxde
         print d "|" $5
     }' | sort -n > "$COMBINED"
 
-    # Paths for mpv. cut -f2- keeps everything after the first '|', so a path that
-    # itself contains '|' survives intact (the date field never does).
-    cut -d'|' -f2- "$COMBINED" > "$PLAYLIST.tmp"
+    # GUARD: if exiftool found nothing, do NOT install an empty playlist — that
+    # would get cached and silently skip every future rebuild. Leave the old
+    # playlist (if any) untouched and tell the user exactly what to fix.
+    if [ ! -s "$COMBINED" ]; then
+        echo "⚠ No media found in: $MEDIA_DIR"
+        echo "  Add photos/videos there (jpg/jpeg/png/webp/mp4/mkv/mov/m4v/webm) and relaunch."
+        echo "  (If your files are loose in ~/Pictures/Screensavers/, re-run setup-screensaver.sh"
+        echo "   once — it migrates them into Media/.)"
+        rm -f "$COMBINED"
+    else
+        # Paths for mpv. cut -f2- keeps everything after the first '|', so a path
+        # that itself contains '|' survives intact (the date field never does).
+        cut -d'|' -f2- "$COMBINED" > "$PLAYLIST.tmp"
 
-    # Date index for photo.lua: DATE<TAB>PATH. index($0,"|") finds the FIRST '|'
-    # only, so again paths containing '|' are preserved.
-    awk -F'|' 'BEGIN{OFS="\t"} { d=$1; p=substr($0, index($0,"|")+1); print d, p }' \
-        "$COMBINED" > "$DATES.tmp"
+        # Date index for photo.lua: DATE<TAB>PATH. index($0,"|") finds the FIRST
+        # '|' only, so again paths containing '|' are preserved.
+        awk -F'|' 'BEGIN{OFS="\t"} { d=$1; p=substr($0, index($0,"|")+1); print d, p }' \
+            "$COMBINED" > "$DATES.tmp"
 
-    mv "$PLAYLIST.tmp" "$PLAYLIST"
-    mv "$DATES.tmp" "$DATES"
-    rm -f "$COMBINED"
+        mv "$PLAYLIST.tmp" "$PLAYLIST"
+        mv "$DATES.tmp" "$DATES"
+        rm -f "$COMBINED"
+        echo "▶ Playlist compiled: $(wc -l < "$PLAYLIST") item(s)."
+    fi
+fi
+
+# Final guard: never hand mpv an empty/missing playlist (it would just print its
+# usage screen and quit). Fail loudly with the cause instead.
+if [ ! -s "$PLAYLIST" ]; then
+    echo "❌ Playlist is empty — no playable media in $MEDIA_DIR. Aborting."
+    exit 1
 fi
 
 # Launch mpv using the generated chronological playlist
