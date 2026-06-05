@@ -1769,18 +1769,28 @@ fi
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
     
-    # Use -fast2 to strictly read headers without scanning image data.
-    # Pulls DateTimeOriginal -> CreateDate -> Path, sorts numerically, strips dates, outputs .m3u
-    exiftool -fast2 -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreateDate -FilePath \
+    # Use -fast2 to quickly read headers.
+    # We check multiple date tags because videos use different metadata standards than photos,
+    # and fall back to the file's modification date so nothing gets grouped at the end.
+    exiftool -fast2 -T -d "%Y%m%d%H%M%S" \
+        -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FileModifyDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
         "$MEDIA_DIR" 2>/dev/null | \
     awk -F'\t' '{
-        d = $1
-        if (d == "-" || d == "") d = $2
-        # If no date is found, push to the absolute end of the playlist
-        if (d == "-" || d == "") d = "99999999999999"
-        print d "|" $3
-    }' | sort -n | cut -d'|' -f2- > "$PLAYLIST.tmp"
+        d = ""
+        # Loop through the first 5 columns looking for a valid 14-digit date
+        for (i=1; i<=5; i++) {
+            if ($i != "-" && $i != "" && $i ~ /^[0-9]{14}$/) {
+                d = $i
+                break
+            }
+        }
+        # Absolute fallback if no dates exist at all
+        if (d == "") d = "99999999999999"
+        
+        # The last column is always the file path
+        print d "|" $NF
+    }' | sort | cut -d'|' -f2- > "$PLAYLIST.tmp"
     
     mv "$PLAYLIST.tmp" "$PLAYLIST"
 fi
