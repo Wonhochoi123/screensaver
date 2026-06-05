@@ -1766,27 +1766,85 @@ fi
 # CHRONOLOGICAL PLAYLIST BUILDER
 # Rebuilds the playlist only if a media file is newer than the current playlist
 # =============================================================================
+# =============================================================================
+# CHRONOLOGICAL PLAYLIST BUILDER
+# Rebuilds the playlist only if a media file is newer than the current playlist
+# =============================================================================
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
     
-    # Use -fast2 to strictly read headers without scanning image data.
-    # Pulls DateTimeOriginal -> CreateDate -> Path, sorts numerically, strips dates, outputs .m3u
-    exiftool -fast2 -T -d "%Y%m%d%H%M%S" -DateTimeOriginal -CreateDate -FilePath \
+    TITLE_DIR="$HOME/Screensaver-App/TitleCards"
+    mkdir -p "$TITLE_DIR"
+
+    # 1. Expanded tag list so MP4s don't slip through, plus relaxed -fast2 to -fast
+    exiftool -fast -T -d "%Y%m%d%H%M%S" \
+        -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
         "$MEDIA_DIR" 2>/dev/null | \
     awk -F'\t' '{
         d = $1
         if (d == "-" || d == "") d = $2
-        # If no date is found, push to the absolute end of the playlist
+        if (d == "-" || d == "") d = $3
+        if (d == "-" || d == "") d = $4
+        
+        path = $5
+        
+        # 2. Filename fallback if EXIF is completely missing
+        # Standardizes based on your "YYYYMMDD_HHMMSS" and "PXL_YYYYMMDD_HHMMSS" file structures
+        if (d == "-" || d == "") {
+            if (match(path, /([0-9]{8}_[0-9]{6})/)) {
+                d = substr(path, RSTART, 15)
+                gsub("_", "", d)
+            } else if (match(path, /PXL_([0-9]{8}_[0-9]{6})/)) {
+                d = substr(path, RSTART+4, 15)
+                gsub("_", "", d)
+            }
+        }
+        
         if (d == "-" || d == "") d = "99999999999999"
-        print d "|" $3
-    }' | sort -n | cut -d'|' -f2- > "$PLAYLIST.tmp"
-    
+        print d "|" path
+    }' | sort -n > "$PLAYLIST.raw"
+
+    # 3. Process the sorted list, generate title cards, and build final .m3u
+    > "$PLAYLIST.tmp"
+    LAST_YM=""
+    declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
+
+    while IFS='|' read -r D PATH_STR; do
+        if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
+            YM="${D:0:6}"
+            if [[ "$YM" != "$LAST_YM" ]]; then
+                LAST_YM="$YM"
+                Y="${YM:0:4}"
+                M="${YM:4:2}"
+                M_NAME="${M_NAMES[$M]}"
+                
+                CARD_PATH="$TITLE_DIR/${Y}-${M}.png"
+                if [ ! -f "$CARD_PATH" ]; then
+                    echo "  Generating Title Card: $M_NAME $Y..."
+                    if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
+                    
+                    # Generate a clean 1080p black title card using your downloaded font
+                    $IM -size 1920x1080 xc:black \
+                        -font "$HOME/.local/share/fonts/Montserrat-ExtraBold.ttf" \
+                        -pointsize 140 -fill white -gravity center \
+                        -draw "text 0,0 '$M_NAME $Y'" \
+                        "$CARD_PATH" 2>/dev/null || true
+                fi
+                # Inject the title card into the playlist stream
+                [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
+            fi
+        fi
+        echo "$PATH_STR" >> "$PLAYLIST.tmp"
+    done < "$PLAYLIST.raw"
+
     mv "$PLAYLIST.tmp" "$PLAYLIST"
+    rm -f "$PLAYLIST.raw"
 fi
 
 # Launch mpv using the generated chronological playlist
 mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
+
 LAUNCH_EOF
 chmod +x "$APP_DIR/launch.sh"
 
