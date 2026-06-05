@@ -554,7 +554,10 @@ local function apply_minimap(bgra_path, L)
     mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
-local function build_one(lat, lon, z, w, h, color, mdir, cb)
+-- build_one / build_all: label is an optional place name baked into the map
+-- disc as a frosted pill above the marker dot. Pass "" to omit.
+local function build_one(lat, lon, z, w, h, color, mdir, cb, label)
+    label = label or ""
     local mimg = map_path(mdir, z, lat, lon, w, h, color)
     local qimg = qr_path(mdir, lat, lon, w, h)
     if file_exists(mimg) and file_exists(qimg) then
@@ -563,8 +566,10 @@ local function build_one(lat, lon, z, w, h, color, mdir, cb)
     end
     mp.command_native_async({
         name = "subprocess", capture_stdout = true, capture_stderr = true,
-        args = { builder, string.format("%.6f", lat), string.format("%.6f", lon),
-                 tostring(z), mimg, qimg, mdir, tostring(w), tostring(h), color },
+        args = { builder,
+                 string.format("%.6f", lat), string.format("%.6f", lon),
+                 tostring(z), mimg, qimg, mdir, tostring(w), tostring(h),
+                 color, label },
     }, function(ok, res)
         local good = file_exists(mimg) and file_exists(qimg)
         if not good then
@@ -575,12 +580,12 @@ local function build_one(lat, lon, z, w, h, color, mdir, cb)
     end)
 end
 
-local function build_all(lat, lon, w, h, mdir, cb, i)
+local function build_all(lat, lon, w, h, mdir, cb, i, label)
     i = i or 1
     if i > #ZOOMS then if cb then cb() end return end
     build_one(lat, lon, ZOOMS[i], w, h, RING_COLORS[i], mdir, function()
-        build_all(lat, lon, w, h, mdir, cb, i + 1)
-    end)
+        build_all(lat, lon, w, h, mdir, cb, i + 1, label)
+    end, label)
 end
 
 local function resolve_meta(orig_path, cb)
@@ -640,7 +645,7 @@ local function pq_next()
         if m.lat and m.lon then
             build_all(m.lat, m.lon, cur.w, cur.h, m.mdir, function()
                 mp.add_timeout(0.3, pq_next)
-            end)
+            end, nil, m.location or "")
         else
             mp.add_timeout(0.02, pq_next)
         end
@@ -689,7 +694,7 @@ local function show_current_zoom()
     build_one(cur.lat, cur.lon, z, L.S, L.S, color, cur.mdir, function(ok)
         if s ~= seq then return end
         if ok then apply_minimap(map_path(cur.mdir, z, cur.lat, cur.lon, L.S, L.S, color), L) end
-    end)
+    end, cur.label or "")
 end
 
 mp.register_script_message("hud-zoom-in", function()
@@ -777,7 +782,9 @@ mp.register_event("file-loaded", function()
     resolve_meta(orig_path, function(m)
         if my_seq ~= seq then return end
 
-        cur = { seq = my_seq, path = path, orig = orig_path, lat = m.lat, lon = m.lon, mdir = m.mdir, zidx = 1, w = w, h = h, auto = true }
+        cur = { seq = my_seq, path = path, orig = orig_path,
+                lat = m.lat, lon = m.lon, mdir = m.mdir,
+                zidx = 1, w = w, h = h, auto = true, label = "" }
 
         local date     = m.date
         local location = m.location or ""
@@ -791,6 +798,11 @@ mp.register_event("file-loaded", function()
                 if lf then location = (lf:read("*a") or ""):gsub("[\r\n]+", ""); lf:close() end
             end
         end
+
+        -- Sync cur.label with whatever location we have so far (may be updated
+        -- later by Nominatim, but the bitmaps will use the best-known value at
+        -- render time and refresh on the next play-through once loc_cache exists).
+        cur.label = location
 
         local function draw_text()
             local d = compact_date(date)
@@ -849,6 +861,7 @@ mp.register_event("file-loaded", function()
                         local loc = join_loc(landmark, city, state, ctry)
                         if loc ~= "" then
                             location = loc
+                            cur.label = location
                             os.execute("mkdir -p '" .. mdir:gsub("'", "'\\''") .. "'")
                             local cf = io.open(loc_cache, "w")
                             if cf then cf:write(location); cf:close() end
@@ -878,7 +891,7 @@ mp.register_event("file-loaded", function()
 
             build_all(m.lat, m.lon, w, h, mdir, function()
                 mp.add_timeout(0.5, start_prewarm)
-            end)
+            end, nil, location)
 
             mp.add_timeout(1.8, function()
                 if my_seq ~= seq then return end
@@ -895,7 +908,7 @@ mp.register_event("file-loaded", function()
                     show_current_zoom()
                 end
             end)
-        end)
+        end, location)
     end)
 end)
 
@@ -914,6 +927,7 @@ cat > "$CFG/build-minimap.sh" << 'EOF'
 set -u
 LAT="$1"; LON="$2"; Z="$3"; OUT_MAP="$4"; OUT_QR="$5"; CACHE="$6"
 HUD_W="${7:-552}"; HUD_H="${8:-616}"; MAP_RING_COLOR="${9:-#FFFFFF}"
+PLACE_LABEL="${10:-}"
 
 UA="Screensaver-App/1.0"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -1108,11 +1122,75 @@ PY
         -fill "$MARKER_COLOR" -draw "circle ${CX},${MY} ${CX},$((MY-7))" \
         -fill white          -draw "circle ${CX},${MY} ${CX},$((MY-3))" "$TMP/M_marker.png"
 
-    # Disc only — coordinates are drawn as crisp libass OSD text by photo.lua.
-    $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
-        "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite \
-        "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
-    
+    # --- Place label pill (baked into the disc, above the marker dot) --------
+    # Drawn only when PLACE_LABEL is non-empty. A frosted semi-transparent dark
+    # pill sits ~40px above the marker center and contains the location name in
+    # white Montserrat SemiBold (falls back to the system sans if the font is
+    # not installed). The pill is clipped by the disc outline so it never bleeds
+    # outside the circle.
+    #
+    # Layout arithmetic (all in the CANVAS coordinate space):
+    #   MY        = vertical centre of the disc
+    #   PILL_H    = 28px pill height
+    #   PILL_TOP  = MY - 52  (gives ~10px clearance above the marker dot at MY)
+    #   PILL_W    = clamped to 90% of disc diameter
+    #   TEXT_X/Y  = centre of the pill
+    #
+    # The -annotate offset is relative to the gravity origin (NorthWest = 0,0),
+    # so we use "+X+Y" where X,Y are the pixel coordinates of the text centre.
+    # We add -gravity None after setting the font so the coordinate is absolute.
+    if [ -n "$PLACE_LABEL" ]; then
+        # Truncate to 28 chars so the pill never overflows the disc at any zoom
+        LABEL_TEXT="$(echo "$PLACE_LABEL" | cut -c1-28)"
+        PILL_H=28
+        PILL_TOP=$(( MY - 52 ))
+        # Approximate rendered width: ~11px per character + 24px side padding
+        CHAR_COUNT=$(printf '%s' "$LABEL_TEXT" | wc -m)
+        PILL_W=$(( CHAR_COUNT * 11 + 24 ))
+        MAX_W=$(( D * 9 / 10 ))
+        [ "$PILL_W" -gt "$MAX_W" ] && PILL_W=$MAX_W
+        PILL_LEFT=$(( CX - PILL_W / 2 ))
+        PILL_RIGHT=$(( PILL_LEFT + PILL_W ))
+        PILL_BOTTOM=$(( PILL_TOP + PILL_H ))
+        TEXT_X=$CX
+        TEXT_Y=$(( PILL_TOP + PILL_H / 2 ))
+
+        # Try Montserrat SemiBold first; silently fall back to sans on failure.
+        # The two-command pattern (try; fallback) avoids a hard exit so a missing
+        # font never breaks the map build entirely.
+        if $IM -size ${CANVAS}x${FULLH} xc:none \
+            -fill 'rgba(0,0,0,0.58)' \
+            -draw "roundrectangle ${PILL_LEFT},${PILL_TOP} ${PILL_RIGHT},${PILL_BOTTOM} 8,8" \
+            -font Montserrat-SemiBold -pointsize 13 \
+            -fill white -gravity None \
+            -annotate "+${TEXT_X}+${TEXT_Y}" "$LABEL_TEXT" \
+            "$TMP/M_label.png" 2>/dev/null; then
+            : # Montserrat succeeded
+        else
+            $IM -size ${CANVAS}x${FULLH} xc:none \
+                -fill 'rgba(0,0,0,0.58)' \
+                -draw "roundrectangle ${PILL_LEFT},${PILL_TOP} ${PILL_RIGHT},${PILL_BOTTOM} 8,8" \
+                -font sans -pointsize 13 \
+                -fill white -gravity None \
+                -annotate "+${TEXT_X}+${TEXT_Y}" "$LABEL_TEXT" \
+                "$TMP/M_label.png" || true
+        fi
+
+        # Composite order: shadow → disc → ring-glow → marker → label pill
+        $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
+            "$TMP/M_shadow.png" -composite \
+            "$TMP/M_disc.png"   -composite \
+            "$TMP/M_ringglow.png" -composite \
+            "$TMP/M_marker.png" -composite \
+            "$TMP/M_label.png"  -composite \
+            "$TMP/M_final.png" || exit 5
+    else
+        # No label — original composite unchanged
+        $IM -size ${CANVAS}x${FULLH} xc:none -colorspace sRGB \
+            "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite \
+            "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
+    fi
+
     $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP" || exit 7
 fi
 
@@ -1369,8 +1447,6 @@ while true; do
             fi
         fi
         # -------------------------------------------------
-        
-        
 
         if [ "$txt_file" -nt "$media_file" ]; then
             IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$txt_file")
@@ -1778,3 +1854,6 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "⚠ Reminder: still missing -> ${MISSING[*]}"
     echo "  Install those, then re-run this script before launching."
 fi
+echo ""
+echo "⚠ NOTE: Existing minimap BGRAs were purged at the top of this run."
+echo "  They will be regenerated with place name labels on next launch."
