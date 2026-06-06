@@ -139,7 +139,7 @@ EOF
 # =============================================================================
 # 2. photo.lua
 # =============================================================================
-echo "▶ Writing photo.lua..."
+echo "▶ Writing photo.lua with radius landmark engine..."
 cat > "$CFG/photo.lua" << 'EOF'
 local utils = require "mp.utils"
 local msg   = require "mp.msg"
@@ -158,6 +158,7 @@ local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
 local DEFAULT_ZIDX = 1
 
 local ov       = mp.create_osd_overlay("ass-events")
+local top_ov   = mp.create_osd_overlay("ass-events")
 local pause_ov = mp.create_osd_overlay("ass-events")
 pause_ov.res_x = 1920
 pause_ov.res_y = 1080
@@ -181,7 +182,7 @@ local function refresh_display_size()
         h = mp.get_property_number("osd-height") or 0
     end
     if w >= 320 and h >= 320 then
-        if DISPLAY_W ~= w or DISPLAY_H ~= h then
+        if DISPLAY_W != w or DISPLAY_H != h then
             DISPLAY_W, DISPLAY_H = w, h
             local f = io.open(APP_DIR .. "/display.conf", "w")
             if f then f:write(string.format("%dx%d", w, h)); f:close() end
@@ -191,7 +192,7 @@ local function refresh_display_size()
 end
 
 local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
-                   tif=true, tiff=true, gif=true, jfif=true}
+                    tif=true, tiff=true, gif=true, jfif=true}
 
 local function get_video_rotation(path)
     local rot = mp.get_property_number("video-params/rotate")
@@ -472,7 +473,7 @@ local function hud_geom()
     return {
         win_w = win_w, win_h = win_h, S = S, pad = pad, fs = fs,
         img_top = img_top, text_cy = text_cy,
-        qr_x  = pad,             qr_cx  = pad + math.floor(S / 2),
+        qr_x  = pad,       qr_cx  = pad + math.floor(S / 2),
         map_x = win_w - S - pad, map_cx = win_w - pad - math.floor(S / 2),
     }
 end
@@ -527,6 +528,7 @@ local function clear_hud_osd()
     pcall(mp.command_native, {"overlay-remove", 2})
     qr_coord_ov:remove()
     map_coord_ov:remove()
+    top_ov:remove()
 end
 
 local function apply_qr(bgra_path, L)
@@ -608,7 +610,93 @@ local function resolve_meta(orig_path, cb)
         end
         if lat and (lat < -90  or lat > 90 ) then lat = nil end
         if lon and (lon < -180 or lon > 180) then lon = nil end
+        if lat is None or lon is None then lat = lon = nil end
         cb({ date = date, location = location, lat = lat, lon = lon, mdir = mdir })
+    end)
+end
+
+-- ----------------------------------------------------------------------------
+-- RADIUS OVERPASS LANDMARK FETCH ENGINE (5 MILE / 8050M CONTEXT EVALUATION)
+-- ----------------------------------------------------------------------------
+local function fetch_and_draw_landmarks(lat, lon, my_seq)
+    local landmark_cache = MAP_DIR .. string.format("/landmarks_%.4f_%.4f.txt", lat, lon)
+    
+    local function draw_landmarks_text(text)
+        if text == "" or my_seq ~= seq then return end
+        local L = hud_geom()
+        local fs = math.floor(L.win_h * 0.03)
+        local cx = math.floor(L.win_w / 2)
+        local top_baseline = math.floor(L.win_h * 0.05)
+        
+        top_ov.res_x = L.win_w
+        top_ov.res_y = L.win_h
+        -- Vector Tag Breakdown: Top center alignment, 40% Transparency, 1px thin black barrier boundary.
+        -- Transform timing syntax: Hold structural alpha for 3000ms, then linearly morph to 100% transparency by 5000ms.
+        top_ov.data = string.format(
+            "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\alpha&H66&\\bord1\\3c&H000000&\\t(3000,5000,\\alpha&HFF&)}%s",
+            cx, top_baseline, fs, text)
+        top_ov:update()
+    end
+
+    if file_exists(landmark_cache) then
+        local lf = io.open(landmark_cache, "r")
+        if lf then
+            local text = lf:read("*a") or ""
+            lf:close()
+            draw_landmarks_text(text:gsub("[\r\n]+", ""))
+            return
+        end
+    end
+
+    -- Comprehensive features bounding evaluation array (~5 miles)
+    local overpass_query = string.format("[out:json][timeout:4];(node['tourism'~'attraction|viewpoint|museum|zoo|aquarium'](around:8050,%.6f,%.6f);way['tourism'~'attraction|viewpoint|museum|zoo|aquarium'](around:8050,%.6f,%.6f);node['natural'~'peak|volcano|waterfall|rock'](around:8050,%.6f,%.6f);node['historic'~'castle|ruins|monument'](around:8050,%.6f,%.6f););out tags 8;", lat, lon, lat, lon, lat, lon, lat, lon)
+
+    mp.command_native_async({
+        name = "subprocess", capture_stdout = true,
+        args = {
+            "curl", "-sf", "--max-time", "5",
+            "-A", "Screensaver-App/1.0",
+            "--data-urlencode", "data=" .. overpass_query,
+            "https://overpass-api.de/api/interpreter"
+        }
+    }, function(rok, rres)
+        if my_seq ~= seq then return end
+        if rok and rres and rres.stdout then
+            local j = utils.parse_json(rres.stdout)
+            if j and j.elements then
+                local names = {}
+                local seen = {}
+                for _, el in ipairs(j.elements) do
+                    if el.tags and el.tags.name and el.tags.name ~= "" then
+                        local name = el.tags.name
+                        if not seen[name] then
+                            seen[name] = true
+                            table.insert(names, name)
+                        end
+                    end
+                end
+                if #names > 0 then
+                    local joined_names = ""
+                    local count = 0
+                    for _, name in ipairs(names) do
+                        if count >= 4 then break end
+                        if joined_names == "" then
+                            joined_names = name
+                        else
+                            joined_names = joined_names .. "  ·  " .. name
+                        end
+                        count = count + 1
+                    end
+                    
+                    if joined_names ~= "" then
+                        pcall(os.execute, "mkdir -p '" .. MAP_DIR:gsub("'", "'\\''") .. "'")
+                        local cf = io.open(landmark_cache, "w")
+                        if cf then cf:write(joined_names); cf:close() end
+                        draw_landmarks_text(joined_names)
+                    end
+                end
+            end
+        end
     end)
 end
 
@@ -739,6 +827,7 @@ mp.register_event("file-loaded", function()
 
     clear_hud_osd()
     ov:remove()
+    top_ov:remove()
     seq = seq + 1
     local my_seq = seq
     prewarmed[orig_path] = true
@@ -770,7 +859,7 @@ mp.register_event("file-loaded", function()
         local mdir     = m.mdir
 
         local loc_cache
-        if m.lat and m.lon and location == "" then
+        if m.lat and m.lon and location == "" and loc_cache then
             loc_cache = mdir .. string.format("/place_%.4f_%.4f.txt", m.lat, m.lon)
             if file_exists(loc_cache) then
                 local lf = io.open(loc_cache, "r")
@@ -800,6 +889,11 @@ mp.register_event("file-loaded", function()
             ov:update()
         end
         draw_text()
+
+        -- Trigger the new surrounding landmark retrieval engine
+        if m.lat and m.lon then
+            fetch_and_draw_landmarks(m.lat, m.lon, my_seq)
+        end
 
         if m.lat and m.lon and location == "" and loc_cache then
             mp.command_native_async({
@@ -887,6 +981,7 @@ end)
 
 mp.register_event("shutdown", function()
     ov:remove()
+    top_ov:remove()
     pause_ov:remove()
 end)
 
@@ -900,7 +995,6 @@ local function jump_month(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter title by looking backward through sparse metadata
     local active_title = nil
     for i = current_idx, 1, -1 do
         local t = pl[i].title
@@ -921,7 +1015,6 @@ local function jump_month(direction)
             end
         end
     else
-        -- Scan backward to find the title card for the previous month
         for i = current_idx - 1, 1, -1 do
             local t = pl[i].title
             if t and t ~= "" and t ~= "Unknown Date" and t ~= active_title then
@@ -929,7 +1022,6 @@ local function jump_month(direction)
                 break
             end
         end
-        -- If we are in the very first month, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -959,7 +1051,6 @@ local function jump_year(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter year by looking backward
     local active_year = nil
     for i = current_idx, 1, -1 do
         local y = extract_year(pl[i].title)
@@ -981,7 +1072,6 @@ local function jump_year(direction)
         end
     else
         local prev_year = nil
-        -- Scan backward to find the absolute FIRST occurrence of the previous year
         for i = current_idx - 1, 1, -1 do
             local y = extract_year(pl[i].title)
             if y and y ~= active_year then
@@ -989,13 +1079,12 @@ local function jump_year(direction)
                     prev_year = y
                     target_idx = i
                 elseif y == prev_year then
-                    target_idx = i -- Keep updating to the earlier index
+                    target_idx = i 
                 else
-                    break -- We hit an even older year, so stop
+                    break 
                 end
             end
         end
-        -- If we are in the very first year, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -1379,7 +1468,7 @@ for line in open(sys.argv[1], encoding='utf-8', errors='ignore'):
         if k in ('date','datetime','datetimeoriginal','createdate'): date_raw = val
         elif k in ('gps','coords','coordinates','latlon','latlng'):
             a,b = pg(val);  lat,lon = (a,b) if a is not None and b is not None else (lat,lon)
-        elif k in ('lat','latitude'):  a = pc(val); lat = a if a is not None else lat
+        elif k in ('lat','latitude'):   a = pc(val); lat = a if a is not None else lat
         elif k in ('lon','lng','long','longitude'): a = pc(val); lon = a if a is not None else lon
         elif k in ('location','place','city'):
             a,b = pg(val)
@@ -1513,10 +1602,10 @@ for line in open(sys.argv[1], encoding='utf-8', errors='ignore'):
     m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
     if m:
         k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
-        if k in ('date','datetime','datetimeoriginal','createdate'): date_raw = val
-        elif k in ('gps','coords','coordinates','latlon','latlng'):
+        if k in ('date', 'datetime', 'datetimeoriginal', 'createdate'): date_raw = val
+        elif k in ('gps', 'coords', 'coordinates', 'latlon', 'latlng'):
             a,b = pg(val);  lat,lon = (a,b) if a is not None and b is not None else (lat,lon)
-        elif k in ('location','place','city'):
+        elif k in ('location', 'place', 'city'):
             a,b = pg(val)
             if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
             else: loc = val
@@ -1826,11 +1915,6 @@ PLAYLIST_DIR="$(dirname "$PLAYLIST")"
 TITLE_DIR="$APP_DIR/Data/TitleCards"
 POLICE="$APP_DIR/xmp-police.sh"
 
-# --- Self-healing: recreate any folder that was deleted ----------------------
-# launch.sh runs standalone (autostart / idle-watcher), long after the
-# installer. If the user nukes Playlist/, TitleCards/, Media/, etc. we must not
-# fall over: every directory the launcher or its writes depend on is recreated
-# here before anything touches it.
 mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
          "$APP_DIR/Data/Maps" "$APP_DIR/Data/Optimized_Vids"
 
@@ -1853,7 +1937,6 @@ trap cleanup EXIT INT TERM
 
 rm -f "$AUDIO_SOCK"
 
-# Background metadata daemon: keeps .xmp sidecars warm while we run / sit idle.
 nice -n 19 "$POLICE" >/dev/null 2>&1 &
 POLICE_PID=$!
 
@@ -1865,22 +1948,6 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
     MUSIC_PID=$!
 fi
 
-# =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven, rebuilt every launch)
-#
-# Two costs are deliberately separated:
-#   * EXTRACTION (police --once) stays INCREMENTAL - only reads metadata out of
-#     media whose sidecar is missing/stale. Heavy media is never re-read warm.
-#   * ASSEMBLY (this block) runs UNCONDITIONALLY - it's cheap and rebuilding
-#     keeps media / sidecars / playlist reconciled, including dropping lines for
-#     media deleted since last launch.
-#
-# HEAVY does NOT decide whether to build (we always build) - it decides whether
-# to show the loading screen, i.e. whether the wait will be noticeable:
-#   * playlist.m3u missing            -> first/forced build
-#   * TitleCards empty or deleted     -> every month card must be re-rendered
-#   * media/txt newer than playlist   -> extraction + maybe a new month card
-# =============================================================================
 HEAVY=0
 if [ ! -f "$PLAYLIST" ]; then
     HEAVY=1
@@ -1895,11 +1962,8 @@ elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
     HEAVY=1
 fi
 
-# Minimum time (seconds) the loading message must stay on screen so it actually
-# renders and is readable, even when the build turns out to be near-instant.
 MIN_LOAD_SECS=2
 
-# ---- Loading screen when the wait would be noticeable -----------------------
 if [ "$HEAVY" = 1 ]; then
     echo "Building playlist..."
     LOADING_ASS="/tmp/loading_$$.ass"
@@ -1927,10 +1991,8 @@ PY
     SECONDS=0
 fi
 
-# ---- 1. Make sidecars current (INCREMENTAL: cold start extracts all) --------
 "$POLICE" --once
 
-# ---- 2. Read sorted (date | media-path) pairs from sidecars only ------------
 exiftool -q -m -j -d "%Y%m%d%H%M%S" \
     -DateTimeOriginal -CreateDate -CreationDate \
     -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
@@ -1958,7 +2020,6 @@ for d, m in rows:
 PY
 rm -f "$PLAYLIST.json"
 
-# ---- 3. Inject animated month/year title cards ------------------------------
 echo "#EXTM3U" > "$PLAYLIST.tmp"
 declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
 
@@ -1975,7 +2036,7 @@ while IFS='|' read -r D PATH_STR; do
             if [ -n "$M_NAME" ]; then
                 CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
                 if [ ! -f "$CARD_PATH" ]; then
-                    echo "  Generating Animated Title Card: $M_NAME $Y..."
+                    echo "   Generating Animated Title Card: $M_NAME $Y..."
                     "$APP_DIR/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
                 fi
                 echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
@@ -1989,7 +2050,6 @@ done < "$PLAYLIST.raw"
 mv "$PLAYLIST.tmp" "$PLAYLIST"
 rm -f "$PLAYLIST.raw"
 
-# ---- Tear down loading screen (held a minimum time so it's actually seen) ---
 if [ -n "$LOADING_PID" ]; then
     [ "$SECONDS" -lt "$MIN_LOAD_SECS" ] && sleep "$((MIN_LOAD_SECS - SECONDS))"
     kill "$LOADING_PID" 2>/dev/null
@@ -2011,23 +2071,15 @@ cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
 #!/bin/bash
 IDLE_LIMIT=300000
 while true; do
-    # 1. MPRIS Media Players (Spotify, VLC, Browsers)
     if playerctl -a status 2>/dev/null | grep -iq "playing"; then sleep 10; continue; fi
-    
-    # 2. Audio Sinks actively running
     if pactl list sink-inputs 2>/dev/null | grep -iq "state: RUNNING"; then sleep 10; continue; fi
-    
-    # 3. Freedesktop Screensaver Blocks (Catches Plex, Netflix, etc.)
     if dbus-send --session --dest=org.freedesktop.ScreenSaver --type=method_call --print-reply /org/freedesktop/ScreenSaver org.freedesktop.ScreenSaver.GetInhibitors 2>/dev/null | grep -q "string"; then 
         sleep 10; continue; 
     fi
-    
-    # 4. GNOME Session Blocks (Checks for active idle blocks)
     if gdbus call --session --dest org.gnome.SessionManager --object-path /org/gnome/SessionManager --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null | grep -q "true"; then
         sleep 10; continue;
     fi
 
-    # 5. Raw Hardware Idle Time (Mouse/Keyboard)
     if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
         RAW=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor --object-path /org/gnome/Mutter/IdleMonitor/Core --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null)
         IDLE_MS=$(echo "$RAW" | awk '{print $2}' | tr -d '[,)]')
@@ -2047,31 +2099,7 @@ chmod +x "$APP_DIR/idle-watcher.sh"
 # =============================================================================
 echo "▶ Writing xmp-police.sh..."
 cat > "$APP_DIR/xmp-police.sh" << 'EOF'
-
-
 #!/bin/bash
-# =============================================================================
-#  xmp-police.sh — non-destructive metadata extractor
-#
-#  Walks Data/Media and writes one Immich-style ".xmp" sidecar per media file,
-#  carrying the resolved capture date (+ GPS / city-state-country when known).
-#
-#  • Incremental: a file is only (re)processed when its sidecar is missing, or
-#    the media / its .txt override is newer than the sidecar. Warm runs do
-#    essentially nothing.
-#  • Non-destructive: the original media is NEVER modified. No PNG->JPG, no
-#    in-place EXIF writes. This file supersedes exif-daemon.sh + apply-overrides.sh.
-#  • Precedence (highest first):  user ".txt" override  >  embedded EXIF  >
-#    filename timestamp (e.g. PXL_20230401_203352 / IMG_20230401_120000).
-#
-#  Sidecar naming follows Immich's preferred form: "<media>.<ext>.xmp"
-#  (e.g. photo.jpg -> photo.jpg.xmp), so a future Immich external library
-#  pointed at this folder will discover them automatically.
-#
-#  Usage:
-#    xmp-police.sh           # run as a background daemon (rescan every 60s)
-#    xmp-police.sh --once    # single incremental pass, then exit
-# =============================================================================
 set -u
 
 MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
@@ -2079,9 +2107,6 @@ MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
 
-# ----------------------------------------------------------------------------
-# Wait for exiftool. In --once mode we don't block the launcher forever.
-# ----------------------------------------------------------------------------
 if ! command -v exiftool >/dev/null 2>&1; then
     if [ "$ONCE" = 1 ]; then
         echo "xmp-police: exiftool not found — skipping sidecar refresh." >&2
@@ -2095,14 +2120,10 @@ MEDIA_EXTS=( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.we
              -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v'
              -o -iname '*.webm' )
 
-# ----------------------------------------------------------------------------
-# One incremental pass.
-# ----------------------------------------------------------------------------
 run_pass() {
     local STALE JSON
     STALE="$(mktemp)"; JSON="$(mktemp)"
 
-    # 1) Collect files whose sidecar is missing / out of date.
     find "$MEDIA_DIR" -maxdepth 1 -type f \( "${MEDIA_EXTS[@]}" \) -print0 |
     while IFS= read -r -d '' m; do
         xmp="${m}.xmp"
@@ -2119,7 +2140,6 @@ run_pass() {
         [ "$stale" = 1 ] && printf '%s\n' "$m"
     done > "$STALE"
 
-    # 2) Bulk-read embedded metadata for just the stale files (single process).
     if [ -s "$STALE" ]; then
         exiftool -q -m -j -d "%Y-%m-%dT%H:%M:%S" \
             -DateTimeOriginal -CreateDate -CreationDate -MediaCreateDate -DateTimeCreated \
@@ -2128,7 +2148,6 @@ run_pass() {
             -api Geolocation -GeolocationCity -GeolocationRegion -GeolocationCountry \
             -@ "$STALE" > "$JSON" 2>/dev/null
 
-        # 3) Merge with .txt overrides + filename fallback, then write sidecars.
         if [ -s "$JSON" ]; then
             python3 - "$JSON" <<'PY'
 import sys, json, os, re
@@ -2277,7 +2296,6 @@ for e in data:
     state   = e.get("GeolocationRegion")  or e.get("State") or e.get("Province-State") or ""
     country = e.get("GeolocationCountry") or e.get("Country") or ""
 
-    # --- human override wins -------------------------------------------------
     txt = find_txt(media)
     if txt:
         td, tla, tlo, tloc = parse_txt(txt)
@@ -2308,7 +2326,6 @@ PY
         fi
     fi
 
-    # 4) Remove orphan sidecars whose media no longer exists.
     find "$MEDIA_DIR" -maxdepth 1 -type f -name '*.xmp' -print0 |
     while IFS= read -r -d '' x; do
         media="${x%.xmp}"
@@ -2318,9 +2335,6 @@ PY
     rm -f "$STALE" "$JSON"
 }
 
-# ----------------------------------------------------------------------------
-# Entry point
-# ----------------------------------------------------------------------------
 if [ "$ONCE" = 1 ]; then
     run_pass
     exit 0
@@ -2331,10 +2345,6 @@ while command -v exiftool >/dev/null 2>&1; do
     run_pass
     sleep 60
 done
-
-
-
-
 EOF
 chmod +x "$APP_DIR/xmp-police.sh"
 
@@ -2376,5 +2386,5 @@ echo "   Caches     : $MAP_DIR & $OPT_DIR"
 if [ "${#MISSING[@]}" -gt 0 ]; then
     echo ""
     echo "⚠ Reminder: still missing -> ${MISSING[*]}"
-    echo "  Install those, then re-run this script before launching."
+    echo "   Install those, then re-run this script before launching."
 fi
