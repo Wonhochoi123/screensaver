@@ -1838,19 +1838,20 @@ MUSIC_DIR="$HOME/Screensaver-App/Data/Music"
 MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
 PLAYLIST="$HOME/Screensaver-App/Data/Playlist/playlist.m3u"
 TITLE_DIR="$HOME/Screensaver-App/Data/TitleCards"
+POLICE="$HOME/Screensaver-App/xmp-police.sh"
 
 command -v exiftool >/dev/null 2>&1 || \
     echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
 MUSIC_PID=""
-EXIF_PID=""
+POLICE_PID=""
 VID_PID=""
 LOADING_PID=""
 
 cleanup() {
-    [ -n "$MUSIC_PID" ] && kill "$MUSIC_PID" 2>/dev/null
-    [ -n "$EXIF_PID" ] && kill "$EXIF_PID" 2>/dev/null
-    [ -n "$VID_PID" ]  && kill "$VID_PID" 2>/dev/null
+    [ -n "$MUSIC_PID" ]   && kill "$MUSIC_PID" 2>/dev/null
+    [ -n "$POLICE_PID" ]  && kill "$POLICE_PID" 2>/dev/null
+    [ -n "$VID_PID" ]     && kill "$VID_PID" 2>/dev/null
     [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
     rm -f "$AUDIO_SOCK"
 }
@@ -1858,8 +1859,9 @@ trap cleanup EXIT INT TERM
 
 rm -f "$AUDIO_SOCK"
 
-nice -n 19 "$HOME/Screensaver-App/exif-daemon.sh" >/dev/null 2>&1 &
-EXIF_PID=$!
+# Background metadata daemon: keeps .xmp sidecars warm while we run / sit idle.
+nice -n 19 "$POLICE" >/dev/null 2>&1 &
+POLICE_PID=$!
 
 "$HOME/Screensaver-App/vid-daemon.sh" >/dev/null 2>&1 &
 VID_PID=$!
@@ -1870,12 +1872,30 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
 fi
 
 # =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER 
+# CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven)
+#
+# We rebuild only when something the user cares about changed: a new/edited
+# media file, or an edited .txt override. The expensive part — reading capture
+# dates out of heavy media — is gone; dates now come from tiny .xmp sidecars
+# maintained by xmp-police.sh. A cold first run still pays the one-time
+# extraction cost (behind the loading screen); every run after that is instant.
 # =============================================================================
-if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
-    echo "▶ Compiling chronological playlist..."
-    
-    # Generate and launch the un-interruptible Loading Screen
+NEED_BUILD=0
+if [ ! -f "$PLAYLIST" ]; then
+    NEED_BUILD=1
+elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
+           -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
+           -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
+           -o -iname '*.webm' -o -iname '*.txt' \) \
+        -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
+    NEED_BUILD=1
+fi
+
+if [ "$NEED_BUILD" = 1 ]; then
+    echo "▶ Refreshing sidecars and compiling chronological playlist..."
+
+    # ---- Uninterruptible loading screen ------------------------------------
     LOADING_ASS="/tmp/loading_$$.ass"
     python3 - "$LOADING_ASS" <<'PY'
 import sys
@@ -1894,43 +1914,50 @@ Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\f
 with open(sys.argv[1], "w") as f:
     f.write(ass)
 PY
-    
-    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
+
+    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar \
+        --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
+        --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
     LOADING_PID=$!
 
-    exiftool -T -d "%Y%m%d%H%M%S" \
-        -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
-        -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
-        "$MEDIA_DIR" 2>/dev/null | \
-    awk -F'\t' '{
-        d = $1
-        if (d == "-" || d == "") d = $2
-        if (d == "-" || d == "") d = $3
-        if (d == "-" || d == "") d = $4
-        
-        path = $5
-        
-        if (d == "-" || d == "") {
-            if (match(path, /([0-9]{8}_[0-9]{6})/)) {
-                d = substr(path, RSTART, 15)
-                gsub("_", "", d)
-            } else if (match(path, /PXL_([0-9]{8}_[0-9]{6})/)) {
-                d = substr(path, RSTART+4, 15)
-                gsub("_", "", d)
-            }
-        }
-        
-        if (d == "-" || d == "") d = "99999999999999"
-        print d "|" path
-    }' | sort -n > "$PLAYLIST.raw"
+    # ---- 1. Make sidecars current (incremental; cold start extracts all) ----
+    "$POLICE" --once
 
+    # ---- 2. Read sorted (date | media-path) pairs from sidecars only --------
+    exiftool -q -m -j -d "%Y%m%d%H%M%S" \
+        -DateTimeOriginal -CreateDate -CreationDate \
+        -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
+
+    python3 - "$PLAYLIST.json" <<'PY' > "$PLAYLIST.raw"
+import sys, json, os
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    data = []
+rows = []
+for e in data:
+    sf = e.get("SourceFile", "")
+    media = sf[:-4] if sf.lower().endswith(".xmp") else sf
+    if not media or not os.path.exists(media):
+        continue
+    d = e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate") or ""
+    d = "".join(c for c in str(d) if c.isdigit())
+    if len(d) < 6:
+        d = "99999999999999"
+    rows.append((d, media))
+rows.sort()
+for d, m in rows:
+    print(d + "|" + m)
+PY
+    rm -f "$PLAYLIST.json"
+
+    # ---- 3. Inject animated month/year title cards --------------------------
     echo "#EXTM3U" > "$PLAYLIST.tmp"
     declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
 
     LAST_YM=""
-
     while IFS='|' read -r D PATH_STR; do
-        TITLE="Unknown Date"
+        [ -e "$PATH_STR" ] || continue
         if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
             YM="${D:0:6}"
             if [[ "$YM" != "$LAST_YM" ]]; then
@@ -1938,27 +1965,24 @@ PY
                 Y="${YM:0:4}"
                 M="${YM:4:2}"
                 M_NAME="${M_NAMES[$M]}"
-                
                 if [ -n "$M_NAME" ]; then
                     CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
                     if [ ! -f "$CARD_PATH" ]; then
                         echo "  🎬 Generating Animated Title Card: $M_NAME $Y..."
                         "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
                     fi
-                    
                     echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
                     [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
                 fi
             fi
         fi
-        
         echo "$PATH_STR" >> "$PLAYLIST.tmp"
     done < "$PLAYLIST.raw"
 
     mv "$PLAYLIST.tmp" "$PLAYLIST"
     rm -f "$PLAYLIST.raw"
-    
-    # Tear down the un-interruptible Loading Screen now that the work is done
+
+    # ---- Tear down loading screen ------------------------------------------
     kill "$LOADING_PID" 2>/dev/null
     wait "$LOADING_PID" 2>/dev/null
     LOADING_PID=""
@@ -2010,7 +2034,303 @@ EOF
 chmod +x "$APP_DIR/idle-watcher.sh"
 
 # =============================================================================
-# 9. Autostart + manual launcher
+# 9. xmp-police.sh
+# =============================================================================
+echo "▶ Writing xmp-police.sh..."
+cat > "$APP_DIR/xmp-police.sh" << 'EOF'
+
+
+#!/bin/bash
+# =============================================================================
+#  xmp-police.sh — non-destructive metadata extractor
+#
+#  Walks Data/Media and writes one Immich-style ".xmp" sidecar per media file,
+#  carrying the resolved capture date (+ GPS / city-state-country when known).
+#
+#  • Incremental: a file is only (re)processed when its sidecar is missing, or
+#    the media / its .txt override is newer than the sidecar. Warm runs do
+#    essentially nothing.
+#  • Non-destructive: the original media is NEVER modified. No PNG->JPG, no
+#    in-place EXIF writes. This file supersedes exif-daemon.sh + apply-overrides.sh.
+#  • Precedence (highest first):  user ".txt" override  >  embedded EXIF  >
+#    filename timestamp (e.g. PXL_20230401_203352 / IMG_20230401_120000).
+#
+#  Sidecar naming follows Immich's preferred form: "<media>.<ext>.xmp"
+#  (e.g. photo.jpg -> photo.jpg.xmp), so a future Immich external library
+#  pointed at this folder will discover them automatically.
+#
+#  Usage:
+#    xmp-police.sh           # run as a background daemon (rescan every 60s)
+#    xmp-police.sh --once    # single incremental pass, then exit
+# =============================================================================
+set -u
+
+MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
+
+ONCE=0
+[ "${1:-}" = "--once" ] && ONCE=1
+
+# ----------------------------------------------------------------------------
+# Wait for exiftool. In --once mode we don't block the launcher forever.
+# ----------------------------------------------------------------------------
+if ! command -v exiftool >/dev/null 2>&1; then
+    if [ "$ONCE" = 1 ]; then
+        echo "xmp-police: exiftool not found — skipping sidecar refresh." >&2
+        exit 0
+    fi
+    while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
+fi
+
+MEDIA_EXTS=( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp'
+             -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif'
+             -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v'
+             -o -iname '*.webm' )
+
+# ----------------------------------------------------------------------------
+# One incremental pass.
+# ----------------------------------------------------------------------------
+run_pass() {
+    local STALE JSON
+    STALE="$(mktemp)"; JSON="$(mktemp)"
+
+    # 1) Collect files whose sidecar is missing / out of date.
+    find "$MEDIA_DIR" -maxdepth 1 -type f \( "${MEDIA_EXTS[@]}" \) -print0 |
+    while IFS= read -r -d '' m; do
+        xmp="${m}.xmp"
+        base="${m%.*}"
+        txt=""
+        [ -s "${base}.txt" ] && txt="${base}.txt"
+        [ -s "${m}.txt" ]    && txt="${m}.txt"
+
+        stale=0
+        if   [ ! -s "$xmp" ];                        then stale=1
+        elif [ "$m" -nt "$xmp" ];                    then stale=1
+        elif [ -n "$txt" ] && [ "$txt" -nt "$xmp" ]; then stale=1
+        fi
+        [ "$stale" = 1 ] && printf '%s\n' "$m"
+    done > "$STALE"
+
+    # 2) Bulk-read embedded metadata for just the stale files (single process).
+    if [ -s "$STALE" ]; then
+        exiftool -q -m -j -d "%Y-%m-%dT%H:%M:%S" \
+            -DateTimeOriginal -CreateDate -CreationDate -MediaCreateDate -DateTimeCreated \
+            -GPSLatitude# -GPSLongitude# \
+            -City -State -Province-State -Country \
+            -api Geolocation -GeolocationCity -GeolocationRegion -GeolocationCountry \
+            -@ "$STALE" > "$JSON" 2>/dev/null
+
+        # 3) Merge with .txt overrides + filename fallback, then write sidecars.
+        if [ -s "$JSON" ]; then
+            python3 - "$JSON" <<'PY'
+import sys, json, os, re
+from xml.sax.saxutils import escape
+
+def parse_coord(s):
+    s = re.sub(r'\(.*?\)', '', str(s)).upper()
+    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
+    d = re.search(r'[NSEW]', s)
+    v = None
+    if   len(nums) == 1: v = nums[0]
+    elif len(nums) == 2: v = nums[0] + nums[1]/60.0
+    elif len(nums) >= 3: v = nums[0] + nums[1]/60.0 + nums[2]/3600.0
+    if v is not None and d and d.group(0) in ('S', 'W'): v = -abs(v)
+    return v
+
+def parse_gps(value):
+    s = re.sub(r'\(.*?\)', '', str(value)).upper()
+    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
+    dirs = re.findall(r'[NSEW]', s)
+    def sign(la, lo):
+        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
+        if   len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
+        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
+        return la, lo
+    if len(nums) == 2: return sign(nums[0], nums[1])
+    if len(nums) == 6: return sign(nums[0]+nums[1]/60+nums[2]/3600, nums[3]+nums[4]/60+nums[5]/3600)
+    if len(nums) == 4: return sign(nums[0]+nums[1]/60, nums[2]+nums[3]/60)
+    return None, None
+
+def find_txt(media):
+    base = os.path.splitext(media)[0]
+    for c in (base + ".txt", media + ".txt"):
+        if os.path.isfile(c) and os.path.getsize(c) > 0:
+            return c
+    return None
+
+def parse_txt(path):
+    date, lat, lon, loc = "", None, None, ""
+    try:
+        lines = open(path, encoding="utf-8", errors="ignore").read().splitlines()
+    except Exception:
+        return date, lat, lon, loc
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
+        if m:
+            k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
+            if k in ('date', 'datetime', 'datetimeoriginal', 'createdate'):
+                date = val
+            elif k in ('gps', 'coords', 'coordinates', 'latlon', 'latlng'):
+                a, b = parse_gps(val)
+                if a is not None and b is not None: lat, lon = a, b
+            elif k in ('lat', 'latitude'):
+                a = parse_coord(val); lat = a if a is not None else lat
+            elif k in ('lon', 'lng', 'long', 'longitude'):
+                a = parse_coord(val); lon = a if a is not None else lon
+            elif k in ('location', 'place', 'city'):
+                a, b = parse_gps(val)
+                if a is not None and b is not None and -90 <= a <= 90 and -180 <= b <= 180:
+                    lat, lon = a, b
+                else:
+                    loc = val
+        else:
+            a, b = parse_gps(line)
+            if a is not None and b is not None and -90 <= a <= 90 and -180 <= b <= 180:
+                lat, lon = a, b
+    return date, lat, lon, loc
+
+def to_iso(raw):
+    raw = str(raw).strip()
+    m = re.match(r'(\d{4})[-:./](\d{1,2})[-:./](\d{1,2})[ T]?(\d{1,2})?:?(\d{1,2})?:?(\d{1,2})?', raw)
+    if not m:
+        m = re.match(r'(\d{4})(\d{2})(\d{2})(?:[_ ]?(\d{2})(\d{2})(\d{2}))?$', raw)
+    if not m:
+        return None
+    y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+    hh = (m.group(4) or "12").zfill(2)
+    mm = (m.group(5) or "00").zfill(2)
+    ss = (m.group(6) or "00").zfill(2)
+    if not (1 <= int(mo) <= 12 and 1 <= int(d) <= 31):
+        return None
+    return f"{y}-{mo}-{d}T{hh}:{mm}:{ss}"
+
+def filename_date(media):
+    name = os.path.basename(media)
+    m = re.search(r'(\d{8})[_-]?(\d{6})', name)
+    if m: return to_iso(m.group(1) + m.group(2))
+    m = re.search(r'(?<!\d)(\d{8})(?!\d)', name)
+    if m: return to_iso(m.group(1))
+    return None
+
+def write_xmp(media, date_iso, lat, lon, city, state, country):
+    fields = []
+    if date_iso:
+        fields.append("   <exif:DateTimeOriginal>%s</exif:DateTimeOriginal>" % escape(date_iso))
+        fields.append("   <xmp:CreateDate>%s</xmp:CreateDate>" % escape(date_iso))
+        fields.append("   <photoshop:DateCreated>%s</photoshop:DateCreated>" % escape(date_iso))
+    if lat is not None and lon is not None:
+        fields.append("   <exif:GPSLatitude>%.7f</exif:GPSLatitude>" % lat)
+        fields.append("   <exif:GPSLongitude>%.7f</exif:GPSLongitude>" % lon)
+    if city:    fields.append("   <photoshop:City>%s</photoshop:City>" % escape(str(city)))
+    if state:   fields.append("   <photoshop:State>%s</photoshop:State>" % escape(str(state)))
+    if country: fields.append("   <photoshop:Country>%s</photoshop:Country>" % escape(str(country)))
+
+    doc = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+           '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Screensaver-Police 1.0">\n'
+           ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+           '  <rdf:Description rdf:about=""\n'
+           '   xmlns:exif="http://ns.adobe.com/exif/1.0/"\n'
+           '   xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
+           '   xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">\n'
+           + "\n".join(fields) + ("\n" if fields else "") +
+           '  </rdf:Description>\n'
+           ' </rdf:RDF>\n'
+           '</x:xmpmeta>\n')
+
+    xmp = media + ".xmp"
+    tmp = xmp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(doc)
+    os.replace(tmp, xmp)
+
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    data = []
+
+for e in data:
+    media = e.get("SourceFile")
+    if not media or not os.path.exists(media):
+        continue
+
+    date_raw = (e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate")
+                or e.get("MediaCreateDate") or e.get("DateTimeCreated") or "")
+
+    def _f(v):
+        try:    return float(v) if v not in (None, "") else None
+        except Exception: return None
+    lat = _f(e.get("GPSLatitude"))
+    lon = _f(e.get("GPSLongitude"))
+
+    city    = e.get("GeolocationCity")    or e.get("City") or ""
+    state   = e.get("GeolocationRegion")  or e.get("State") or e.get("Province-State") or ""
+    country = e.get("GeolocationCountry") or e.get("Country") or ""
+
+    # --- human override wins -------------------------------------------------
+    txt = find_txt(media)
+    if txt:
+        td, tla, tlo, tloc = parse_txt(txt)
+        if td:
+            date_raw = td
+        if tla is not None and tlo is not None:
+            lat, lon = tla, tlo
+        if tloc:
+            parts = [p.strip() for p in tloc.split(",")]
+            if len(parts) >= 1 and parts[0]: city    = parts[0]
+            if len(parts) >= 2 and parts[1]: state   = parts[1]
+            if len(parts) >= 3 and parts[2]: country = parts[2]
+
+    date_iso = to_iso(date_raw) if date_raw else None
+    if not date_iso:
+        date_iso = filename_date(media)
+
+    if lat is not None and not (-90  <= lat <= 90 ): lat = None
+    if lon is not None and not (-180 <= lon <= 180): lon = None
+    if lat is None or lon is None:
+        lat = lon = None
+
+    try:
+        write_xmp(media, date_iso, lat, lon, city, state, country)
+    except Exception as ex:
+        sys.stderr.write("xmp-police: failed on %s: %s\n" % (media, ex))
+PY
+        fi
+    fi
+
+    # 4) Remove orphan sidecars whose media no longer exists.
+    find "$MEDIA_DIR" -maxdepth 1 -type f -name '*.xmp' -print0 |
+    while IFS= read -r -d '' x; do
+        media="${x%.xmp}"
+        [ -e "$media" ] || rm -f "$x"
+    done
+
+    rm -f "$STALE" "$JSON"
+}
+
+# ----------------------------------------------------------------------------
+# Entry point
+# ----------------------------------------------------------------------------
+if [ "$ONCE" = 1 ]; then
+    run_pass
+    exit 0
+fi
+
+trap 'exit 0' INT TERM HUP
+while command -v exiftool >/dev/null 2>&1; do
+    run_pass
+    sleep 60
+done
+
+
+
+
+EOF
+chmod +x "$APP_DIR/xmp-police.sh"
+
+# =============================================================================
+# 10. Autostart + manual launcher
 # =============================================================================
 echo "▶ Writing autostart + app launcher..."
 cat > "$HOME/.config/autostart/idle-watcher.desktop" << 'EOF'
@@ -2036,7 +2356,7 @@ Categories=Utility;
 EOF
 
 # =============================================================================
-# 10. Done
+# 11. Done
 # =============================================================================
 echo ""
 echo "✅ Migration and Deployment finished!"
