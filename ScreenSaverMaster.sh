@@ -1833,15 +1833,25 @@ cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
 #!/bin/bash
 pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 
+APP_DIR="$HOME/Screensaver-App"
 AUDIO_SOCK="/tmp/ss_audio.sock"
-MUSIC_DIR="$HOME/Screensaver-App/Data/Music"
-MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
-PLAYLIST="$HOME/Screensaver-App/Data/Playlist/playlist.m3u"
-TITLE_DIR="$HOME/Screensaver-App/Data/TitleCards"
-POLICE="$HOME/Screensaver-App/xmp-police.sh"
+MUSIC_DIR="$APP_DIR/Data/Music"
+MEDIA_DIR="$APP_DIR/Data/Media"
+PLAYLIST="$APP_DIR/Data/Playlist/playlist.m3u"
+PLAYLIST_DIR="$(dirname "$PLAYLIST")"
+TITLE_DIR="$APP_DIR/Data/TitleCards"
+POLICE="$APP_DIR/xmp-police.sh"
+
+# --- Self-healing: recreate any folder that was deleted ----------------------
+# launch.sh runs standalone (autostart / idle-watcher), long after the
+# installer. If the user nukes Playlist/, TitleCards/, Media/, etc. we must not
+# fall over: every directory the launcher or its writes depend on is recreated
+# here before anything touches it.
+mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
+         "$APP_DIR/Data/Maps" "$APP_DIR/Data/Optimized_Vids"
 
 command -v exiftool >/dev/null 2>&1 || \
-    echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
+    echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
 MUSIC_PID=""
 POLICE_PID=""
@@ -1863,7 +1873,7 @@ rm -f "$AUDIO_SOCK"
 nice -n 19 "$POLICE" >/dev/null 2>&1 &
 POLICE_PID=$!
 
-"$HOME/Screensaver-App/vid-daemon.sh" >/dev/null 2>&1 &
+"$APP_DIR/vid-daemon.sh" >/dev/null 2>&1 &
 VID_PID=$!
 
 if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
@@ -1875,21 +1885,22 @@ fi
 # CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven, rebuilt every launch)
 #
 # Two costs are deliberately separated:
-#   * EXTRACTION (police --once) stays INCREMENTAL - it only reads metadata out
-#     of media files whose sidecar is missing/stale. Heavy media is never
-#     re-read on a warm run.
-#   * ASSEMBLY (this block) runs UNCONDITIONALLY - it's cheap (tiny XMP reads)
-#     and rebuilding from scratch keeps media / sidecars / playlist reconciled.
-#     In particular it drops lines for media DELETED since last launch, which a
-#     "only if something is newer" guard can't detect (a deleted file isn't
-#     "newer", it's gone).
+#   * EXTRACTION (police --once) stays INCREMENTAL - only reads metadata out of
+#     media whose sidecar is missing/stale. Heavy media is never re-read warm.
+#   * ASSEMBLY (this block) runs UNCONDITIONALLY - it's cheap and rebuilding
+#     keeps media / sidecars / playlist reconciled, including dropping lines for
+#     media deleted since last launch.
 #
-# The newer-than-playlist check no longer decides whether to build - it only
-# decides whether to show the loading screen, since new/changed media is the
-# only case where the wait (extraction + possibly a new title card) is visible.
+# HEAVY does NOT decide whether to build (we always build) - it decides whether
+# to show the loading screen, i.e. whether the wait will be noticeable:
+#   * playlist.m3u missing            -> first/forced build
+#   * TitleCards empty or deleted     -> every month card must be re-rendered
+#   * media/txt newer than playlist   -> extraction + maybe a new month card
 # =============================================================================
 HEAVY=0
 if [ ! -f "$PLAYLIST" ]; then
+    HEAVY=1
+elif [ -z "$(ls -A "$TITLE_DIR" 2>/dev/null)" ]; then
     HEAVY=1
 elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
         \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
@@ -1900,9 +1911,13 @@ elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
     HEAVY=1
 fi
 
-# ---- Loading screen only when the wait would actually be noticeable ---------
+# Minimum time (seconds) the loading message must stay on screen so it actually
+# renders and is readable, even when the build turns out to be near-instant.
+MIN_LOAD_SECS=2
+
+# ---- Loading screen when the wait would be noticeable -----------------------
 if [ "$HEAVY" = 1 ]; then
-    echo "* Extracting metadata / compiling chronological playlist..."
+    echo "Building playlist..."
     LOADING_ASS="/tmp/loading_$$.ass"
     python3 - "$LOADING_ASS" <<'PY'
 import sys
@@ -1925,6 +1940,7 @@ PY
         --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
         --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
     LOADING_PID=$!
+    SECONDS=0
 fi
 
 # ---- 1. Make sidecars current (INCREMENTAL: cold start extracts all) --------
@@ -1976,7 +1992,7 @@ while IFS='|' read -r D PATH_STR; do
                 CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
                 if [ ! -f "$CARD_PATH" ]; then
                     echo "  Generating Animated Title Card: $M_NAME $Y..."
-                    "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
+                    "$APP_DIR/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
                 fi
                 echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
                 [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
@@ -1989,15 +2005,16 @@ done < "$PLAYLIST.raw"
 mv "$PLAYLIST.tmp" "$PLAYLIST"
 rm -f "$PLAYLIST.raw"
 
-# ---- Tear down loading screen (if it was shown) -----------------------------
+# ---- Tear down loading screen (held a minimum time so it's actually seen) ---
 if [ -n "$LOADING_PID" ]; then
+    [ "$SECONDS" -lt "$MIN_LOAD_SECS" ] && sleep "$((MIN_LOAD_SECS - SECONDS))"
     kill "$LOADING_PID" 2>/dev/null
     wait "$LOADING_PID" 2>/dev/null
     LOADING_PID=""
     rm -f "$LOADING_ASS"
 fi
 
-mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
+mpv --config-dir="$APP_DIR/config" --playlist="$PLAYLIST"
 
 LAUNCH_EOF
 chmod +x "$APP_DIR/launch.sh"
