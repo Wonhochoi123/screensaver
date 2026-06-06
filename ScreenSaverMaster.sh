@@ -1443,13 +1443,13 @@ def s(v): return max(1, int(round(v * sc)))
 
 fs_year,  fsp_year  = s(50),  s(40)
 fs_month, fsp_month = s(120), s(50)
-outline, shadow     = s(3),   s(4)
 cx, cy = W // 2, H // 2
 
 tokens = ["{\\fs%d\\fsp%d}" % (fs_year, fsp_year)] + list(year) + ["\\N", "\\N"] \
        + ["{\\fs%d\\fsp%d}" % (fs_month, fsp_month)] + list(month.upper())
 target_indices = [i for i, t in enumerate(tokens) if not t.startswith("{") and t != "\\N"]
 
+# Outline=0, Shadow=0 -> no frames, no drop shadow. Just white glyphs.
 ass_header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -1457,7 +1457,7 @@ PlayResY: {H}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Montserrat ExtraBold,{fs_month},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
+Style: Default,Montserrat ExtraBold,{fs_month},&H00FFFFFF,&H000000FF,&H00FFFFFF,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1475,7 +1475,8 @@ for target_i in target_indices:
         if t.startswith("{") or t == "\\N":
             line_str += t
         elif i == target_i:
-            line_str += f"{{\\alpha&HFF&\\t({start_t},{end_t},\\alpha&H00&)}}{t}{{\\alpha&HFF&}}"
+            # reveal to &H40& == 0.75 opacity (00=opaque, FF=clear)
+            line_str += f"{{\\alpha&HFF&\\t({start_t},{end_t},\\alpha&H40&)}}{t}{{\\alpha&HFF&}}"
         else:
             line_str += f"{{\\alpha&HFF&}}{t}{{\\alpha&HFF&}}"
 
