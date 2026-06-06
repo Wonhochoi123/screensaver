@@ -1,8 +1,7 @@
 #!/bin/bash
 # 
 =============================================================================
-#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV 
-agnostic)
+#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
 # 
 =============================================================================
 set -u
