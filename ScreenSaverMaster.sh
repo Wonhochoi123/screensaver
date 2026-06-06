@@ -1397,23 +1397,67 @@ SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 YEAR="$1"
 MONTH="$2"
 OUT_FILE="$3"
-TMP_ASS="/tmp/title_$$.ass"
+BG="${4:-}"
 
-python3 - "$YEAR" "$MONTH" "$TMP_ASS" <<'PY'
+# Target resolution from the live display (optimize: render the card at the
+# screen's resolution, not a hardcoded 1080p). Falls back to 1080p until the
+# screensaver has run once and written display.conf.
+TARGET_W=1920; TARGET_H=1080
+if [ -s "$APP_DIR/display.conf" ]; then
+    res="$(tr -dc '0-9x' < "$APP_DIR/display.conf")"
+    if [[ "$res" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        TARGET_W="${BASH_REMATCH[1]}"; TARGET_H="${BASH_REMATCH[2]}"
+    fi
+fi
+
+TMP_DIR="$(mktemp -d)"
+OUT_TMP=""
+trap 'rm -rf "$TMP_DIR"; [ -n "${OUT_TMP:-}" ] && rm -f "$OUT_TMP"' EXIT
+TMP_ASS="$TMP_DIR/title.ass"
+BG_PNG="$TMP_DIR/bg.png"
+
+# 1) Blurred, screen-filling background — rendered ONCE to a still, not blurred
+#    per video frame. Cover-crop at a small box of the *display* aspect ratio,
+#    heavy-blur cheaply, then upscale. Matches the app's gblur(sigma=50) look
+#    and stays correct on ultrawide screens (crop uses the real target ratio).
+HAVE_BG=0
+if [ -n "$BG" ] && [ -s "$BG" ]; then
+    SMALL_H=360
+    SMALL_W=$(( SMALL_H * TARGET_W / TARGET_H ))
+    if ffmpeg -v error -nostdin -y -i "$BG" \
+        -vf "scale=${SMALL_W}:${SMALL_H}:force_original_aspect_ratio=increase,crop=${SMALL_W}:${SMALL_H},gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1" \
+        -frames:v 1 "$BG_PNG" 2>/dev/null && [ -s "$BG_PNG" ]; then
+        HAVE_BG=1
+    fi
+fi
+
+# 2) Animated text overlay (ASS), sized to the target resolution so positions
+#    and font sizes scale with the screen instead of being baked at 1080p.
+python3 - "$YEAR" "$MONTH" "$TMP_ASS" "$TARGET_W" "$TARGET_H" <<'PY'
 import sys, random
 year, month, out_ass = sys.argv[1], sys.argv[2], sys.argv[3]
+W, H = int(sys.argv[4]), int(sys.argv[5])
 
-tokens = ["{\\fs50\\fsp40}"] + list(year) + ["\\N", "\\N", "{\\fs120\\fsp50}"] + list(month.upper())
+sc = H / 1080.0
+def s(v): return max(1, int(round(v * sc)))
+
+fs_year,  fsp_year  = s(50),  s(40)
+fs_month, fsp_month = s(120), s(50)
+outline, shadow     = s(3),   s(4)
+cx, cy = W // 2, H // 2
+
+tokens = ["{\\fs%d\\fsp%d}" % (fs_year, fsp_year)] + list(year) + ["\\N", "\\N"] \
+       + ["{\\fs%d\\fsp%d}" % (fs_month, fsp_month)] + list(month.upper())
 target_indices = [i for i, t in enumerate(tokens) if not t.startswith("{") and t != "\\N"]
 
-ass_header = """[Script Info]
+ass_header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: {W}
+PlayResY: {H}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Montserrat ExtraBold,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
+Style: Default,Montserrat ExtraBold,{fs_month},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1425,7 +1469,7 @@ random.seed(year + month)
 for target_i in target_indices:
     start_t = random.randint(100, 1500)
     end_t = start_t + random.randint(500, 800)
-    
+
     line_str = ""
     for i, t in enumerate(tokens):
         if t.startswith("{") or t == "\\N":
@@ -1434,21 +1478,34 @@ for target_i in target_indices:
             line_str += f"{{\\alpha&HFF&\\t({start_t},{end_t},\\alpha&H00&)}}{t}{{\\alpha&HFF&}}"
         else:
             line_str += f"{{\\alpha&HFF&}}{t}{{\\alpha&HFF&}}"
-    
-    lines.append(f"Dialogue: 0,00:00:00.00,00:00:04.00,Default,,0,0,0,,{{\\an5\\pos(960,540)}}{line_str}")
+
+    lines.append(f"Dialogue: 0,00:00:00.00,00:00:04.00,Default,,0,0,0,,{{\\an5\\pos({cx},{cy})}}{line_str}")
 
 with open(out_ass, "w") as f:
     f.write(ass_header)
     f.write("\n".join(lines))
 PY
 
-ffmpeg -v error -nostdin -y \
-    -f lavfi -i color=c=black:s=1920x1080:d=4 \
-    -f lavfi -i anullsrc=r=44100:cl=stereo:d=4 \
-    -vf "ass='${TMP_ASS}':fontsdir='${FONT_DIR}',fade=t=out:st=3.2:d=0.8" \
-    -c:v libx264 -preset fast -crf 22 -c:a aac -shortest "$OUT_FILE"
+# 3) Compose. Photo background if we have one; otherwise a plain black frame
+#    (a playlist video can't itself be transparent, so "no photo" == black,
+#    exactly as expected). Atomic write via a sibling temp file.
+if [ "$HAVE_BG" = 1 ]; then
+    VID_IN=(-loop 1 -t 4 -i "$BG_PNG")
+else
+    VID_IN=(-f lavfi -i "color=c=black:s=${TARGET_W}x${TARGET_H}:d=4")
+fi
 
-rm -f "$TMP_ASS"
+OUT_TMP="${OUT_FILE}.part.$$.mp4"
+if ffmpeg -v error -nostdin -y \
+        "${VID_IN[@]}" \
+        -f lavfi -i anullsrc=r=44100:cl=stereo:d=4 \
+        -vf "ass='${TMP_ASS}':fontsdir='${FONT_DIR}',fade=t=out:st=3.2:d=0.8,format=yuv420p" \
+        -c:v libx264 -preset fast -crf 22 -c:a aac -shortest "$OUT_TMP"; then
+    mv -f "$OUT_TMP" "$OUT_FILE"
+    OUT_TMP=""
+else
+    exit 1
+fi
 EOF
 chmod +x "$CFG/build-title.sh"
 
@@ -2044,6 +2101,29 @@ for d, m in rows:
 PY
 rm -f "$PLAYLIST.json"
 
+# --- Pick each month's "hero" still (largest image by file size) to use as
+#     the title-card background. Videos can't serve as a blurred backdrop, so a
+#     month with only videos gets no hero -> build-title.sh falls back to black.
+DISPLAY_RES="$(tr -dc '0-9x' < "$APP_DIR/display.conf" 2>/dev/null || true)"
+declare -A HERO_PHOTO HERO_SIZE
+while IFS='|' read -r D PATH_STR; do
+    [ -e "$PATH_STR" ] || continue
+    [[ "$D" == "99999999999999" || ${#D} -lt 6 ]] && continue
+    ext="${PATH_STR##*.}"
+    case "${ext,,}" in
+        jpg|jpeg|png|webp|tif|tiff|heic|heif|gif) ;;
+        *) continue ;;
+    esac
+    YM="${D:0:6}"
+    sz="$(stat -c '%s' "$PATH_STR" 2>/dev/null || echo 0)"
+    if [ "${HERO_SIZE[$YM]:-0}" -lt "$sz" ]; then
+        HERO_SIZE[$YM]="$sz"
+        HERO_PHOTO[$YM]="$PATH_STR"
+    fi
+done < "$PLAYLIST.raw"
+
+
+
 echo "#EXTM3U" > "$PLAYLIST.tmp"
 declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
 
@@ -2059,9 +2139,24 @@ while IFS='|' read -r D PATH_STR; do
             M_NAME="${M_NAMES[$M]}"
             if [ -n "$M_NAME" ]; then
                 CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
-                if [ ! -f "$CARD_PATH" ]; then
+                HERO="${HERO_PHOTO[$YM]:-}"
+                # A card's inputs are its hero photo + the display resolution.
+                # Rebuild whenever either changes (new biggest photo, a photo's
+                # XMP date moving it across months, or a resolution change), or
+                # when the hero file itself is newer than the card.
+                FP_FILE="$TITLE_DIR/.src_${Y}-${M_NAME}"
+                FP_NOW="${DISPLAY_RES}|${HERO}"
+                FP_OLD="$(cat "$FP_FILE" 2>/dev/null || true)"
+                need_card=0
+                if [ ! -f "$CARD_PATH" ]; then need_card=1
+                elif [ "$FP_NOW" != "$FP_OLD" ]; then need_card=1
+                elif [ -n "$HERO" ] && [ "$HERO" -nt "$CARD_PATH" ]; then need_card=1
+                fi
+                if [ "$need_card" = 1 ]; then
                     echo "  Generating Animated Title Card: $M_NAME $Y..."
-                    "$CFG_DIR/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
+                    if "$CFG_DIR/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH" "$HERO"; then
+                        printf '%s' "$FP_NOW" > "$FP_FILE"
+                    fi
                 fi
                 echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
                 [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
