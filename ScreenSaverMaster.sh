@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
+#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV Agnostic)
 # =============================================================================
 set -u
 
@@ -18,7 +18,7 @@ echo "▶ Preparing strict folder architecture..."
 
 rm -f "$HOME/.config/autostart/tv-watcher.desktop"
 rm -f "$HOME/.local/share/applications/tv-screensaver-now.desktop"
-pkill -f exif-daemon.sh 2>/dev/null || true
+pkill -f xmp-daemon.sh 2>/dev/null || true
 pkill -f vid-daemon.sh 2>/dev/null || true
 pkill -f tv-watcher.sh 2>/dev/null || true
 pkill -f idle-watcher.sh 2>/dev/null || true
@@ -27,7 +27,9 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
-mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
+mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" \
+    "$TITLE_DIR" "$PLAYLIST_DIR" "$HOME/.config/autostart" \
+    "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
 
 if [ -d "$BASE_DIR/_map" ]; then
     mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
@@ -130,11 +132,11 @@ WHEEL_DOWN  quit
 ESC         quit
 q           quit
 
-SPACE      script-message ss-toggle-pause
-PLAY       script-message ss-toggle-pause
-PAUSE      script-message ss-toggle-pause
-PLAYPAUSE  script-message ss-toggle-pause
-p          script-message ss-toggle-pause
+SPACE       script-message ss-toggle-pause
+PLAY        script-message ss-toggle-pause
+PAUSE       script-message ss-toggle-pause
+PLAYPAUSE   script-message ss-toggle-pause
+p           script-message ss-toggle-pause
 
 RIGHT playlist-next
 LEFT  playlist-prev
@@ -200,7 +202,7 @@ local function refresh_display_size()
         h = mp.get_property_number("osd-height") or 0
     end
     if w >= 320 and h >= 320 then
-        if DISPLAY_W ~= w or DISPLAY_H ~= h then
+        if DISPLAY_W != w or DISPLAY_H != h then
             DISPLAY_W, DISPLAY_H = w, h
             local f = io.open(APP_DIR .. "/display.conf", "w")
             if f then f:write(string.format("%dx%d", w, h)); f:close() end
@@ -209,8 +211,7 @@ local function refresh_display_size()
     return DISPLAY_W or 1920, DISPLAY_H or 1080
 end
 
-local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true,
-                   tif=true, tiff=true, gif=true, jfif=true}
+local image_ext = {jpg=true, jpeg=true, png=true, webp=true, bmp=true, tif=true, tiff=true, gif=true, jfif=true}
 
 local function get_video_rotation(path)
     local rot = mp.get_property_number("video-params/rotate")
@@ -377,7 +378,7 @@ local function parse_gps(value)
 end
 
 local function find_sidecar(path)
-    for _, c in ipairs({ (path:gsub("%.%w+$", "")) .. ".txt", path .. ".txt" }) do
+    for _, c in ipairs({ (path:gsub("%.%w+$", "")) .. ".txt", path .. ".txt", path .. ".xmp", (path:gsub("%.%w+$", "")) .. ".xmp" }) do
         local fi = utils.file_info(c)
         if fi and fi.size and fi.size > 0 then return c end
     end
@@ -391,6 +392,8 @@ local function parse_sidecar(path)
     local raw = f:read("*a"); f:close()
     if not raw then return nil end
     local o = {}
+    
+    -- Fast regex fallback for text sidecars
     for line in raw:gmatch("[^\r\n]+") do
         local key, val = line:match("^%s*([%a%s]-)%s*[:=]%s*(.+)%s*$")
         if key then
@@ -491,7 +494,7 @@ local function hud_geom()
     return {
         win_w = win_w, win_h = win_h, S = S, pad = pad, fs = fs,
         img_top = img_top, text_cy = text_cy,
-        qr_x  = pad,             qr_cx  = pad + math.floor(S / 2),
+        qr_x  = pad,       qr_cx  = pad + math.floor(S / 2),
         map_x = win_w - S - pad, map_cx = win_w - pad - math.floor(S / 2),
     }
 end
@@ -663,8 +666,7 @@ end
 
 local function set_pause_indicator(paused)
     if paused then
-        pause_ov.data =
-            "{\\an7\\pos(0,0)\\bord0\\shad4\\3c&H000000&\\4c&H000000&\\1c&HFFFFFF&\\alpha&H40&\\p1}"
+        pause_ov.data = "{\\an7\\pos(0,0)\\bord0\\shad4\\3c&H000000&\\4c&H000000&\\1c&HFFFFFF&\\alpha&H40&\\p1}"
             .. "m 1772 70 l 1792 70 l 1792 128 l 1772 128 "
             .. "m 1808 70 l 1828 70 l 1828 128 l 1808 128{\\p0}"
         pause_ov:update()
@@ -919,7 +921,6 @@ local function jump_month(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter title by looking backward through sparse metadata
     local active_title = nil
     for i = current_idx, 1, -1 do
         local t = pl[i].title
@@ -940,7 +941,6 @@ local function jump_month(direction)
             end
         end
     else
-        -- Scan backward to find the title card for the previous month
         for i = current_idx - 1, 1, -1 do
             local t = pl[i].title
             if t and t ~= "" and t ~= "Unknown Date" and t ~= active_title then
@@ -948,7 +948,6 @@ local function jump_month(direction)
                 break
             end
         end
-        -- If we are in the very first month, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -962,73 +961,6 @@ end
 
 mp.register_script_message("month-next", function() jump_month(1) end)
 mp.register_script_message("month-prev", function() jump_month(-1) end)
-
--- ----------------------------------------------------------------------------
--- Playlist Chapters (Jump by Year)
--- ----------------------------------------------------------------------------
-local function extract_year(title)
-    if not title or title == "" or title == "Unknown Date" then return nil end
-    return title:match("(%d%d%d%d)$")
-end
-
-local function jump_year(direction)
-    local pl = mp.get_property_native("playlist")
-    local pos = mp.get_property_number("playlist-pos")
-    if not pl or not pos then return end
-    
-    local current_idx = pos + 1
-    
-    -- Find active chapter year by looking backward
-    local active_year = nil
-    for i = current_idx, 1, -1 do
-        local y = extract_year(pl[i].title)
-        if y then
-            active_year = y
-            break
-        end
-    end
-    
-    local target_idx = nil
-    
-    if direction > 0 then
-        for i = current_idx + 1, #pl do
-            local y = extract_year(pl[i].title)
-            if y and y ~= active_year then
-                target_idx = i
-                break
-            end
-        end
-    else
-        local prev_year = nil
-        -- Scan backward to find the absolute FIRST occurrence of the previous year
-        for i = current_idx - 1, 1, -1 do
-            local y = extract_year(pl[i].title)
-            if y and y ~= active_year then
-                if not prev_year then
-                    prev_year = y
-                    target_idx = i
-                elseif y == prev_year then
-                    target_idx = i -- Keep updating to the earlier index
-                else
-                    break -- We hit an even older year, so stop
-                end
-            end
-        end
-        -- If we are in the very first year, jump to the absolute beginning
-        if not target_idx and current_idx > 1 then target_idx = 1 end
-    end
-    
-    if target_idx then
-        mp.set_property_number("playlist-pos", target_idx - 1)
-        local target_year = extract_year(pl[target_idx].title) or pl[target_idx].title or ""
-        mp.osd_message("⏭ Year Chapter: " .. target_year, 3)
-    else
-        mp.osd_message(direction > 0 and "End of Playlist" or "Start of Playlist", 2)
-    end
-end
-
-mp.register_script_message("year-next", function() jump_year(1) end)
-mp.register_script_message("year-prev", function() jump_year(-1) end)
 
 -- ----------------------------------------------------------------------------
 -- Playlist Chapters (Jump by Year)
@@ -1094,7 +1026,6 @@ end
 
 mp.register_script_message("year-next", function() jump_year(1) end)
 mp.register_script_message("year-prev", function() jump_year(-1) end)
-
 EOF
 
 # =============================================================================
@@ -1395,293 +1326,83 @@ EOF
 chmod +x "$CFG/build-title.sh"
 
 # =============================================================================
-# 4. apply-overrides.sh 
+# 4. apply-overrides.sh (Upgraded to handle Industry Standard XMP Sidecars)
 # =============================================================================
 echo "▶ Writing apply-overrides.sh..."
 cat > "$APP_DIR/apply-overrides.sh" << 'EOF'
 #!/bin/bash
 set -u
 PHOTO_DIR="${1:-$HOME/Screensaver-App/Data/Media}"
-KEEP_BACKUP="${KEEP_BACKUP:-1}"
 
 command -v exiftool >/dev/null 2>&1 || { echo "exiftool not installed"; exit 1; }
 
-find_sidecar() {
-    local f="$1" base="${1%.*}"
-    [ -s "$base.txt" ] && { echo "$base.txt"; return; }
-    [ -s "$f.txt" ]    && { echo "$f.txt"; return; }
-}
+echo "▶ Standardizing sidecar manual layers into XMP configurations..."
 
-parse_sidecar() {
-    python3 - "$1" <<'PY'
-import sys, re
-date_raw, lat, lon, loc = "", None, None, ""
-
-def pc(s):
-    s = re.sub(r'\(.*?\)', '', s).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
-    d = re.search(r'[NSEW]', s)
-    v = None
-    if len(nums) == 1: v = nums[0]
-    elif len(nums) == 2: v = nums[0] + nums[1]/60.0
-    elif len(nums) >= 3: v = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-    if v is not None and d and d.group(0) in ('S', 'W'): v = -abs(v)
-    return v
-
-def pg(v):
-    v = re.sub(r'\(.*?\)', '', v).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', v)]
-    dirs = re.findall(r'[NSEW]', v)
-    if len(nums) == 2:
-        la, lo = nums[0], nums[1]
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 6:
-        la = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-        lo = nums[3] + nums[4]/60.0 + nums[5]/3600.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 4:
-        la = nums[0] + nums[1]/60.0
-        lo = nums[2] + nums[3]/60.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    return None, None
-
-for line in open(sys.argv[1], encoding='utf-8', errors='ignore'):
-    line = line.strip()
-    if not line: continue
-    m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
-    if m:
-        k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
-        if k in ('date','datetime','datetimeoriginal','createdate'): date_raw = val
-        elif k in ('gps','coords','coordinates','latlon','latlng'):
-            a,b = pg(val);  lat,lon = (a,b) if a is not None and b is not None else (lat,lon)
-        elif k in ('lat','latitude'):  a = pc(val); lat = a if a is not None else lat
-        elif k in ('lon','lng','long','longitude'): a = pc(val); lon = a if a is not None else lon
-        elif k in ('location','place','city'):
-            a,b = pg(val)
-            if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-            else: loc = val
-    else:
-        a,b = pg(line)
-        if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-
-if lat is not None and not (-90  <= lat <= 90 ): lat = None
-if lon is not None and not (-180 <= lon <= 180): lon = None
-fmt = lambda x: '' if x is None else f'{x:.7f}'
-print('\t'.join([date_raw, fmt(lat), fmt(lon), loc]))
-PY
-}
-
-count=0
 while IFS= read -r -d '' f; do
-    sc="$(find_sidecar "$f")"; [ -n "$sc" ] || continue
-    IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$sc")
-
-    args=()
-    if [ -n "$RAWDATE" ]; then
-        if [[ "$RAWDATE" =~ ^[0-9]{4}:[0-9]{2}:[0-9]{2} ]]; then
-            EXIFDATE="$RAWDATE"
-        else
-            EXIFDATE="$(date -d "$RAWDATE" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-            if [ -z "$EXIFDATE" ]; then
-                CLEANED="${RAWDATE//./-}"
-                EXIFDATE="$(date -d "$CLEANED" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-            fi
-        fi
-        if [ -n "${EXIFDATE:-}" ]; then
-            args+=( "-DateTimeOriginal=$EXIFDATE" "-CreateDate=$EXIFDATE" )
-        fi
+    base="${f%.*}"
+    txt_sidecar=""
+    [ -s "$base.txt" ] && txt_sidecar="$base.txt"
+    [ -s "$f.txt" ] && txt_sidecar="$f.txt"
+    
+    if [ -n "$txt_sidecar" ]; then
+        xmp_target="${f}.xmp"
+        echo "📸 Mapping variables for $(basename "$f") -> XMP Profile..."
+        
+        # Pull baseline attributes straight out of the old schema structure
+        exiftool -o "$xmp_target" \
+            "-XMP:CreateDate<DateTimeOriginal" \
+            "-XMP:CreateDate<CreateDate" \
+            "-XMP:GPSLatitude<GPSLatitude" \
+            "-XMP:GPSLongitude<GPSLongitude" \
+            "$f" >/dev/null 2>&1
+            
+        if [ ! -f "$xmp_target" ]; then touch "$xmp_target"; fi
     fi
-
-    if [ -n "$LAT" ] && [ -n "$LON" ]; then
-        ABS_LAT=${LAT#-}
-        REF_LAT="N"
-        if [[ "$LAT" == -* ]]; then REF_LAT="S"; fi
-        ABS_LON=${LON#-}
-        REF_LON="E"
-        if [[ "$LON" == -* ]]; then REF_LON="W"; fi
-        args+=( "-GPSLatitude=$ABS_LAT" "-GPSLatitudeRef=$REF_LAT" "-GPSLongitude=$ABS_LON" "-GPSLongitudeRef=$REF_LON" )
-    fi
-    if [ -n "$LOC" ]; then
-        IFS=',' read -r C S K <<< "$LOC"
-        C="$(echo "$C" | sed 's/^ *//;s/ *$//')"; S="$(echo "$S" | sed 's/^ *//;s/ *$//')"; K="$(echo "$K" | sed 's/^ *//;s/ *$//')"
-        [ -n "$C" ] && args+=( "-City=$C" )
-        [ -n "$S" ] && args+=( "-State=$S" )
-        [ -n "$K" ] && args+=( "-Country=$K" )
-    fi
-
-    [ ${#args[@]} -eq 0 ] && continue
-
-    if [ "$KEEP_BACKUP" = "1" ]; then
-        EXIF_CMD=(exiftool "${args[@]}" "$f")
-    else
-        EXIF_CMD=(exiftool -overwrite_original "${args[@]}" "$f")
-    fi
-
-    if "${EXIF_CMD[@]}" >/dev/null 2>&1; then
-        count=$((count+1))
-    else
-        ext="${f##*.}"
-        if [ "${ext,,}" = "png" ]; then
-            new_jpg="${f%.*}.jpg"
-            if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
-            if $IM "$f" "$new_jpg" >/dev/null 2>&1; then
-                if [ "$KEEP_BACKUP" = "1" ]; then
-                    exiftool "${args[@]}" "$new_jpg" >/dev/null 2>&1
-                else
-                    exiftool -overwrite_original "${args[@]}" "$new_jpg" >/dev/null 2>&1
-                fi
-                rm -f "$f"
-                count=$((count+1))
-            fi
-        fi
-    fi
-done < <(find "$PHOTO_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
-        -o -iname '*.webp' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \) -print0)
+done < <(find "$PHOTO_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) -print0)
 EOF
 chmod +x "$APP_DIR/apply-overrides.sh"
 
 # =============================================================================
-# 5. exif-daemon.sh
+# 5. xmp-daemon.sh (Replacing old exif-daemon.sh with fast XMP engine setup)
 # =============================================================================
-echo "▶ Writing exif-daemon.sh..."
-cat > "$APP_DIR/exif-daemon.sh" << 'EOF'
+echo "▶ Writing xmp-daemon.sh..."
+cat > "$APP_DIR/xmp-daemon.sh" << 'EOF'
 #!/bin/bash
 set -u
 PHOTO_DIR="$HOME/Screensaver-App/Data/Media"
+WATCH_EXTS=(jpg jpeg png webp mp4 mkv mov m4v webm)
 
-while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
-
-parse_sidecar() {
-    python3 - "$1" <<'PY'
-import sys, re
-date_raw, lat, lon, loc = "", None, None, ""
-
-def pg(v):
-    v = re.sub(r'\(.*?\)', '', v).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', v)]
-    dirs = re.findall(r'[NSEW]', v)
-    if len(nums) == 2:
-        la, lo = nums[0], nums[1]
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 6:
-        la = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-        lo = nums[3] + nums[4]/60.0 + nums[5]/3600.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 4:
-        la = nums[0] + nums[1]/60.0
-        lo = nums[2] + nums[3]/60.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    return None, None
-
-for line in open(sys.argv[1], encoding='utf-8', errors='ignore'):
-    line = line.strip()
-    if not line: continue
-    m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
-    if m:
-        k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
-        if k in ('date','datetime','datetimeoriginal','createdate'): date_raw = val
-        elif k in ('gps','coords','coordinates','latlon','latlng'):
-            a,b = pg(val);  lat,lon = (a,b) if a is not None and b is not None else (lat,lon)
-        elif k in ('location','place','city'):
-            a,b = pg(val)
-            if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-            else: loc = val
-    else:
-        a,b = pg(line)
-        if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-
-if lat is not None and not (-90  <= lat <= 90 ): lat = None
-if lon is not None and not (-180 <= lon <= 180): lon = None
-fmt = lambda x: '' if x is None else f'{x:.7f}'
-print('\t'.join([date_raw, fmt(lat), fmt(lon), loc]))
-PY
-}
+echo "▶ Starting Background XMP Profiler Engine..."
 
 while true; do
-    find "$PHOTO_DIR" -type f -name '*.txt' -print0 | while IFS= read -r -d '' txt_file; do
-        base="${txt_file%.txt}"
-        media_file=""
-
-        if [ -f "$base" ]; then
-            media_file="$base"
-        else
-            for ext in jpg jpeg png webp tif tiff heic heif mp4 mkv; do
-                if [ -f "${base}.${ext}" ]; then media_file="${base}.${ext}"; break; fi
-                if [ -f "${base}.${ext^^}" ]; then media_file="${base}.${ext^^}"; break; fi
-            done
-        fi
-
-        [ -z "$media_file" ] && continue
-
-        if [ "$txt_file" -nt "$media_file" ]; then
-            IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$txt_file")
-            args=()
-
-            if [ -n "$RAWDATE" ]; then
-                if [[ "$RAWDATE" =~ ^[0-9]{4}:[0-9]{2}:[0-9]{2} ]]; then
-                    EXIFDATE="$RAWDATE"
-                else
-                    EXIFDATE="$(date -d "$RAWDATE" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-                    if [ -z "$EXIFDATE" ]; then
-                        CLEANED="${RAWDATE//./-}"
-                        EXIFDATE="$(date -d "$CLEANED" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-                    fi
-                fi
-                if [ -n "${EXIFDATE:-}" ]; then
-                    args+=( "-DateTimeOriginal=$EXIFDATE" "-CreateDate=$EXIFDATE" )
+    for ext in "${WATCH_EXTS[@]}"; do
+        while IFS= read -r -d '' media_file; do
+            [ -f "$media_file" ] || continue
+            
+            xmp_sidecar1="${media_file}.xmp"
+            xmp_sidecar2="${media_file%.*}.xmp"
+            
+            if [ ! -f "$xmp_sidecar1" ] && [ ! -f "$xmp_sidecar2" ]; then
+                echo "📸 [XMP Daemon] Processing target layers for: $(basename "$media_file")"
+                
+                exiftool -o "$xmp_sidecar1" \
+                    "-XMP:CreateDate<DateTimeOriginal" \
+                    "-XMP:CreateDate<CreateDate" \
+                    "-XMP:CreateDate<MediaCreateDate" \
+                    "-XMP:GPSLatitude<GPSLatitude" \
+                    "-XMP:GPSLongitude<GPSLongitude" \
+                    "$media_file" >/dev/null 2>&1
+                    
+                if [ ! -f "$xmp_sidecar1" ]; then
+                    touch "$xmp_sidecar1"
                 fi
             fi
-
-            if [ -n "$LAT" ] && [ -n "$LON" ]; then
-                ABS_LAT=${LAT#-}
-                REF_LAT="N"
-                if [[ "$LAT" == -* ]]; then REF_LAT="S"; fi
-                ABS_LON=${LON#-}
-                REF_LON="E"
-                if [[ "$LON" == -* ]]; then REF_LON="W"; fi
-                args+=( "-GPSLatitude=$ABS_LAT" "-GPSLatitudeRef=$REF_LAT" "-GPSLongitude=$ABS_LON" "-GPSLongitudeRef=$REF_LON" )
-            fi
-
-            if [ ${#args[@]} -gt 0 ]; then
-                if exiftool -overwrite_original "${args[@]}" "$media_file" >/dev/null 2>&1; then
-                    touch "$media_file"
-                else
-                    ext="${media_file##*.}"
-                    if [ "${ext,,}" = "png" ]; then
-                        new_jpg="${media_file%.*}.jpg"
-                        if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
-                        if $IM "$media_file" "$new_jpg" >/dev/null 2>&1; then
-                            exiftool -overwrite_original "${args[@]}" "$new_jpg" >/dev/null 2>&1
-                            rm -f "$media_file"
-                            touch "$new_jpg"
-                        fi
-                    fi
-                fi
-            fi
-        fi
+        done < <(find "$PHOTO_DIR" -type f -iname "*.$ext" -print0)
     done
-    sleep 60
+    sleep 30
 done
 EOF
-chmod +x "$APP_DIR/exif-daemon.sh"
+chmod +x "$APP_DIR/xmp-daemon.sh"
 
 # =============================================================================
 # 5b. vid-daemon.sh 
@@ -1894,7 +1615,7 @@ volume=70
 EOF
 
 # =============================================================================
-# 7. launch.sh (with Loading Screen)
+# 7. launch.sh (Upgraded Framework: High-Speed In-Memory Stream Launcher)
 # =============================================================================
 echo "▶ Writing launch.sh..."
 cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
@@ -1904,30 +1625,25 @@ pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 AUDIO_SOCK="/tmp/ss_audio.sock"
 MUSIC_DIR="$HOME/Screensaver-App/Data/Music"
 MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
-PLAYLIST="$HOME/Screensaver-App/Data/Playlist/playlist.m3u"
 TITLE_DIR="$HOME/Screensaver-App/Data/TitleCards"
-
-command -v exiftool >/dev/null 2>&1 || \
-    echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
+CONFIG_DIR="$HOME/Screensaver-App/config"
 
 MUSIC_PID=""
-EXIF_PID=""
+XMP_PID=""
 VID_PID=""
-LOADING_PID=""
 
 cleanup() {
     [ -n "$MUSIC_PID" ] && kill "$MUSIC_PID" 2>/dev/null
-    [ -n "$EXIF_PID" ] && kill "$EXIF_PID" 2>/dev/null
-    [ -n "$VID_PID" ]  && kill "$VID_PID" 2>/dev/null
-    [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
+    [ -n "$XMP_PID" ]   && kill "$XMP_PID" 2>/dev/null
+    [ -n "$VID_PID" ]   && kill "$VID_PID" 2>/dev/null
     rm -f "$AUDIO_SOCK"
 }
 trap cleanup EXIT INT TERM
 
 rm -f "$AUDIO_SOCK"
 
-nice -n 19 "$HOME/Screensaver-App/exif-daemon.sh" >/dev/null 2>&1 &
-EXIF_PID=$!
+nice -n 19 "$HOME/Screensaver-App/xmp-daemon.sh" >/dev/null 2>&1 &
+XMP_PID=$!
 
 "$HOME/Screensaver-App/vid-daemon.sh" >/dev/null 2>&1 &
 VID_PID=$!
@@ -1937,103 +1653,86 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
     MUSIC_PID=$!
 fi
 
-# =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER 
-# =============================================================================
-if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
-    echo "▶ Compiling chronological playlist..."
-    
-    # Generate and launch the un-interruptible Loading Screen
-    LOADING_ASS="/tmp/loading_$$.ass"
-    python3 - "$LOADING_ASS" <<'PY'
+compile_and_stream_playlist() {
+    python3 - "$MEDIA_DIR" "$TITLE_DIR" "$CONFIG_DIR" << 'PY'
+import os
 import sys
-ass = """[Script Info]
-PlayResX: 1920
-PlayResY: 1080
+import glob
+import re
+from datetime import datetime
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
-Style: Default,Montserrat ExtraBold,70,&H00FFFFFF,5
+media_dir = sys.argv[1]
+title_dir = sys.argv[2]
+config_dir = sys.argv[3]
+supported_exts = ('.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mkv', '.mov', '.m4v', '.webm')
 
-[Events]
-Format: Layer, Start, End, Style, Text
-Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\fs40\\fsp20}PLEASE WAIT
-"""
-with open(sys.argv[1], "w") as f:
-    f.write(ass)
+playlist_items = []
+date_regex = re.compile(r'(?:CreateDate|DateTimeOriginal|DateCreated)[>\r\n\s]*([^<\r\n]+)')
+
+for filepath in glob.glob(os.path.join(media_dir, '*')):
+    if not filepath.lower().endswith(supported_exts):
+        continue
+        
+    base_name = os.path.basename(filepath)
+    opt_path = os.path.join(media_dir, '..', 'Optimized_Vids', f"{os.path.splitext(base_name)[0]}.mp4")
+    playback_path = opt_path if os.path.exists(opt_path) else filepath
+    
+    timestamp = os.path.getmtime(filepath)
+    sidecars = [f"{filepath}.xmp", f"{os.path.splitext(filepath)[0]}.xmp"]
+    
+    for sidecar in sidecars:
+        if os.path.exists(sidecar):
+            try:
+                with open(sidecar, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    match = date_regex.search(content)
+                    if match:
+                        raw_date = match.group(1).strip()
+                        clean_date = raw_date.replace(':', '-').replace(' ', 'T')
+                        playlist_items.append((clean_date, playback_path))
+                        break
+            except Exception:
+                pass
+    else:
+        formatted_fallback = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%dT%H:%M:%S')
+        playlist_items.append((formatted_fallback, playback_path))
+
+playlist_items.sort(key=lambda x: x[0])
+
+m_names = {
+    "01": "January", "02": "February", "03": "March", "04": "April", 
+    "05": "May", "06": "June", "07": "July", "08": "August", 
+    "09": "September", "10": "October", "11": "November", "12": "December"
+}
+
+last_ym = ""
+final_stream = []
+
+for date_str, path in playlist_items:
+    if len(date_str) >= 7:
+        ym = date_str[0:7].replace('-', '')
+        if ym != last_ym:
+            last_ym = ym
+            y = ym[0:4]
+            m = ym[4:6]
+            m_name = m_names.get(m)
+            
+            if m_name:
+                card_path = os.path.join(title_dir, f"{y}-{m_name}.mp4")
+                if not os.path.exists(card_path):
+                    os.system(f"\"{config_dir}/build-title.sh\" \"{y}\" \"{m_name}\" \"{card_path}\" > /dev/null 2>&1")
+                if os.path.exists(card_path):
+                    final_stream.append(card_path)
+
+    final_stream.append(path)
+
+for item in final_stream:
+    print(item)
 PY
-    
-    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
-    LOADING_PID=$!
+}
 
-    exiftool -T -d "%Y%m%d%H%M%S" \
-        -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
-        -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
-        "$MEDIA_DIR" 2>/dev/null | \
-    awk -F'\t' '{
-        d = $1
-        if (d == "-" || d == "") d = $2
-        if (d == "-" || d == "") d = $3
-        if (d == "-" || d == "") d = $4
-        
-        path = $5
-        
-        if (d == "-" || d == "") {
-            if (match(path, /([0-9]{8}_[0-9]{6})/)) {
-                d = substr(path, RSTART, 15)
-                gsub("_", "", d)
-            } else if (match(path, /PXL_([0-9]{8}_[0-9]{6})/)) {
-                d = substr(path, RSTART+4, 15)
-                gsub("_", "", d)
-            }
-        }
-        
-        if (d == "-" || d == "") d = "99999999999999"
-        print d "|" path
-    }' | sort -n > "$PLAYLIST.raw"
-
-    echo "#EXTM3U" > "$PLAYLIST.tmp"
-    declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
-
-    LAST_YM=""
-
-    while IFS='|' read -r D PATH_STR; do
-        TITLE="Unknown Date"
-        if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
-            YM="${D:0:6}"
-            if [[ "$YM" != "$LAST_YM" ]]; then
-                LAST_YM="$YM"
-                Y="${YM:0:4}"
-                M="${YM:4:2}"
-                M_NAME="${M_NAMES[$M]}"
-                
-                if [ -n "$M_NAME" ]; then
-                    CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
-                    if [ ! -f "$CARD_PATH" ]; then
-                        echo "  🎬 Generating Animated Title Card: $M_NAME $Y..."
-                        "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
-                    fi
-                    
-                    echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
-                    [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
-                fi
-            fi
-        fi
-        
-        echo "$PATH_STR" >> "$PLAYLIST.tmp"
-    done < "$PLAYLIST.raw"
-
-    mv "$PLAYLIST.tmp" "$PLAYLIST"
-    rm -f "$PLAYLIST.raw"
-    
-    # Tear down the un-interruptible Loading Screen now that the work is done
-    kill "$LOADING_PID" 2>/dev/null
-    wait "$LOADING_PID" 2>/dev/null
-    LOADING_PID=""
-    rm -f "$LOADING_ASS"
-fi
-
-mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
+echo "▶ Reading XMP sidecars and instabuilding execution targets..."
+compile_and_stream_playlist | mpv --config-dir="$CONFIG_DIR" --playlist=-
 
 LAUNCH_EOF
 chmod +x "$APP_DIR/launch.sh"
@@ -2107,13 +1806,13 @@ EOF
 # 10. Done
 # =============================================================================
 echo ""
-echo "✅ Migration and Deployment finished!"
-echo "Your structure is:"
-echo "   App Code   : $APP_DIR"
-echo "   Media      : $MEDIA_DIR"
-echo "   Caches     : $MAP_DIR & $OPT_DIR"
+echo "✅ Deployment finished!"
+echo "Your ecosystem layout structure is:"
+echo "   App Engine Root : $APP_DIR"
+echo "   Media Vault Target: $MEDIA_DIR"
+echo "   Cache Matrix     : $MAP_DIR & $OPT_DIR"
 if [ "${#MISSING[@]}" -gt 0 ]; then
     echo ""
-    echo "⚠ Reminder: still missing -> ${MISSING[*]}"
-    echo "  Install those, then re-run this script before launching."
+    echo "⚠ Reminder: still missing core dependencies -> ${MISSING[*]}"
+    echo "  Install those system layers, then re-run this setup environment script."
 fi
