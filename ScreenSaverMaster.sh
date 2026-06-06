@@ -27,10 +27,8 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
-# Create the new Data architecture including the Playlist folder
 mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
 
-# Migrate old paths to the new Data architecture if they exist
 if [ -d "$BASE_DIR/_map" ]; then
     mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
     rm -rf "$BASE_DIR/_map"
@@ -39,12 +37,8 @@ if [ -d "$BASE_DIR/optimized_vids" ]; then
     mv "$BASE_DIR/optimized_vids"/* "$OPT_DIR/" 2>/dev/null || true
     rm -rf "$BASE_DIR/optimized_vids"
 fi
-if [ -d "$BASE_DIR/Media" ]; then
-    find "$BASE_DIR/Media" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
-fi
-# Catch anything still sitting directly in the old BASE_DIR
-find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
+find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
@@ -1286,7 +1280,6 @@ python3 - "$YEAR" "$MONTH" "$TMP_ASS" <<'PY'
 import sys, random
 year, month, out_ass = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# Create wide spaced blocks automatically with ASS \fsp tags
 tokens = ["{\\fs50\\fsp40}"] + list(year) + ["\\N", "\\N", "{\\fs120\\fsp50}"] + list(month.upper())
 target_indices = [i for i, t in enumerate(tokens) if not t.startswith("{") and t != "\\N"]
 
@@ -1326,7 +1319,6 @@ with open(out_ass, "w") as f:
     f.write("\n".join(lines))
 PY
 
-# Render the ASS file directly into an mp4 on a black background
 ffmpeg -v error -nostdin -y \
     -f lavfi -i color=c=black:s=1920x1080:d=4 \
     -f lavfi -i anullsrc=r=44100:cl=stereo:d=4 \
@@ -1837,7 +1829,7 @@ volume=70
 EOF
 
 # =============================================================================
-# 7. launch.sh
+# 7. launch.sh (with Loading Screen)
 # =============================================================================
 echo "▶ Writing launch.sh..."
 cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
@@ -1856,11 +1848,13 @@ command -v exiftool >/dev/null 2>&1 || \
 MUSIC_PID=""
 EXIF_PID=""
 VID_PID=""
+LOADING_PID=""
 
 cleanup() {
     [ -n "$MUSIC_PID" ] && kill "$MUSIC_PID" 2>/dev/null
     [ -n "$EXIF_PID" ] && kill "$EXIF_PID" 2>/dev/null
     [ -n "$VID_PID" ]  && kill "$VID_PID" 2>/dev/null
+    [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
     rm -f "$AUDIO_SOCK"
 }
 trap cleanup EXIT INT TERM
@@ -1879,10 +1873,33 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
 fi
 
 # =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER (With Animated Title Cards)
+# CHRONOLOGICAL PLAYLIST BUILDER 
 # =============================================================================
 if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
     echo "▶ Compiling chronological playlist..."
+    
+    # Generate and launch the un-interruptible Loading Screen
+    LOADING_ASS="/tmp/loading_$$.ass"
+    python3 - "$LOADING_ASS" <<'PY'
+import sys
+ass = """[Script Info]
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
+Style: Default,Montserrat ExtraBold,70,&H00FFFFFF,5
+
+[Events]
+Format: Layer, Start, End, Style, Text
+Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\fs40\\fsp20}PLEASE WAIT
+"""
+with open(sys.argv[1], "w") as f:
+    f.write(ass)
+PY
+    
+    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
+    LOADING_PID=$!
 
     exiftool -fast -T -d "%Y%m%d%H%M%S" \
         -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
@@ -1943,6 +1960,12 @@ if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer 
 
     mv "$PLAYLIST.tmp" "$PLAYLIST"
     rm -f "$PLAYLIST.raw"
+    
+    # Tear down the un-interruptible Loading Screen now that the work is done
+    kill "$LOADING_PID" 2>/dev/null
+    wait "$LOADING_PID" 2>/dev/null
+    LOADING_PID=""
+    rm -f "$LOADING_ASS"
 fi
 
 mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
