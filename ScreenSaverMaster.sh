@@ -1422,10 +1422,14 @@ BG_PNG="$TMP_DIR/bg.png"
 #    and stays correct on ultrawide screens (crop uses the real target ratio).
 HAVE_BG=0
 if [ -n "$BG" ] && [ -s "$BG" ]; then
-    SMALL_H=360
-    SMALL_W=$(( SMALL_H * TARGET_W / TARGET_H ))
+    # Blur at the FULL target resolution (rendered once to a still), sigma scaled
+    # to match the app's relative strength (sigma 50 on a 640px-wide frame ->
+    # 50*TARGET_W/640). Blurring full-res avoids the banding/mush you get from
+    # blurring a tiny thumbnail and upscaling it.
+    SIGMA=$(( 50 * TARGET_W / 640 ))
+    [ "$SIGMA" -lt 1 ] && SIGMA=1
     if ffmpeg -v error -nostdin -y -i "$BG" \
-        -vf "scale=${SMALL_W}:${SMALL_H}:force_original_aspect_ratio=increase,crop=${SMALL_W}:${SMALL_H},gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1" \
+        -vf "scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=increase,crop=${TARGET_W}:${TARGET_H},gblur=sigma=${SIGMA},setsar=1" \
         -frames:v 1 "$BG_PNG" 2>/dev/null && [ -s "$BG_PNG" ]; then
         HAVE_BG=1
     fi
