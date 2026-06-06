@@ -6,7 +6,6 @@ set -u
 
 APP_DIR="$HOME/Screensaver-App"
 CFG="$APP_DIR/config"
-BASE_DIR="$HOME/Pictures/Screensavers"
 MEDIA_DIR="$APP_DIR/Data/Media"
 MAP_DIR="$APP_DIR/Data/Maps"
 OPT_DIR="$APP_DIR/Data/Optimized_Vids"
@@ -20,22 +19,7 @@ pkill -f exif-daemon.sh 2>/dev/null || true
 pkill -f vid-daemon.sh 2>/dev/null || true
 pkill -f idle-watcher.sh 2>/dev/null || true
 
-if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
-    mv "$HOME/TV-Screensaver" "$APP_DIR"
-fi
-
 mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
-
-if [ -d "$BASE_DIR/_map" ]; then
-    mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
-    rm -rf "$BASE_DIR/_map"
-fi
-if [ -d "$BASE_DIR/optimized_vids" ]; then
-    mv "$BASE_DIR/optimized_vids"/* "$OPT_DIR/" 2>/dev/null || true
-    rm -rf "$BASE_DIR/optimized_vids"
-fi
-
-find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
