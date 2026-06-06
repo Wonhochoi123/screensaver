@@ -1872,30 +1872,37 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
 fi
 
 # =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven)
+# CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven, rebuilt every launch)
 #
-# We rebuild only when something the user cares about changed: a new/edited
-# media file, or an edited .txt override. The expensive part — reading capture
-# dates out of heavy media — is gone; dates now come from tiny .xmp sidecars
-# maintained by xmp-police.sh. A cold first run still pays the one-time
-# extraction cost (behind the loading screen); every run after that is instant.
+# Two costs are deliberately separated:
+#   * EXTRACTION (police --once) stays INCREMENTAL - it only reads metadata out
+#     of media files whose sidecar is missing/stale. Heavy media is never
+#     re-read on a warm run.
+#   * ASSEMBLY (this block) runs UNCONDITIONALLY - it's cheap (tiny XMP reads)
+#     and rebuilding from scratch keeps media / sidecars / playlist reconciled.
+#     In particular it drops lines for media DELETED since last launch, which a
+#     "only if something is newer" guard can't detect (a deleted file isn't
+#     "newer", it's gone).
+#
+# The newer-than-playlist check no longer decides whether to build - it only
+# decides whether to show the loading screen, since new/changed media is the
+# only case where the wait (extraction + possibly a new title card) is visible.
 # =============================================================================
-NEED_BUILD=0
+HEAVY=0
 if [ ! -f "$PLAYLIST" ]; then
-    NEED_BUILD=1
+    HEAVY=1
 elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
         \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
            -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
            -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
            -o -iname '*.webm' -o -iname '*.txt' \) \
         -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
-    NEED_BUILD=1
+    HEAVY=1
 fi
 
-if [ "$NEED_BUILD" = 1 ]; then
-    echo "▶ Refreshing sidecars and compiling chronological playlist..."
-
-    # ---- Uninterruptible loading screen ------------------------------------
+# ---- Loading screen only when the wait would actually be noticeable ---------
+if [ "$HEAVY" = 1 ]; then
+    echo "* Extracting metadata / compiling chronological playlist..."
     LOADING_ASS="/tmp/loading_$$.ass"
     python3 - "$LOADING_ASS" <<'PY'
 import sys
@@ -1914,21 +1921,21 @@ Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\f
 with open(sys.argv[1], "w") as f:
     f.write(ass)
 PY
-
     mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar \
         --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
         --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
     LOADING_PID=$!
+fi
 
-    # ---- 1. Make sidecars current (incremental; cold start extracts all) ----
-    "$POLICE" --once
+# ---- 1. Make sidecars current (INCREMENTAL: cold start extracts all) --------
+"$POLICE" --once
 
-    # ---- 2. Read sorted (date | media-path) pairs from sidecars only --------
-    exiftool -q -m -j -d "%Y%m%d%H%M%S" \
-        -DateTimeOriginal -CreateDate -CreationDate \
-        -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
+# ---- 2. Read sorted (date | media-path) pairs from sidecars only ------------
+exiftool -q -m -j -d "%Y%m%d%H%M%S" \
+    -DateTimeOriginal -CreateDate -CreationDate \
+    -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
 
-    python3 - "$PLAYLIST.json" <<'PY' > "$PLAYLIST.raw"
+python3 - "$PLAYLIST.json" <<'PY' > "$PLAYLIST.raw"
 import sys, json, os
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -1949,40 +1956,41 @@ rows.sort()
 for d, m in rows:
     print(d + "|" + m)
 PY
-    rm -f "$PLAYLIST.json"
+rm -f "$PLAYLIST.json"
 
-    # ---- 3. Inject animated month/year title cards --------------------------
-    echo "#EXTM3U" > "$PLAYLIST.tmp"
-    declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
+# ---- 3. Inject animated month/year title cards ------------------------------
+echo "#EXTM3U" > "$PLAYLIST.tmp"
+declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
 
-    LAST_YM=""
-    while IFS='|' read -r D PATH_STR; do
-        [ -e "$PATH_STR" ] || continue
-        if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
-            YM="${D:0:6}"
-            if [[ "$YM" != "$LAST_YM" ]]; then
-                LAST_YM="$YM"
-                Y="${YM:0:4}"
-                M="${YM:4:2}"
-                M_NAME="${M_NAMES[$M]}"
-                if [ -n "$M_NAME" ]; then
-                    CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
-                    if [ ! -f "$CARD_PATH" ]; then
-                        echo "  🎬 Generating Animated Title Card: $M_NAME $Y..."
-                        "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
-                    fi
-                    echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
-                    [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
+LAST_YM=""
+while IFS='|' read -r D PATH_STR; do
+    [ -e "$PATH_STR" ] || continue
+    if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
+        YM="${D:0:6}"
+        if [[ "$YM" != "$LAST_YM" ]]; then
+            LAST_YM="$YM"
+            Y="${YM:0:4}"
+            M="${YM:4:2}"
+            M_NAME="${M_NAMES[$M]}"
+            if [ -n "$M_NAME" ]; then
+                CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
+                if [ ! -f "$CARD_PATH" ]; then
+                    echo "  Generating Animated Title Card: $M_NAME $Y..."
+                    "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
                 fi
+                echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
+                [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
             fi
         fi
-        echo "$PATH_STR" >> "$PLAYLIST.tmp"
-    done < "$PLAYLIST.raw"
+    fi
+    echo "$PATH_STR" >> "$PLAYLIST.tmp"
+done < "$PLAYLIST.raw"
 
-    mv "$PLAYLIST.tmp" "$PLAYLIST"
-    rm -f "$PLAYLIST.raw"
+mv "$PLAYLIST.tmp" "$PLAYLIST"
+rm -f "$PLAYLIST.raw"
 
-    # ---- Tear down loading screen ------------------------------------------
+# ---- Tear down loading screen (if it was shown) -----------------------------
+if [ -n "$LOADING_PID" ]; then
     kill "$LOADING_PID" 2>/dev/null
     wait "$LOADING_PID" 2>/dev/null
     LOADING_PID=""
