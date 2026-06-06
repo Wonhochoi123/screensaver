@@ -687,8 +687,12 @@ end
 -- mtime for the date, and a ".txt" override (read live) still wins on top.
 local function xml_unescape(s)
     if not s then return s end
-    return (s:gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"')
-             :gsub("&#39;", "'"):gsub("&apos;", "'"):gsub("&amp;", "&"))
+    return (s:gsub("&lt;", "<")
+             :gsub("&gt;", ">")
+             :gsub("&quot;", '"')
+             :gsub("&apos;", "'")
+             :gsub("&#39;", "'")
+             :gsub("&amp;", "&"))
 end
 
 local function read_xmp(xmp_path)
