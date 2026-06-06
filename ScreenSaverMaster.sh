@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
+#  mpv Photo & Video Screensaver — Hybrid Asynchronous Architecture Framework
 # =============================================================================
 set -u
 
@@ -35,7 +35,7 @@ if [ -d "$BASE_DIR/optimized_vids" ]; then
     rm -rf "$BASE_DIR/optimized_vids"
 fi
 
-find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
+find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
@@ -86,16 +86,16 @@ echo "▶ Verifying runtime tools..."
 MISSING=()
 for c in "${REQUIRED_CMDS[@]}"; do
     if command -v "$c" >/dev/null 2>&1; then
-        printf '   ✓ %s\n' "$c"
+        printf '    ✓ %s\n' "$c"
     else
-        printf '   ✗ %s  (MISSING)\n' "$c"
+        printf '    ✗ %s  (MISSING)\n' "$c"
         MISSING+=("$c")
     fi
 done
 if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
-    printf '   ✓ ImageMagick (magick/convert)\n'
+    printf '    ✓ ImageMagick (magick/convert)\n'
 else
-    printf '   ✗ ImageMagick (magick/convert)  (MISSING)\n'
+    printf '    ✗ ImageMagick (magick/convert)  (MISSING)\n'
     MISSING+=("ImageMagick")
 fi
 
@@ -120,12 +120,12 @@ fi
 # =============================================================================
 echo "▶ Writing input.conf..."
 cat > "$CFG/input.conf" << 'EOF'
-MBTN_LEFT   script-message handle-left-click
-MBTN_RIGHT  quit
-WHEEL_UP    quit
-WHEEL_DOWN  quit
-ESC         quit
-q           quit
+MBTN_LEFT    script-message handle-left-click
+MBTN_RIGHT   quit
+WHEEL_UP     quit
+WHEEL_DOWN   quit
+ESC          quit
+q            quit
 
 SPACE      script-message ss-toggle-pause
 PLAY       script-message ss-toggle-pause
@@ -488,7 +488,7 @@ local function hud_geom()
     return {
         win_w = win_w, win_h = win_h, S = S, pad = pad, fs = fs,
         img_top = img_top, text_cy = text_cy,
-        qr_x  = pad,             qr_cx  = pad + math.floor(S / 2),
+        qr_x  = pad,       qr_cx  = pad + math.floor(S / 2),
         map_x = win_w - S - pad, map_cx = win_w - pad - math.floor(S / 2),
     }
 end
@@ -594,7 +594,7 @@ local function resolve_meta(orig_path, cb)
         name = "subprocess", capture_stdout = true,
         args = {
             "exiftool", "-api", "Geolocation", "-j", "-d", "%b %d, %Y", "-c", "%f",
-            "-DateTimeOriginal", "-CreateDate", "-CreationDate", "-DateCreated", "-ModifyDate",
+            "Snapshot-DateTimeOriginal", "-DateTimeOriginal", "-CreateDate", "-CreationDate", "-DateCreated", "-ModifyDate",
             "-GeolocationCity", "-GeolocationRegion", "-GeolocationCountry",
             "-City", "-State", "-Province-State", "-Country", "-Location", "-LocationName",
             "-GPSLatitude", "-GPSLongitude", orig_path,
@@ -725,7 +725,7 @@ mp.register_script_message("handle-left-click", function()
                    (mouse.y >= L.img_top) and (mouse.y <= L.img_top + L.S)
 
     if in_qr then
-        local url = string.format("https://www.google.com/maps/?q=%.6f,%.6f", cur.lat, cur.lon)
+        local url = string.format("https://maps.google.com/?q=$%s,%s", cur.lat, cur.lon)
         mp.command_native_async({
             name = "subprocess",
             args = {"xdg-open", url}
@@ -916,7 +916,6 @@ local function jump_month(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter title by looking backward through sparse metadata
     local active_title = nil
     for i = current_idx, 1, -1 do
         local t = pl[i].title
@@ -937,7 +936,6 @@ local function jump_month(direction)
             end
         end
     else
-        -- Scan backward to find the title card for the previous month
         for i = current_idx - 1, 1, -1 do
             local t = pl[i].title
             if t and t ~= "" and t ~= "Unknown Date" and t ~= active_title then
@@ -945,7 +943,6 @@ local function jump_month(direction)
                 break
             end
         end
-        -- If we are in the very first month, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -975,7 +972,6 @@ local function jump_year(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter year by looking backward
     local active_year = nil
     for i = current_idx, 1, -1 do
         local y = extract_year(pl[i].title)
@@ -997,21 +993,19 @@ local function jump_year(direction)
         end
     else
         local prev_year = nil
-        -- Scan backward to find the absolute FIRST occurrence of the previous year
         for i = current_idx - 1, 1, -1 do
             local y = extract_year(pl[i].title)
             if y and y ~= active_year then
                 if not prev_year then
                     prev_year = y
                     target_idx = i
-                elseif y == prev_year then
-                    target_idx = i -- Keep updating to the earlier index
+                elif y == prev_year then
+                    target_idx = i
                 else
-                    break -- We hit an even older year, so stop
+                    break
                 end
             end
         end
-        -- If we are in the very first year, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -1062,7 +1056,7 @@ MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
 
 if [ "$need_qr" = 1 ]; then
-    G_MAPS_URL="https://maps.google.com/?q=${LAT},${LON}"
+    G_MAPS_URL="https://maps.google.com/?q=$${LAT},${LON}"
 
     STYLED=0
     if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
@@ -1174,7 +1168,7 @@ PY
 fi
 
 if [ "$need_map" = 1 ]; then
-    read XT YT PX PY < <(python3 - "$LAT" "$LON" "$Z" <<'PY'
+    screen=$(python3 - "$LAT" "$LON" "$Z" <<'PY'
 import math, sys
 lat, lon, z = float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
 n = 2.0 ** z
@@ -1186,6 +1180,7 @@ print(xt, yt, round((xf-(xt-1))*256), round((yf-(yt-1))*256))
 PY
 ) || exit 1
 
+    read XT YT PX PY <<< "$screen"
     SUBS=(a b c)
     for dy in -1 0 1; do for dx in -1 0 1; do
         tx=$((XT+dx)); ty=$((YT+dy))
@@ -1415,7 +1410,8 @@ PY
 count=0
 while IFS= read -r -d '' f; do
     sc="$(find_sidecar "$f")"; [ -n "$sc" ] || continue
-    IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$sc")
+    screen2=$(parse_sidecar "$sc")
+    IFS=$'\t' read -r RAWDATE LAT LON LOC <<< "$screen2"
 
     args=()
     if [ -n "$RAWDATE" ]; then
@@ -1482,13 +1478,18 @@ EOF
 chmod +x "$APP_DIR/apply-overrides.sh"
 
 # =============================================================================
-# 5. exif-daemon.sh
+# 5. exif-daemon.sh ("The Exif Police" Background Database Indexer)
 # =============================================================================
 echo "▶ Writing exif-daemon.sh..."
 cat > "$APP_DIR/exif-daemon.sh" << 'EOF'
 #!/bin/bash
 set -u
 PHOTO_DIR="$HOME/Screensaver-App/Data/Media"
+PLAYLIST_DIR="$HOME/Screensaver-App/Data/Playlist"
+INDEX_FILE="$PLAYLIST_DIR/.metadata_index"
+
+mkdir -p "$PLAYLIST_DIR"
+touch "$INDEX_FILE"
 
 while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
 
@@ -1548,7 +1549,41 @@ PY
 }
 
 while true; do
-    find "$PHOTO_DIR" -type f -name '*.txt' -print0 | while IFS= read -r -d '' txt_file; do
+    # 1. Incremental Metadata Indexing Run (The "Exif Police" Index Builder)
+    # Extracts everything in one streamlined batch command cleanly to a temp file, then updates atomic state.
+    exiftool -T -d "%Y%m%d%H%M%S" \
+        -Snapshot-DateTimeOriginal -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
+        -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
+        "$PHOTO_DIR" 2>/dev/null | \
+    awk -F'\t' '{
+        d = $1
+        if (d == "-" || d == "") d = $2
+        if (d == "-" || d == "") d = $3
+        if (d == "-" || d == "") d = $4
+        if (d == "-" || d == "") d = $5
+        
+        path = $6
+        
+        if (d == "-" || d == "") {
+            if (match(path, /([0-9]{8}_[0-9]{6})/)) {
+                d = substr(path, RSTART, 15)
+                gsub("_", "", d)
+            } else if (match(path, /PXL_([0-9]{8}_[0-9]{6})/)) {
+                d = substr(path, RSTART+4, 15)
+                gsub("_", "", d)
+            }
+        }
+        
+        if (d == "-" || d == "") d = "99999999999999"
+        print d "|" path
+    }' > "$INDEX_FILE.tmp"
+
+    if [ -s "$INDEX_FILE.tmp" ]; then
+        mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+    fi
+
+    # 2. Traditional Sidecar Synchronization Overrides Loop
+    find "$PHOTO_DIR" -type f -name '*.txt' -print0 2>/dev/null | while IFS= read -r -d '' txt_file; do
         base="${txt_file%.txt}"
         media_file=""
 
@@ -1564,7 +1599,8 @@ while true; do
         [ -z "$media_file" ] && continue
 
         if [ "$txt_file" -nt "$media_file" ]; then
-            IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$txt_file")
+            screen3=$(parse_sidecar "$txt_file")
+            IFS=$'\t' read -r RAWDATE LAT LON LOC <<< "$screen3"
             args=()
 
             if [ -n "$RAWDATE" ]; then
@@ -1826,7 +1862,7 @@ volume=70
 EOF
 
 # =============================================================================
-# 7. launch.sh (with Loading Screen)
+# 7. launch.sh (Instant Loading & High-Performance Playlist Compiler)
 # =============================================================================
 echo "▶ Writing launch.sh..."
 cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
@@ -1836,33 +1872,32 @@ pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 AUDIO_SOCK="/tmp/ss_audio.sock"
 MUSIC_DIR="$HOME/Screensaver-App/Data/Music"
 MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
-PLAYLIST="$HOME/Screensaver-App/Data/Playlist/playlist.m3u"
+PLAYLIST_DIR="$HOME/Screensaver-App/Data/Playlist"
+PLAYLIST="$PLAYLIST_DIR/playlist.m3u"
 TITLE_DIR="$HOME/Screensaver-App/Data/TitleCards"
-
-command -v exiftool >/dev/null 2>&1 || \
-    echo "⚠ exiftool not found — date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
+INDEX_FILE="$PLAYLIST_DIR/.metadata_index"
 
 MUSIC_PID=""
 EXIF_PID=""
 VID_PID=""
-LOADING_PID=""
 
 cleanup() {
     [ -n "$MUSIC_PID" ] && kill "$MUSIC_PID" 2>/dev/null
-    [ -n "$EXIF_PID" ] && kill "$EXIF_PID" 2>/dev/null
-    [ -n "$VID_PID" ]  && kill "$VID_PID" 2>/dev/null
-    [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
     rm -f "$AUDIO_SOCK"
 }
 trap cleanup EXIT INT TERM
 
 rm -f "$AUDIO_SOCK"
 
-nice -n 19 "$HOME/Screensaver-App/exif-daemon.sh" >/dev/null 2>&1 &
-EXIF_PID=$!
+# Ensure the Exif Police Background Daemon is active
+if ! pgrep -f "exif-daemon.sh" >/dev/null 2>&1; then
+    nice -n 19 "$HOME/Screensaver-App/exif-daemon.sh" >/dev/null 2>&1 &
+fi
 
-"$HOME/Screensaver-App/vid-daemon.sh" >/dev/null 2>&1 &
-VID_PID=$!
+# Ensure the Transcoding Daemon is active
+if ! pgrep -f "vid-daemon.sh" >/dev/null 2>&1; then
+    "$HOME/Screensaver-App/vid-daemon.sh" >/dev/null 2>&1 &
+fi
 
 if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
     mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" "$MUSIC_DIR" >/dev/null 2>&1 &
@@ -1870,101 +1905,67 @@ if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
 fi
 
 # =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER 
+# HYBRID CHRONOLOGICAL PLAYLIST GENERATOR (0-WAIT TIME PATHWAY)
 # =============================================================================
-if [ ! -f "$PLAYLIST" ] || [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
-    echo "▶ Compiling chronological playlist..."
-    
-    # Generate and launch the un-interruptible Loading Screen
-    LOADING_ASS="/tmp/loading_$$.ass"
-    python3 - "$LOADING_ASS" <<'PY'
-import sys
-ass = """[Script Info]
-PlayResX: 1920
-PlayResY: 1080
+echo "▶ Instantly assembling playlist stream..."
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
-Style: Default,Montserrat ExtraBold,70,&H00FFFFFF,5
+# 1. Capture the immediate state of our files folder using rapid filesystem timestamps
+find "$MEDIA_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' -o -iname '*.webm' \) -printf "%TY%Tm%Td%TH%TM%TS|%p\n" 2>/dev/null > "$PLAYLIST.current"
 
-[Events]
-Format: Layer, Start, End, Style, Text
-Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\fs40\\fsp20}PLEASE WAIT
-"""
-with open(sys.argv[1], "w") as f:
-    f.write(ass)
-PY
-    
-    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
-    LOADING_PID=$!
+# 2. Re-combine with the high-fidelity database index stream using highly optimized awk lookup arrays.
+# Unindexed new arrivals naturally fallback instantly to file-system times instead of lagging on launch.
+awk -F'|' '
+FNR==NR {
+    index_db[$2] = $1
+    next
+}
+{
+    split($1, ts_parts, ".")
+    mtime_ts = ts_parts[1]
+    filepath = $2
+    if (filepath in index_db) {
+        print index_db[filepath] "|" filepath
+    } else {
+        print mtime_ts "|" filepath
+    }
+}' "$INDEX_FILE" "$PLAYLIST.current" 2>/dev/null | sort -n > "$PLAYLIST.raw"
 
-    exiftool -T -d "%Y%m%d%H%M%S" \
-        -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
-        -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
-        "$MEDIA_DIR" 2>/dev/null | \
-    awk -F'\t' '{
-        d = $1
-        if (d == "-" || d == "") d = $2
-        if (d == "-" || d == "") d = $3
-        if (d == "-" || d == "") d = $4
-        
-        path = $5
-        
-        if (d == "-" || d == "") {
-            if (match(path, /([0-9]{8}_[0-9]{6})/)) {
-                d = substr(path, RSTART, 15)
-                gsub("_", "", d)
-            } else if (match(path, /PXL_([0-9]{8}_[0-9]{6})/)) {
-                d = substr(path, RSTART+4, 15)
-                gsub("_", "", d)
-            }
-        }
-        
-        if (d == "-" || d == "") d = "99999999999999"
-        print d "|" path
-    }' | sort -n > "$PLAYLIST.raw"
+# 3. Assemble final EXTM3U framework instantly
+echo "#EXTM3U" > "$PLAYLIST.tmp"
+declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
 
-    echo "#EXTM3U" > "$PLAYLIST.tmp"
-    declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
+LAST_YM=""
 
-    LAST_YM=""
-
-    while IFS='|' read -r D PATH_STR; do
-        TITLE="Unknown Date"
-        if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
-            YM="${D:0:6}"
-            if [[ "$YM" != "$LAST_YM" ]]; then
-                LAST_YM="$YM"
-                Y="${YM:0:4}"
-                M="${YM:4:2}"
-                M_NAME="${M_NAMES[$M]}"
-                
-                if [ -n "$M_NAME" ]; then
-                    CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
-                    if [ ! -f "$CARD_PATH" ]; then
-                        echo "  🎬 Generating Animated Title Card: $M_NAME $Y..."
-                        "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
-                    fi
-                    
-                    echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
-                    [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
+while IFS='|' read -r D PATH_STR; do
+    TITLE="Unknown Date"
+    if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
+        YM="${D:0:6}"
+        if [[ "$YM" != "$LAST_YM" ]]; then
+            LAST_YM="$YM"
+            Y="${YM:0:4}"
+            M="${YM:4:2}"
+            M_NAME="${M_NAMES[$M]}"
+            
+            if [ -n "$M_NAME" ]; then
+                CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
+                if [ ! -f "$CARD_PATH" ]; then
+                    echo "  🎬 Generating Animated Title Card: $M_NAME $Y..."
+                    "$HOME/Screensaver-App/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
                 fi
+                
+                echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
+                [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
             fi
         fi
-        
-        echo "$PATH_STR" >> "$PLAYLIST.tmp"
-    done < "$PLAYLIST.raw"
-
-    mv "$PLAYLIST.tmp" "$PLAYLIST"
-    rm -f "$PLAYLIST.raw"
+    fi
     
-    # Tear down the un-interruptible Loading Screen now that the work is done
-    kill "$LOADING_PID" 2>/dev/null
-    wait "$LOADING_PID" 2>/dev/null
-    LOADING_PID=""
-    rm -f "$LOADING_ASS"
-fi
+    echo "$PATH_STR" >> "$PLAYLIST.tmp"
+done < "$PLAYLIST.raw"
 
+mv "$PLAYLIST.tmp" "$PLAYLIST"
+rm -f "$PLAYLIST.raw" "$PLAYLIST.current"
+
+# Fire up mpv instantly
 mpv --config-dir="$HOME/Screensaver-App/config" --playlist="$PLAYLIST"
 
 LAUNCH_EOF
@@ -2039,13 +2040,14 @@ EOF
 # 10. Done
 # =============================================================================
 echo ""
-echo "✅ Migration and Deployment finished!"
+echo "✅ Dynamic Hybrid Deployment finished successfully!"
 echo "Your structure is:"
 echo "   App Code   : $APP_DIR"
 echo "   Media      : $MEDIA_DIR"
+echo "   Database   : $INDEX_FILE"
 echo "   Caches     : $MAP_DIR & $OPT_DIR"
 if [ "${#MISSING[@]}" -gt 0 ]; then
     echo ""
     echo "⚠ Reminder: still missing -> ${MISSING[*]}"
-    echo "  Install those, then re-run this script before launching."
+    echo "   Install those, then re-run this script before launching."
 fi
