@@ -1901,7 +1901,7 @@ PY
     mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
     LOADING_PID=$!
 
-    exiftool -fast -T -d "%Y%m%d%H%M%S" \
+    exiftool -T -d "%Y%m%d%H%M%S" \
         -DateTimeOriginal -CreationDate -CreateDate -MediaCreateDate -FilePath \
         -ext jpg -ext jpeg -ext png -ext webp -ext mp4 -ext mkv -ext mov -ext m4v -ext webm \
         "$MEDIA_DIR" 2>/dev/null | \
