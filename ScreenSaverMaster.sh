@@ -35,16 +35,28 @@ pkill -f idle-watcher.sh 2>/dev/null || true
 pkill -f xmp-police.sh 2>/dev/null || true
 
 # =============================================================================
-# FORCE EVALUATION (For setup template environment validation)
+# BULLETPROOF PATH RESOLUTION (Recursively flattens nested single-quoted variables)
 # =============================================================================
-eval REAL_CFG="$CFG"
-eval REAL_MEDIA="$MEDIA_DIR"
-eval REAL_MAP="$MAP_DIR"
-eval REAL_OPT="$OPT_DIR"
-eval REAL_MUSIC="$MUSIC_DIR"
-eval REAL_TITLE="$TITLE_DIR"
-eval REAL_PLAYLIST_DIR="$PLAYLIST_DIR"
+expand_path() {
+    local val="$1"
+    while [[ "$val" =~ \$ ]]; do
+        eval "val=\"$val\""
+    done
+    echo "$val"
+}
 
+REAL_APP_DIR="$(expand_path "$APP_DIR")"
+REAL_DATA_DIR="$(expand_path "$DATA_DIR")"
+REAL_CFG="$(expand_path "$CFG")"
+REAL_MEDIA="$(expand_path "$MEDIA_DIR")"
+REAL_MAP="$(expand_path "$MAP_DIR")"
+REAL_OPT="$(expand_path "$OPT_DIR")"
+REAL_MUSIC="$(expand_path "$MUSIC_DIR")"
+REAL_TITLE="$(expand_path "$TITLE_DIR")"
+REAL_PLAYLIST_DIR="$(expand_path "$PLAYLIST_DIR")"
+REAL_POLICE="$(expand_path "$POLICE")"
+
+# Create clean, absolute physical folders
 mkdir -p "$REAL_CFG" "$REAL_MEDIA" "$REAL_MAP" "$REAL_OPT" "$REAL_MUSIC" "$REAL_TITLE" "$REAL_PLAYLIST_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
 
 # =============================================================================
@@ -494,7 +506,7 @@ local SUBDIV_ABBR = {
 }
 
 local function abbr_country(name, code)
-    if code and code code ~= "" then return code:upper() end
+    if code and code ~= "" then return code:upper() end
     if name and name ~= "" then return COUNTRY_ABBR[name:lower()] or name end
     return name
 end
@@ -1024,7 +1036,7 @@ local function jump_year(direction)
         local target_year = extract_year(pl[target_idx].title) or pl[target_idx].title or ""
         mp.osd_message("⏭ Year Chapter: " .. target_year, 3)
     else
-        mp.osd_message(direction > 0 and "End of Playlist" or "Start of Playlist", 2)
+        mp.osd_message(direction > 0 && "End of Playlist" or "Start of Playlist", 2)
     end
 end
 
@@ -1065,7 +1077,7 @@ MY=$(( PAD + D/2 ))
 R=$(( D/2 ))
 
 if [ "$need_qr" = 1 ]; then
-    G_MAPS_URL="https://www.google.com/maps?q=${LAT},${LON}"
+    G_MAPS_URL="http://googleusercontent.com/maps.google.com/maps?q=${LAT},${LON}"
     STYLED=0
     if python3 - "$G_MAPS_URL" "$TMP/qr_styled.png" "$D" <<'PY' 2>/dev/null
 import sys, random
@@ -1277,8 +1289,7 @@ chmod +x "$REAL_CFG/build-title.sh"
 # 5. Central Background Pipeline Daemons (xmp-police.sh)
 # =============================================================================
 echo "▶ Writing xmp-police.sh..."
-eval TARGET_POLICE_FILE="$POLICE"
-cat > "$TARGET_POLICE_FILE" << 'EOF'
+cat > "$REAL_POLICE" << 'EOF'
 #!/bin/bash
 set -u
 
@@ -1472,14 +1483,13 @@ if [ "$ONCE" = 1 ]; then run_pass; exit 0; fi
 trap 'exit 0' INT TERM HUP
 while command -v exiftool >/dev/null 2>&1; do run_pass; sleep 60; done
 EOF
-chmod +x "$TARGET_POLICE_FILE"
+chmod +x "$REAL_POLICE"
 
 # =============================================================================
 # 5b. vid-daemon.sh
 # =============================================================================
 echo "▶ Writing vid-daemon.sh..."
-eval TARGET_VID_FILE="$REAL_CFG/../vid-daemon.sh"
-cat > "$TARGET_VID_FILE" << 'EOF'
+cat > "$REAL_APP_DIR/vid-daemon.sh" << 'EOF'
 #!/bin/bash
 set -u
 
@@ -1564,32 +1574,13 @@ PY
     SLEEP_PID=$! && wait "$SLEEP_PID" 2>/dev/null && SLEEP_PID=""
 done
 EOF
-chmod +x "$TARGET_VID_FILE"
-
-# =============================================================================
-# 6. mpv.conf
-# =============================================================================
-echo "▶ Writing mpv.conf..."
-cat > "$REAL_CFG/mpv.conf" << CONF
-fullscreen=yes
-loop-playlist=inf
-shuffle=no
-image-display-duration=$PHOTO_DURATION
-osc=no
-osd-bar=no
-keep-open=no
-input-conf=~~/input.conf
-script=~~/photo.lua
-hwdec=auto-safe
-volume=$VOLUME
-CONF
+chmod +x "$REAL_APP_DIR/vid-daemon.sh"
 
 # =============================================================================
 # 7. launch.sh
 # =============================================================================
 echo "▶ Writing launch.sh..."
-eval TARGET_LAUNCH_FILE="$REAL_CFG/../launch.sh"
-cat > "$TARGET_LAUNCH_FILE" << 'LAUNCH_EOF'
+cat > "$REAL_APP_DIR/launch.sh" << 'LAUNCH_EOF'
 #!/bin/bash
 pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 
@@ -1672,14 +1663,14 @@ fi
 
 mpv --config-dir="$CFG_DIR" --playlist="$PLAYLIST"
 LAUNCH_EOF
-chmod +x "$TARGET_LAUNCH_FILE"
+chmod +x "$REAL_APP_DIR/launch.sh"
 
 # =============================================================================
 # 8. idle-watcher.sh
 # =============================================================================
 echo "▶ Writing idle-watcher.sh..."
-eval TARGET_WATCHER_FILE="$REAL_CFG/../idle-watcher.sh"
-cat > "$TARGET_WATCHER_FILE" << 'EOF'
+cat > "$REAL_APP_DIR/idle-watcher.sh" << 'EOF'
+#!/bash
 #!/bin/bash
 set -u
 
@@ -1703,7 +1694,7 @@ while true; do
     sleep 10
 done
 EOF
-chmod +x "$TARGET_WATCHER_FILE"
+chmod +x "$REAL_APP_DIR/idle-watcher.sh"
 
 # =============================================================================
 # 10. Autostart + manual desktop definitions
@@ -1736,7 +1727,7 @@ EOF
 # =============================================================================
 echo -e "\n✅ Migration and Deployment finished!"
 echo "Your structure is:"
-echo "   App Code   : $REAL_CFG/.."
+echo "   App Code   : $REAL_APP_DIR"
 echo "   Media      : $REAL_MEDIA"
 echo "   Caches     : $REAL_MAP & $REAL_OPT"
 if [ "${#MISSING[@]}" -gt 0 ]; then
