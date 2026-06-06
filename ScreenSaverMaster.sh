@@ -16,11 +16,8 @@ PLAYLIST_DIR="$APP_DIR/Data/Playlist"
 
 echo "▶ Preparing strict folder architecture..."
 
-rm -f "$HOME/.config/autostart/tv-watcher.desktop"
-rm -f "$HOME/.local/share/applications/tv-screensaver-now.desktop"
 pkill -f exif-daemon.sh 2>/dev/null || true
 pkill -f vid-daemon.sh 2>/dev/null || true
-pkill -f tv-watcher.sh 2>/dev/null || true
 pkill -f idle-watcher.sh 2>/dev/null || true
 
 if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
