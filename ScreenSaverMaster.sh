@@ -1981,14 +1981,30 @@ cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
 #!/bin/bash
 IDLE_LIMIT=300000
 while true; do
+    # 1. MPRIS Media Players (Spotify, VLC, Browsers)
     if playerctl -a status 2>/dev/null | grep -iq "playing"; then sleep 10; continue; fi
+    
+    # 2. Audio Sinks actively running
     if pactl list sink-inputs 2>/dev/null | grep -iq "state: RUNNING"; then sleep 10; continue; fi
+    
+    # 3. Freedesktop Screensaver Blocks (Catches Plex, Netflix, etc.)
+    if dbus-send --session --dest=org.freedesktop.ScreenSaver --type=method_call --print-reply /org/freedesktop/ScreenSaver org.freedesktop.ScreenSaver.GetInhibitors 2>/dev/null | grep -q "string"; then 
+        sleep 10; continue; 
+    fi
+    
+    # 4. GNOME Session Blocks (Checks for active idle blocks)
+    if gdbus call --session --dest org.gnome.SessionManager --object-path /org/gnome/SessionManager --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null | grep -q "true"; then
+        sleep 10; continue;
+    fi
+
+    # 5. Raw Hardware Idle Time (Mouse/Keyboard)
     if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
         RAW=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor --object-path /org/gnome/Mutter/IdleMonitor/Core --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null)
         IDLE_MS=$(echo "$RAW" | awk '{print $2}' | tr -d '[,)]')
     else
         IDLE_MS=$(xdotool getidletime 2>/dev/null)
     fi
+    
     IDLE_MS=${IDLE_MS:-0}
     [ "$IDLE_MS" -gt "$IDLE_LIMIT" ] && "$HOME/Screensaver-App/launch.sh"
     sleep 10
