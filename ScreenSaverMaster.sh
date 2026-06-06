@@ -1128,8 +1128,8 @@ pattern.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
 gradient = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 gdraw = ImageDraw.Draw(gradient)
 
-center_color = (130, 40, 180)
-edge_color = (30, 0, 60)
+edge_color = (130, 40, 180)
+center_color = (30, 0, 60)
 
 for rad in range(int(R), 0, -1):
     ratio = rad / R
