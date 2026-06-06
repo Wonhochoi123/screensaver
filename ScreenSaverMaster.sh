@@ -1,25 +1,117 @@
 #!/bin/bash
 # =============================================================================
 #  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
+#
+#  Single source of truth: the export block below. Each value is declared ONCE
+#  in reference-preserving form — SINGLE-quoted, so $HOME / $APP_DIR stay
+#  literal here (these are templates, not yet resolved). The installer writes
+#  them to config/screensaver.conf through an UNQUOTED heredoc: one round of
+#  expansion turns $APP_DIR into its value "$HOME/Screensaver-App", which still
+#  carries the reference, so the written file stays portable (no machine-
+#  specific absolute paths). The installer then SOURCES that file, which
+#  resolves every level correctly, top-down — and from then on runs on the
+#  exact values every runtime script will. Nothing downstream hardcodes a path.
+#
+#  Two rules make the source step resolve fully:
+#    (1) every referenced var is present in the file, and
+#    (2) it is listed before anything that references it (dependency order).
+#  A single `eval` only expands ONE level, which is why we must NOT eval the
+#  nested vars to resolve them — we source instead.
 # =============================================================================
 set -u
 
-APP_DIR="$HOME/Screensaver-App"
-CFG="$APP_DIR/config"
-MEDIA_DIR="$APP_DIR/Data/Media"
-MAP_DIR="$APP_DIR/Data/Maps"
-OPT_DIR="$APP_DIR/Data/Optimized_Vids"
-MUSIC_DIR="$APP_DIR/Data/Music"
-TITLE_DIR="$APP_DIR/Data/TitleCards"
-PLAYLIST_DIR="$APP_DIR/Data/Playlist"
+# -----------------------------------------------------------------------------
+#  DEFINE ONCE: portable templates (single-quoted) + tunables.
+# -----------------------------------------------------------------------------
+export APP_DIR='$HOME/Screensaver-App'
+export DATA_DIR='$APP_DIR/Data'
+export CFG='$APP_DIR/config'
+export BASE_DIR='$HOME/Pictures/Screensavers'
+export MEDIA_DIR='$DATA_DIR/Media'
+export MUSIC_DIR='$DATA_DIR/Music'
+export MAP_DIR='$DATA_DIR/Maps'
+export OPT_DIR='$DATA_DIR/Optimized_Vids'
+export TITLE_DIR='$DATA_DIR/TitleCards'
+export PLAYLIST_DIR='$DATA_DIR/Playlist'
+export PLAYLIST='$PLAYLIST_DIR/playlist.m3u'
+export POLICE='$APP_DIR/xmp-police.sh'
+export FONT_DIR='$HOME/.local/share/fonts'
+export AUDIO_SOCK='/tmp/ss_audio.sock'
+
+export PHOTO_DURATION=7        # seconds each still photo is shown (videos play in full)
+export VOLUME=70               # mpv startup volume (0-100)
+export IDLE_TIMEOUT_MS=300000  # idle ms before the screensaver auto-launches (= 5 min)
+export MIN_LOAD_SECS=2         # minimum seconds the "please wait" screen stays visible
+export VID_RESCAN_SECS=300     # how often vid-daemon rescans Media/ for new videos
+
+# Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
+# config goes. Everything deeper is resolved by sourcing the file we write.
+eval "REAL_APP=\"$APP_DIR\""
+mkdir -p "$REAL_APP/config"
+
+# -----------------------------------------------------------------------------
+#  Compile the single source of truth. Unquoted heredoc + single-quoted sources
+#  => the file keeps $HOME / $VAR references (portable). Order = dependency order.
+# -----------------------------------------------------------------------------
+echo "▶ Writing screensaver.conf (single source of truth)..."
+cat > "$REAL_APP/config/screensaver.conf" << CONF
+# =============================================================================
+#  Screensaver-App — central configuration  (AUTO-GENERATED, single source).
+#  Edit a value here and it applies everywhere; every script sources this file.
+#  Keep entries in dependency order so they resolve cleanly when sourced.
+# =============================================================================
+export APP_DIR="$APP_DIR"
+export DATA_DIR="$DATA_DIR"
+export CFG_DIR="$CFG"
+export BASE_DIR="$BASE_DIR"
+export MEDIA_DIR="$MEDIA_DIR"
+export MUSIC_DIR="$MUSIC_DIR"
+export MAP_DIR="$MAP_DIR"
+export OPT_DIR="$OPT_DIR"
+export TITLE_DIR="$TITLE_DIR"
+export PLAYLIST_DIR="$PLAYLIST_DIR"
+export PLAYLIST="$PLAYLIST"
+export POLICE="$POLICE"
+export FONT_DIR="$FONT_DIR"
+export AUDIO_SOCK="$AUDIO_SOCK"
+export PHOTO_DURATION="$PHOTO_DURATION"
+export VOLUME="$VOLUME"
+export IDLE_TIMEOUT_MS="$IDLE_TIMEOUT_MS"
+export MIN_LOAD_SECS="$MIN_LOAD_SECS"
+export VID_RESCAN_SECS="$VID_RESCAN_SECS"
+CONF
+
+# Run the installer on its own config — this resolves every level, top-down.
+. "$REAL_APP/config/screensaver.conf"
+CFG="$CFG_DIR"   # legacy alias used by a few install steps below
 
 echo "▶ Preparing strict folder architecture..."
 
+rm -f "$HOME/.config/autostart/tv-watcher.desktop"
+rm -f "$HOME/.local/share/applications/tv-screensaver-now.desktop"
 pkill -f exif-daemon.sh 2>/dev/null || true
+pkill -f xmp-police.sh 2>/dev/null || true
 pkill -f vid-daemon.sh 2>/dev/null || true
+pkill -f tv-watcher.sh 2>/dev/null || true
 pkill -f idle-watcher.sh 2>/dev/null || true
 
-mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$HOME/.config/autostart" "$HOME/.local/share/applications" "$HOME/.local/share/fonts"
+if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
+    mv "$HOME/TV-Screensaver" "$APP_DIR"
+fi
+
+mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
+         "$HOME/.config/autostart" "$HOME/.local/share/applications" "$FONT_DIR"
+
+if [ -d "$BASE_DIR/_map" ]; then
+    mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
+    rm -rf "$BASE_DIR/_map"
+fi
+if [ -d "$BASE_DIR/optimized_vids" ]; then
+    mv "$BASE_DIR/optimized_vids"/* "$OPT_DIR/" 2>/dev/null || true
+    rm -rf "$BASE_DIR/optimized_vids"
+fi
+
+find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
 
 # =============================================================================
 # 0. Dependencies (distro-aware, single transaction, VERIFIED)
@@ -83,7 +175,6 @@ else
     MISSING+=("ImageMagick")
 fi
 
-FONT_DIR="$HOME/.local/share/fonts"
 FONT_BASE="https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf"
 got_font=0
 for w in ExtraBold SemiBold; do
@@ -100,7 +191,7 @@ if [ "$got_font" = 1 ]; then
 fi
 
 # =============================================================================
-# 1. input.conf
+# 1. input.conf  (socket path injected from config via placeholder)
 # =============================================================================
 echo "▶ Writing input.conf..."
 cat > "$CFG/input.conf" << 'EOF'
@@ -127,31 +218,42 @@ PGUP  script-message month-prev
 END   script-message year-next
 HOME  script-message year-prev
 
-NEXT run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
-PREV run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
-]    run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
-[    run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:/tmp/ss_audio.sock 2>/dev/null"
+NEXT run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:@@AUDIO_SOCK@@ 2>/dev/null"
+PREV run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:@@AUDIO_SOCK@@ 2>/dev/null"
+]    run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:@@AUDIO_SOCK@@ 2>/dev/null"
+[    run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:@@AUDIO_SOCK@@ 2>/dev/null"
 
 = add volume 5
 - add volume -5
 EOF
+sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"
 
 # =============================================================================
-# 2. photo.lua
+# 2. photo.lua  (paths come from the environment exported by the config)
 # =============================================================================
 echo "▶ Writing photo.lua..."
 cat > "$CFG/photo.lua" << 'EOF'
 local utils = require "mp.utils"
 local msg   = require "mp.msg"
 
-local APP_DIR    = (os.getenv("HOME") or "~") .. "/Screensaver-App"
-local DATA_DIR   = APP_DIR .. "/Data"
-local MEDIA_DIR  = DATA_DIR .. "/Media"
-local OPT_DIR    = DATA_DIR .. "/Optimized_Vids"
-local MAP_DIR    = DATA_DIR .. "/Maps"
+-- Paths come from the environment (exported by screensaver.conf, which
+-- launch.sh sources before starting mpv). The env() fallbacks keep photo.lua
+-- working even if it is ever loaded outside launch.sh.
+local function env(name, default)
+    local v = os.getenv(name)
+    if v and v ~= "" then return v end
+    return default
+end
 
-local builder    = APP_DIR .. "/config/build-minimap.sh"
-local AUDIO_SOCK = "/tmp/ss_audio.sock"
+local APP_DIR    = env("APP_DIR",   (os.getenv("HOME") or "~") .. "/Screensaver-App")
+local DATA_DIR   = env("DATA_DIR",   APP_DIR .. "/Data")
+local CFG_DIR    = env("CFG_DIR",    APP_DIR .. "/config")
+local MEDIA_DIR  = env("MEDIA_DIR",  DATA_DIR .. "/Media")
+local OPT_DIR    = env("OPT_DIR",    DATA_DIR .. "/Optimized_Vids")
+local MAP_DIR    = env("MAP_DIR",    DATA_DIR .. "/Maps")
+
+local builder    = CFG_DIR .. "/build-minimap.sh"
+local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
 
 local ZOOMS        = {11, 14, 16}
 local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
@@ -900,7 +1002,6 @@ local function jump_month(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter title by looking backward through sparse metadata
     local active_title = nil
     for i = current_idx, 1, -1 do
         local t = pl[i].title
@@ -921,7 +1022,6 @@ local function jump_month(direction)
             end
         end
     else
-        -- Scan backward to find the title card for the previous month
         for i = current_idx - 1, 1, -1 do
             local t = pl[i].title
             if t and t ~= "" and t ~= "Unknown Date" and t ~= active_title then
@@ -929,7 +1029,6 @@ local function jump_month(direction)
                 break
             end
         end
-        -- If we are in the very first month, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -959,7 +1058,6 @@ local function jump_year(direction)
     
     local current_idx = pos + 1
     
-    -- Find active chapter year by looking backward
     local active_year = nil
     for i = current_idx, 1, -1 do
         local y = extract_year(pl[i].title)
@@ -981,7 +1079,6 @@ local function jump_year(direction)
         end
     else
         local prev_year = nil
-        -- Scan backward to find the absolute FIRST occurrence of the previous year
         for i = current_idx - 1, 1, -1 do
             local y = extract_year(pl[i].title)
             if y and y ~= active_year then
@@ -989,13 +1086,12 @@ local function jump_year(direction)
                     prev_year = y
                     target_idx = i
                 elseif y == prev_year then
-                    target_idx = i -- Keep updating to the earlier index
+                    target_idx = i
                 else
-                    break -- We hit an even older year, so stop
+                    break
                 end
             end
         end
-        -- If we are in the very first year, jump to the absolute beginning
         if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
@@ -1020,6 +1116,10 @@ echo "▶ Writing build-minimap.sh..."
 cat > "$CFG/build-minimap.sh" << 'EOF'
 #!/bin/bash
 set -u
+
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+[ -r "$SS_CONF" ] && . "$SS_CONF"
+
 LAT="$1"; LON="$2"; Z="$3"; OUT_MAP="$4"; OUT_QR="$5"; CACHE="$6"
 HUD_W="${7:-552}"; HUD_H="${8:-616}"; MAP_RING_COLOR="${9:-#FFFFFF}"
 
@@ -1112,8 +1212,8 @@ pattern.alpha_composite(qr_img, (int(cx - half), int(cy - half)))
 gradient = Image.new("RGBA", (D, D), (0, 0, 0, 0))
 gdraw = ImageDraw.Draw(gradient)
 
-edge_color = (130, 40, 180)
-center_color = (30, 0, 60)
+center_color = (130, 40, 180)
+edge_color = (30, 0, 60)
 
 for rad in range(int(R), 0, -1):
     ratio = rad / R
@@ -1252,6 +1352,11 @@ echo "▶ Writing build-title.sh..."
 cat > "$CFG/build-title.sh" << 'EOF'
 #!/bin/bash
 set -u
+
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+[ -r "$SS_CONF" ] && . "$SS_CONF"
+: "${FONT_DIR:=$HOME/.local/share/fonts}"
+
 YEAR="$1"
 MONTH="$2"
 OUT_FILE="$3"
@@ -1303,7 +1408,7 @@ PY
 ffmpeg -v error -nostdin -y \
     -f lavfi -i color=c=black:s=1920x1080:d=4 \
     -f lavfi -i anullsrc=r=44100:cl=stereo:d=4 \
-    -vf "ass='${TMP_ASS}':fontsdir='$HOME/.local/share/fonts',fade=t=out:st=3.2:d=0.8" \
+    -vf "ass='${TMP_ASS}':fontsdir='${FONT_DIR}',fade=t=out:st=3.2:d=0.8" \
     -c:v libx264 -preset fast -crf 22 -c:a aac -shortest "$OUT_FILE"
 
 rm -f "$TMP_ASS"
@@ -1311,780 +1416,29 @@ EOF
 chmod +x "$CFG/build-title.sh"
 
 # =============================================================================
-# 4. apply-overrides.sh 
-# =============================================================================
-echo "▶ Writing apply-overrides.sh..."
-cat > "$APP_DIR/apply-overrides.sh" << 'EOF'
-#!/bin/bash
-set -u
-PHOTO_DIR="${1:-$HOME/Screensaver-App/Data/Media}"
-KEEP_BACKUP="${KEEP_BACKUP:-1}"
-
-command -v exiftool >/dev/null 2>&1 || { echo "exiftool not installed"; exit 1; }
-
-find_sidecar() {
-    local f="$1" base="${1%.*}"
-    [ -s "$base.txt" ] && { echo "$base.txt"; return; }
-    [ -s "$f.txt" ]    && { echo "$f.txt"; return; }
-}
-
-parse_sidecar() {
-    python3 - "$1" <<'PY'
-import sys, re
-date_raw, lat, lon, loc = "", None, None, ""
-
-def pc(s):
-    s = re.sub(r'\(.*?\)', '', s).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
-    d = re.search(r'[NSEW]', s)
-    v = None
-    if len(nums) == 1: v = nums[0]
-    elif len(nums) == 2: v = nums[0] + nums[1]/60.0
-    elif len(nums) >= 3: v = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-    if v is not None and d and d.group(0) in ('S', 'W'): v = -abs(v)
-    return v
-
-def pg(v):
-    v = re.sub(r'\(.*?\)', '', v).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', v)]
-    dirs = re.findall(r'[NSEW]', v)
-    if len(nums) == 2:
-        la, lo = nums[0], nums[1]
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 6:
-        la = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-        lo = nums[3] + nums[4]/60.0 + nums[5]/3600.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 4:
-        la = nums[0] + nums[1]/60.0
-        lo = nums[2] + nums[3]/60.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    return None, None
-
-for line in open(sys.argv[1], encoding='utf-8', errors='ignore'):
-    line = line.strip()
-    if not line: continue
-    m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
-    if m:
-        k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
-        if k in ('date','datetime','datetimeoriginal','createdate'): date_raw = val
-        elif k in ('gps','coords','coordinates','latlon','latlng'):
-            a,b = pg(val);  lat,lon = (a,b) if a is not None and b is not None else (lat,lon)
-        elif k in ('lat','latitude'):  a = pc(val); lat = a if a is not None else lat
-        elif k in ('lon','lng','long','longitude'): a = pc(val); lon = a if a is not None else lon
-        elif k in ('location','place','city'):
-            a,b = pg(val)
-            if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-            else: loc = val
-    else:
-        a,b = pg(line)
-        if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-
-if lat is not None and not (-90  <= lat <= 90 ): lat = None
-if lon is not None and not (-180 <= lon <= 180): lon = None
-fmt = lambda x: '' if x is None else f'{x:.7f}'
-print('\t'.join([date_raw, fmt(lat), fmt(lon), loc]))
-PY
-}
-
-count=0
-while IFS= read -r -d '' f; do
-    sc="$(find_sidecar "$f")"; [ -n "$sc" ] || continue
-    IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$sc")
-
-    args=()
-    if [ -n "$RAWDATE" ]; then
-        if [[ "$RAWDATE" =~ ^[0-9]{4}:[0-9]{2}:[0-9]{2} ]]; then
-            EXIFDATE="$RAWDATE"
-        else
-            EXIFDATE="$(date -d "$RAWDATE" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-            if [ -z "$EXIFDATE" ]; then
-                CLEANED="${RAWDATE//./-}"
-                EXIFDATE="$(date -d "$CLEANED" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-            fi
-        fi
-        if [ -n "${EXIFDATE:-}" ]; then
-            args+=( "-DateTimeOriginal=$EXIFDATE" "-CreateDate=$EXIFDATE" )
-        fi
-    fi
-
-    if [ -n "$LAT" ] && [ -n "$LON" ]; then
-        ABS_LAT=${LAT#-}
-        REF_LAT="N"
-        if [[ "$LAT" == -* ]]; then REF_LAT="S"; fi
-        ABS_LON=${LON#-}
-        REF_LON="E"
-        if [[ "$LON" == -* ]]; then REF_LON="W"; fi
-        args+=( "-GPSLatitude=$ABS_LAT" "-GPSLatitudeRef=$REF_LAT" "-GPSLongitude=$ABS_LON" "-GPSLongitudeRef=$REF_LON" )
-    fi
-    if [ -n "$LOC" ]; then
-        IFS=',' read -r C S K <<< "$LOC"
-        C="$(echo "$C" | sed 's/^ *//;s/ *$//')"; S="$(echo "$S" | sed 's/^ *//;s/ *$//')"; K="$(echo "$K" | sed 's/^ *//;s/ *$//')"
-        [ -n "$C" ] && args+=( "-City=$C" )
-        [ -n "$S" ] && args+=( "-State=$S" )
-        [ -n "$K" ] && args+=( "-Country=$K" )
-    fi
-
-    [ ${#args[@]} -eq 0 ] && continue
-
-    if [ "$KEEP_BACKUP" = "1" ]; then
-        EXIF_CMD=(exiftool "${args[@]}" "$f")
-    else
-        EXIF_CMD=(exiftool -overwrite_original "${args[@]}" "$f")
-    fi
-
-    if "${EXIF_CMD[@]}" >/dev/null 2>&1; then
-        count=$((count+1))
-    else
-        ext="${f##*.}"
-        if [ "${ext,,}" = "png" ]; then
-            new_jpg="${f%.*}.jpg"
-            if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
-            if $IM "$f" "$new_jpg" >/dev/null 2>&1; then
-                if [ "$KEEP_BACKUP" = "1" ]; then
-                    exiftool "${args[@]}" "$new_jpg" >/dev/null 2>&1
-                else
-                    exiftool -overwrite_original "${args[@]}" "$new_jpg" >/dev/null 2>&1
-                fi
-                rm -f "$f"
-                count=$((count+1))
-            fi
-        fi
-    fi
-done < <(find "$PHOTO_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
-        -o -iname '*.webp' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \) -print0)
-EOF
-chmod +x "$APP_DIR/apply-overrides.sh"
-
-# =============================================================================
-# 5. exif-daemon.sh
-# =============================================================================
-echo "▶ Writing exif-daemon.sh..."
-cat > "$APP_DIR/exif-daemon.sh" << 'EOF'
-#!/bin/bash
-set -u
-PHOTO_DIR="$HOME/Screensaver-App/Data/Media"
-
-while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
-
-parse_sidecar() {
-    python3 - "$1" <<'PY'
-import sys, re
-date_raw, lat, lon, loc = "", None, None, ""
-
-def pg(v):
-    v = re.sub(r'\(.*?\)', '', v).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', v)]
-    dirs = re.findall(r'[NSEW]', v)
-    if len(nums) == 2:
-        la, lo = nums[0], nums[1]
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 6:
-        la = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-        lo = nums[3] + nums[4]/60.0 + nums[5]/3600.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    elif len(nums) == 4:
-        la = nums[0] + nums[1]/60.0
-        lo = nums[2] + nums[3]/60.0
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    return None, None
-
-for line in open(sys.argv[1], encoding='utf-8', errors='ignore'):
-    line = line.strip()
-    if not line: continue
-    m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
-    if m:
-        k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
-        if k in ('date','datetime','datetimeoriginal','createdate'): date_raw = val
-        elif k in ('gps','coords','coordinates','latlon','latlng'):
-            a,b = pg(val);  lat,lon = (a,b) if a is not None and b is not None else (lat,lon)
-        elif k in ('location','place','city'):
-            a,b = pg(val)
-            if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-            else: loc = val
-    else:
-        a,b = pg(line)
-        if a is not None and b is not None and -90<=a<=90 and -180<=b<=180: lat,lon = a,b
-
-if lat is not None and not (-90  <= lat <= 90 ): lat = None
-if lon is not None and not (-180 <= lon <= 180): lon = None
-fmt = lambda x: '' if x is None else f'{x:.7f}'
-print('\t'.join([date_raw, fmt(lat), fmt(lon), loc]))
-PY
-}
-
-while true; do
-    find "$PHOTO_DIR" -type f -name '*.txt' -print0 | while IFS= read -r -d '' txt_file; do
-        base="${txt_file%.txt}"
-        media_file=""
-
-        if [ -f "$base" ]; then
-            media_file="$base"
-        else
-            for ext in jpg jpeg png webp tif tiff heic heif mp4 mkv; do
-                if [ -f "${base}.${ext}" ]; then media_file="${base}.${ext}"; break; fi
-                if [ -f "${base}.${ext^^}" ]; then media_file="${base}.${ext^^}"; break; fi
-            done
-        fi
-
-        [ -z "$media_file" ] && continue
-
-        if [ "$txt_file" -nt "$media_file" ]; then
-            IFS=$'\t' read -r RAWDATE LAT LON LOC < <(parse_sidecar "$txt_file")
-            args=()
-
-            if [ -n "$RAWDATE" ]; then
-                if [[ "$RAWDATE" =~ ^[0-9]{4}:[0-9]{2}:[0-9]{2} ]]; then
-                    EXIFDATE="$RAWDATE"
-                else
-                    EXIFDATE="$(date -d "$RAWDATE" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-                    if [ -z "$EXIFDATE" ]; then
-                        CLEANED="${RAWDATE//./-}"
-                        EXIFDATE="$(date -d "$CLEANED" +'%Y:%m:%d %H:%M:%S' 2>/dev/null)"
-                    fi
-                fi
-                if [ -n "${EXIFDATE:-}" ]; then
-                    args+=( "-DateTimeOriginal=$EXIFDATE" "-CreateDate=$EXIFDATE" )
-                fi
-            fi
-
-            if [ -n "$LAT" ] && [ -n "$LON" ]; then
-                ABS_LAT=${LAT#-}
-                REF_LAT="N"
-                if [[ "$LAT" == -* ]]; then REF_LAT="S"; fi
-                ABS_LON=${LON#-}
-                REF_LON="E"
-                if [[ "$LON" == -* ]]; then REF_LON="W"; fi
-                args+=( "-GPSLatitude=$ABS_LAT" "-GPSLatitudeRef=$REF_LAT" "-GPSLongitude=$ABS_LON" "-GPSLongitudeRef=$REF_LON" )
-            fi
-
-            if [ ${#args[@]} -gt 0 ]; then
-                if exiftool -overwrite_original "${args[@]}" "$media_file" >/dev/null 2>&1; then
-                    touch "$media_file"
-                else
-                    ext="${media_file##*.}"
-                    if [ "${ext,,}" = "png" ]; then
-                        new_jpg="${media_file%.*}.jpg"
-                        if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
-                        if $IM "$media_file" "$new_jpg" >/dev/null 2>&1; then
-                            exiftool -overwrite_original "${args[@]}" "$new_jpg" >/dev/null 2>&1
-                            rm -f "$media_file"
-                            touch "$new_jpg"
-                        fi
-                    fi
-                fi
-            fi
-        fi
-    done
-    sleep 60
-done
-EOF
-chmod +x "$APP_DIR/exif-daemon.sh"
-
-# =============================================================================
-# 5b. vid-daemon.sh 
-# =============================================================================
-echo "▶ Writing vid-daemon.sh..."
-cat > "$APP_DIR/vid-daemon.sh" << 'EOF'
-#!/bin/bash
-set -u
-MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
-OPT_DIR="$HOME/Screensaver-App/Data/Optimized_Vids"
-LOG_FILE="$HOME/Screensaver-App/vid-daemon.log"
-STATUS_FILE="$HOME/Screensaver-App/vid-status"
-
-mkdir -p "$OPT_DIR"
-touch "$LOG_FILE"
-
-log() { echo "[$(date +'%H:%M:%S')] $*" >> "$LOG_FILE"; }
-
-FFMPEG_PID=""
-WATCHER_PID=""
-SLEEP_PID=""
-
-shutdown() {
-    log "↘ Signal received, shutting down."
-    for p in "$FFMPEG_PID" "$WATCHER_PID" "$SLEEP_PID"; do
-        [ -n "$p" ] && kill "$p" 2>/dev/null
-    done
-    if [ -n "$FFMPEG_PID" ]; then
-        for _ in 1 2 3; do
-            kill -0 "$FFMPEG_PID" 2>/dev/null || break
-            sleep 1
-        done
-        kill -9 "$FFMPEG_PID" 2>/dev/null
-    fi
-    rm -f "$STATUS_FILE" "$STATUS_FILE.raw"
-    exit 0
-}
-trap shutdown INT TERM HUP
-
-echo "idle" > "$STATUS_FILE"
-
-while command -v ffmpeg >/dev/null 2>&1; do
-
-    while IFS= read -r -d '' vid; do
-        [ -f "$vid" ] || continue
-
-        filename="$(basename "$vid")"
-        base="${filename%.*}"
-
-        TARGET_W=3840; TARGET_H=2160
-        DISPLAY_CONF="$HOME/Screensaver-App/display.conf"
-        if [ -s "$DISPLAY_CONF" ]; then
-            res="$(tr -dc '0-9x' < "$DISPLAY_CONF")"
-            if [[ "$res" =~ ^([0-9]+)x([0-9]+)$ ]]; then
-                TARGET_W="${BASH_REMATCH[1]}"; TARGET_H="${BASH_REMATCH[2]}"
-            fi
-        fi
-        TARGET="fp1-${TARGET_W}x${TARGET_H}"
-
-        out_file="$OPT_DIR/${base}.mp4"
-        skip_marker="$OPT_DIR/.skip_${base}"
-        res_marker="$OPT_DIR/.res_${base}"
-        tmp_file="$OPT_DIR/.tmp_${base}.mp4"
-        prev_res="$(cat "$res_marker" 2>/dev/null || true)"
-
-        if [ -f "$out_file" ]; then
-            if [ "$vid" -nt "$out_file" ] || [ "$prev_res" != "$TARGET" ]; then
-                if [ "$prev_res" != "$TARGET" ]; then
-                    log "↻ Re-optimizing (target ${prev_res:-none}→$TARGET): $filename"
-                else
-                    log "↻ Re-optimizing (source changed): $filename"
-                fi
-                rm -f "$out_file" "$skip_marker" "$res_marker"
-            fi
-        elif [ -f "$skip_marker" ]; then
-            if [ "$vid" -nt "$skip_marker" ] || [ "$prev_res" != "$TARGET" ]; then
-                rm -f "$skip_marker" "$res_marker"
-            fi
-        fi
-        [ -f "$out_file" ] && continue
-        [ -f "$skip_marker" ] && continue
-
-        PROBE=$(python3 - "$vid" "$TARGET_W" "$TARGET_H" <<'PY'
-import sys, subprocess, json
-try:
-    vid = sys.argv[1]
-    tw = float(sys.argv[2]); th = float(sys.argv[3])
-    out = subprocess.check_output(
-        ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-         '-show_streams', '-show_entries', 'format=duration',
-         '-print_format', 'json', vid],
-        stdin=subprocess.DEVNULL
-    ).decode('utf-8')
-    d = json.loads(out)
-    s = d['streams'][0]
-    dur = float(d.get('format', {}).get('duration', 0))
-    w = float(s.get('width', 0))
-    h = float(s.get('height', 0))
-    rot = 0
-    if 'rotate' in s.get('tags', {}):
-        rot = int(float(s['tags']['rotate']))
-    for sd in s.get('side_data_list', []):
-        if 'rotation' in sd:
-            rot = int(float(sd['rotation']))
-    rot = ((rot % 360) + 360) % 360
-    eff_w, eff_h = (h, w) if rot in (90, 270) else (w, h)
-    if eff_h == 0:
-        print("ERROR\t0"); sys.exit(0)
-    ratio = eff_w / eff_h
-    target_ratio = tw / th
-    needs = (abs(ratio - target_ratio) > 0.02) or (eff_w > tw) or (eff_h > th)
-    print(f"{'YES' if needs else 'NO'}\t{int(dur)}")
-except Exception:
-    print("ERROR\t0")
-PY
-)
-        IFS=$'\t' read -r STATUS DURATION_S <<< "$PROBE"
-
-        if [ "$STATUS" = "ERROR" ] || [ -z "$STATUS" ]; then
-            log "⚠ Skip (probe failed): $filename"
-            continue
-        fi
-        if [ "$STATUS" = "NO" ]; then
-            touch "$skip_marker"
-            echo "$TARGET" > "$res_marker"
-            log "⏭ Skip (native, matches ${TARGET}): $filename"
-            continue
-        fi
-
-        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
-
-        log "⚙ Optimizing: $filename (dur=${DURATION_S}s)"
-        echo "$filename — starting..." > "$STATUS_FILE"
-        rm -f "$STATUS_FILE.raw"
-
-        ffmpeg -nostdin -y -v error \
-            -i "$vid" \
-            -filter_complex "$FILTER" \
-            -map_metadata -1 -metadata:s:v:0 rotate=0 \
-            -c:v libx264 -preset veryfast -crf 23 \
-            -c:a aac -b:a 128k \
-            -movflags +faststart \
-            -progress "$STATUS_FILE.raw" \
-            "$tmp_file" </dev/null 2>>"$LOG_FILE" &
-        FFMPEG_PID=$!
-
-        (
-            while kill -0 "$FFMPEG_PID" 2>/dev/null; do
-                if [ -s "$STATUS_FILE.raw" ] && [ "$DURATION_S" -gt 0 ]; then
-                    t_us=$(grep '^out_time_us=' "$STATUS_FILE.raw" 2>/dev/null | tail -1 | cut -d= -f2)
-                    if [[ "$t_us" =~ ^[0-9]+$ ]]; then
-                        pct=$(( t_us / 10000 / DURATION_S ))
-                        [ "$pct" -gt 100 ] && pct=100
-                        printf '%s — %d%%\n' "$filename" "$pct" > "$STATUS_FILE"
-                    fi
-                fi
-                sleep 2
-            done
-        ) &
-        WATCHER_PID=$!
-
-        wait "$FFMPEG_PID"
-        FF_RC=$?
-        FFMPEG_PID=""
-        kill "$WATCHER_PID" 2>/dev/null
-        wait "$WATCHER_PID" 2>/dev/null
-        WATCHER_PID=""
-        rm -f "$STATUS_FILE.raw"
-
-        if [ "$FF_RC" -eq 0 ]; then
-            mv "$tmp_file" "$out_file"
-            echo "$TARGET" > "$res_marker"
-            log "✓ Done ($TARGET): $filename"
-            echo "$filename — done" > "$STATUS_FILE"
-        else
-            rm -f "$tmp_file"
-            log "❌ Failed (rc=$FF_RC): $filename — see preceding stderr in log"
-            echo "$filename — FAILED" > "$STATUS_FILE"
-        fi
-
-    done < <(find "$MEDIA_DIR" -maxdepth 1 -type f \
-        \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' -o -iname '*.webm' \) \
-        -print0)
-
-    echo "idle (next scan in 5 min)" > "$STATUS_FILE"
-    sleep 300 &
-    SLEEP_PID=$!
-    wait "$SLEEP_PID" 2>/dev/null
-    SLEEP_PID=""
-done
-EOF
-chmod +x "$APP_DIR/vid-daemon.sh"
-
-# =============================================================================
-# 6. mpv.conf
-# =============================================================================
-echo "▶ Writing mpv.conf..."
-cat > "$CFG/mpv.conf" << 'EOF'
-fullscreen=yes
-loop-playlist=inf
-shuffle=no
-image-display-duration=7
-osc=no
-osd-bar=no
-keep-open=no
-input-conf=~~/input.conf
-script=~~/photo.lua
-hwdec=auto-safe
-volume=70
-EOF
-
-# =============================================================================
-# 7. launch.sh (with Loading Screen)
-# =============================================================================
-echo "▶ Writing launch.sh..."
-cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
-#!/bin/bash
-pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
-
-APP_DIR="$HOME/Screensaver-App"
-AUDIO_SOCK="/tmp/ss_audio.sock"
-MUSIC_DIR="$APP_DIR/Data/Music"
-MEDIA_DIR="$APP_DIR/Data/Media"
-PLAYLIST="$APP_DIR/Data/Playlist/playlist.m3u"
-PLAYLIST_DIR="$(dirname "$PLAYLIST")"
-TITLE_DIR="$APP_DIR/Data/TitleCards"
-POLICE="$APP_DIR/xmp-police.sh"
-
-# --- Self-healing: recreate any folder that was deleted ----------------------
-# launch.sh runs standalone (autostart / idle-watcher), long after the
-# installer. If the user nukes Playlist/, TitleCards/, Media/, etc. we must not
-# fall over: every directory the launcher or its writes depend on is recreated
-# here before anything touches it.
-mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
-         "$APP_DIR/Data/Maps" "$APP_DIR/Data/Optimized_Vids"
-
-command -v exiftool >/dev/null 2>&1 || \
-    echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
-
-MUSIC_PID=""
-POLICE_PID=""
-VID_PID=""
-LOADING_PID=""
-
-cleanup() {
-    [ -n "$MUSIC_PID" ]   && kill "$MUSIC_PID" 2>/dev/null
-    [ -n "$POLICE_PID" ]  && kill "$POLICE_PID" 2>/dev/null
-    [ -n "$VID_PID" ]     && kill "$VID_PID" 2>/dev/null
-    [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
-    rm -f "$AUDIO_SOCK"
-}
-trap cleanup EXIT INT TERM
-
-rm -f "$AUDIO_SOCK"
-
-# Background metadata daemon: keeps .xmp sidecars warm while we run / sit idle.
-nice -n 19 "$POLICE" >/dev/null 2>&1 &
-POLICE_PID=$!
-
-"$APP_DIR/vid-daemon.sh" >/dev/null 2>&1 &
-VID_PID=$!
-
-if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
-    mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" "$MUSIC_DIR" >/dev/null 2>&1 &
-    MUSIC_PID=$!
-fi
-
-# =============================================================================
-# CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven, rebuilt every launch)
-#
-# Two costs are deliberately separated:
-#   * EXTRACTION (police --once) stays INCREMENTAL - only reads metadata out of
-#     media whose sidecar is missing/stale. Heavy media is never re-read warm.
-#   * ASSEMBLY (this block) runs UNCONDITIONALLY - it's cheap and rebuilding
-#     keeps media / sidecars / playlist reconciled, including dropping lines for
-#     media deleted since last launch.
-#
-# HEAVY does NOT decide whether to build (we always build) - it decides whether
-# to show the loading screen, i.e. whether the wait will be noticeable:
-#   * playlist.m3u missing            -> first/forced build
-#   * TitleCards empty or deleted     -> every month card must be re-rendered
-#   * media/txt newer than playlist   -> extraction + maybe a new month card
-# =============================================================================
-HEAVY=0
-if [ ! -f "$PLAYLIST" ]; then
-    HEAVY=1
-elif [ -z "$(ls -A "$TITLE_DIR" 2>/dev/null)" ]; then
-    HEAVY=1
-elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
-        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
-           -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
-           -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
-           -o -iname '*.webm' -o -iname '*.txt' \) \
-        -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
-    HEAVY=1
-fi
-
-# Minimum time (seconds) the loading message must stay on screen so it actually
-# renders and is readable, even when the build turns out to be near-instant.
-MIN_LOAD_SECS=2
-
-# ---- Loading screen when the wait would be noticeable -----------------------
-if [ "$HEAVY" = 1 ]; then
-    echo "Building playlist..."
-    LOADING_ASS="/tmp/loading_$$.ass"
-    python3 - "$LOADING_ASS" <<'PY'
-import sys
-ass = """[Script Info]
-PlayResX: 1920
-PlayResY: 1080
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
-Style: Default,Montserrat ExtraBold,70,&H00FFFFFF,5
-
-[Events]
-Format: Layer, Start, End, Style, Text
-Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\fs40\\fsp20}PLEASE WAIT
-"""
-with open(sys.argv[1], "w") as f:
-    f.write(ass)
-PY
-    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar \
-        --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
-        --sub-file="$LOADING_ASS" --sub-fonts-dir="$HOME/.local/share/fonts" >/dev/null 2>&1 &
-    LOADING_PID=$!
-    SECONDS=0
-fi
-
-# ---- 1. Make sidecars current (INCREMENTAL: cold start extracts all) --------
-"$POLICE" --once
-
-# ---- 2. Read sorted (date | media-path) pairs from sidecars only ------------
-exiftool -q -m -j -d "%Y%m%d%H%M%S" \
-    -DateTimeOriginal -CreateDate -CreationDate \
-    -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
-
-python3 - "$PLAYLIST.json" <<'PY' > "$PLAYLIST.raw"
-import sys, json, os
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    data = []
-rows = []
-for e in data:
-    sf = e.get("SourceFile", "")
-    media = sf[:-4] if sf.lower().endswith(".xmp") else sf
-    if not media or not os.path.exists(media):
-        continue
-    d = e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate") or ""
-    d = "".join(c for c in str(d) if c.isdigit())
-    if len(d) < 6:
-        d = "99999999999999"
-    rows.append((d, media))
-rows.sort()
-for d, m in rows:
-    print(d + "|" + m)
-PY
-rm -f "$PLAYLIST.json"
-
-# ---- 3. Inject animated month/year title cards ------------------------------
-echo "#EXTM3U" > "$PLAYLIST.tmp"
-declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
-
-LAST_YM=""
-while IFS='|' read -r D PATH_STR; do
-    [ -e "$PATH_STR" ] || continue
-    if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
-        YM="${D:0:6}"
-        if [[ "$YM" != "$LAST_YM" ]]; then
-            LAST_YM="$YM"
-            Y="${YM:0:4}"
-            M="${YM:4:2}"
-            M_NAME="${M_NAMES[$M]}"
-            if [ -n "$M_NAME" ]; then
-                CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
-                if [ ! -f "$CARD_PATH" ]; then
-                    echo "  Generating Animated Title Card: $M_NAME $Y..."
-                    "$APP_DIR/config/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
-                fi
-                echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
-                [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
-            fi
-        fi
-    fi
-    echo "$PATH_STR" >> "$PLAYLIST.tmp"
-done < "$PLAYLIST.raw"
-
-mv "$PLAYLIST.tmp" "$PLAYLIST"
-rm -f "$PLAYLIST.raw"
-
-# ---- Tear down loading screen (held a minimum time so it's actually seen) ---
-if [ -n "$LOADING_PID" ]; then
-    [ "$SECONDS" -lt "$MIN_LOAD_SECS" ] && sleep "$((MIN_LOAD_SECS - SECONDS))"
-    kill "$LOADING_PID" 2>/dev/null
-    wait "$LOADING_PID" 2>/dev/null
-    LOADING_PID=""
-    rm -f "$LOADING_ASS"
-fi
-
-mpv --config-dir="$APP_DIR/config" --playlist="$PLAYLIST"
-
-LAUNCH_EOF
-chmod +x "$APP_DIR/launch.sh"
-
-# =============================================================================
-# 8. idle-watcher.sh
-# =============================================================================
-echo "▶ Writing idle-watcher.sh..."
-cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
-#!/bin/bash
-IDLE_LIMIT=300000
-while true; do
-    # 1. MPRIS Media Players (Spotify, VLC, Browsers)
-    if playerctl -a status 2>/dev/null | grep -iq "playing"; then sleep 10; continue; fi
-    
-    # 2. Audio Sinks actively running
-    if pactl list sink-inputs 2>/dev/null | grep -iq "state: RUNNING"; then sleep 10; continue; fi
-    
-    # 3. Freedesktop Screensaver Blocks (Catches Plex, Netflix, etc.)
-    if dbus-send --session --dest=org.freedesktop.ScreenSaver --type=method_call --print-reply /org/freedesktop/ScreenSaver org.freedesktop.ScreenSaver.GetInhibitors 2>/dev/null | grep -q "string"; then 
-        sleep 10; continue; 
-    fi
-    
-    # 4. GNOME Session Blocks (Checks for active idle blocks)
-    if gdbus call --session --dest org.gnome.SessionManager --object-path /org/gnome/SessionManager --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null | grep -q "true"; then
-        sleep 10; continue;
-    fi
-
-    # 5. Raw Hardware Idle Time (Mouse/Keyboard)
-    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
-        RAW=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor --object-path /org/gnome/Mutter/IdleMonitor/Core --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null)
-        IDLE_MS=$(echo "$RAW" | awk '{print $2}' | tr -d '[,)]')
-    else
-        IDLE_MS=$(xdotool getidletime 2>/dev/null)
-    fi
-    
-    IDLE_MS=${IDLE_MS:-0}
-    [ "$IDLE_MS" -gt "$IDLE_LIMIT" ] && "$HOME/Screensaver-App/launch.sh"
-    sleep 10
-done
-EOF
-chmod +x "$APP_DIR/idle-watcher.sh"
-
-# =============================================================================
-# 9. xmp-police.sh
+# 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
+#    Supersedes the old exif-daemon.sh and apply-overrides.sh.
 # =============================================================================
 echo "▶ Writing xmp-police.sh..."
 cat > "$APP_DIR/xmp-police.sh" << 'EOF'
-
-
 #!/bin/bash
-# =============================================================================
-#  xmp-police.sh — non-destructive metadata extractor
-#
-#  Walks Data/Media and writes one Immich-style ".xmp" sidecar per media file,
-#  carrying the resolved capture date (+ GPS / city-state-country when known).
-#
-#  • Incremental: a file is only (re)processed when its sidecar is missing, or
-#    the media / its .txt override is newer than the sidecar. Warm runs do
-#    essentially nothing.
-#  • Non-destructive: the original media is NEVER modified. No PNG->JPG, no
-#    in-place EXIF writes. This file supersedes exif-daemon.sh + apply-overrides.sh.
-#  • Precedence (highest first):  user ".txt" override  >  embedded EXIF  >
-#    filename timestamp (e.g. PXL_20230401_203352 / IMG_20230401_120000).
-#
-#  Sidecar naming follows Immich's preferred form: "<media>.<ext>.xmp"
-#  (e.g. photo.jpg -> photo.jpg.xmp), so a future Immich external library
-#  pointed at this folder will discover them automatically.
-#
-#  Usage:
-#    xmp-police.sh           # run as a background daemon (rescan every 60s)
-#    xmp-police.sh --once    # single incremental pass, then exit
-# =============================================================================
+# Walks Media/ and writes one Immich-style "<media>.<ext>.xmp" sidecar per file,
+# carrying the resolved capture date (+ GPS / city-state-country when known).
+# Incremental, non-destructive. Precedence: .txt override > embedded EXIF >
+# filename timestamp. Usage: xmp-police.sh [--once]
 set -u
 
-MEDIA_DIR="$HOME/Screensaver-App/Data/Media"
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+[ -r "$SS_CONF" ] && . "$SS_CONF"
+: "${MEDIA_DIR:=$HOME/Screensaver-App/Data/Media}"
+: "${VID_RESCAN_SECS:=300}"
 
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
 
-# ----------------------------------------------------------------------------
-# Wait for exiftool. In --once mode we don't block the launcher forever.
-# ----------------------------------------------------------------------------
 if ! command -v exiftool >/dev/null 2>&1; then
     if [ "$ONCE" = 1 ]; then
-        echo "xmp-police: exiftool not found — skipping sidecar refresh." >&2
+        echo "xmp-police: exiftool not found - skipping sidecar refresh." >&2
         exit 0
     fi
     while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
@@ -2095,14 +1449,10 @@ MEDIA_EXTS=( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.we
              -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v'
              -o -iname '*.webm' )
 
-# ----------------------------------------------------------------------------
-# One incremental pass.
-# ----------------------------------------------------------------------------
 run_pass() {
     local STALE JSON
     STALE="$(mktemp)"; JSON="$(mktemp)"
 
-    # 1) Collect files whose sidecar is missing / out of date.
     find "$MEDIA_DIR" -maxdepth 1 -type f \( "${MEDIA_EXTS[@]}" \) -print0 |
     while IFS= read -r -d '' m; do
         xmp="${m}.xmp"
@@ -2119,7 +1469,6 @@ run_pass() {
         [ "$stale" = 1 ] && printf '%s\n' "$m"
     done > "$STALE"
 
-    # 2) Bulk-read embedded metadata for just the stale files (single process).
     if [ -s "$STALE" ]; then
         exiftool -q -m -j -d "%Y-%m-%dT%H:%M:%S" \
             -DateTimeOriginal -CreateDate -CreationDate -MediaCreateDate -DateTimeCreated \
@@ -2128,7 +1477,6 @@ run_pass() {
             -api Geolocation -GeolocationCity -GeolocationRegion -GeolocationCountry \
             -@ "$STALE" > "$JSON" 2>/dev/null
 
-        # 3) Merge with .txt overrides + filename fallback, then write sidecars.
         if [ -s "$JSON" ]; then
             python3 - "$JSON" <<'PY'
 import sys, json, os, re
@@ -2277,7 +1625,6 @@ for e in data:
     state   = e.get("GeolocationRegion")  or e.get("State") or e.get("Province-State") or ""
     country = e.get("GeolocationCountry") or e.get("Country") or ""
 
-    # --- human override wins -------------------------------------------------
     txt = find_txt(media)
     if txt:
         td, tla, tlo, tloc = parse_txt(txt)
@@ -2308,7 +1655,6 @@ PY
         fi
     fi
 
-    # 4) Remove orphan sidecars whose media no longer exists.
     find "$MEDIA_DIR" -maxdepth 1 -type f -name '*.xmp' -print0 |
     while IFS= read -r -d '' x; do
         media="${x%.xmp}"
@@ -2318,9 +1664,6 @@ PY
     rm -f "$STALE" "$JSON"
 }
 
-# ----------------------------------------------------------------------------
-# Entry point
-# ----------------------------------------------------------------------------
 if [ "$ONCE" = 1 ]; then
     run_pass
     exit 0
@@ -2331,46 +1674,483 @@ while command -v exiftool >/dev/null 2>&1; do
     run_pass
     sleep 60
 done
-
-
-
-
 EOF
 chmod +x "$APP_DIR/xmp-police.sh"
 
 # =============================================================================
-# 10. Autostart + manual launcher
+# 5. vid-daemon.sh
+# =============================================================================
+echo "▶ Writing vid-daemon.sh..."
+cat > "$APP_DIR/vid-daemon.sh" << 'EOF'
+#!/bin/bash
+set -u
+
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+[ -r "$SS_CONF" ] && . "$SS_CONF"
+: "${APP_DIR:=$HOME/Screensaver-App}"
+: "${MEDIA_DIR:=$APP_DIR/Data/Media}"
+: "${OPT_DIR:=$APP_DIR/Data/Optimized_Vids}"
+: "${VID_RESCAN_SECS:=300}"
+
+LOG_FILE="$APP_DIR/vid-daemon.log"
+STATUS_FILE="$APP_DIR/vid-status"
+
+mkdir -p "$OPT_DIR"
+touch "$LOG_FILE"
+
+log() { echo "[$(date +'%H:%M:%S')] $*" >> "$LOG_FILE"; }
+
+FFMPEG_PID=""
+WATCHER_PID=""
+SLEEP_PID=""
+
+shutdown() {
+    log "↘ Signal received, shutting down."
+    for p in "$FFMPEG_PID" "$WATCHER_PID" "$SLEEP_PID"; do
+        [ -n "$p" ] && kill "$p" 2>/dev/null
+    done
+    if [ -n "$FFMPEG_PID" ]; then
+        for _ in 1 2 3; do
+            kill -0 "$FFMPEG_PID" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$FFMPEG_PID" 2>/dev/null
+    fi
+    rm -f "$STATUS_FILE" "$STATUS_FILE.raw"
+    exit 0
+}
+trap shutdown INT TERM HUP
+
+echo "idle" > "$STATUS_FILE"
+
+while command -v ffmpeg >/dev/null 2>&1; do
+
+    while IFS= read -r -d '' vid; do
+        [ -f "$vid" ] || continue
+
+        filename="$(basename "$vid")"
+        base="${filename%.*}"
+
+        TARGET_W=3840; TARGET_H=2160
+        DISPLAY_CONF="$APP_DIR/display.conf"
+        if [ -s "$DISPLAY_CONF" ]; then
+            res="$(tr -dc '0-9x' < "$DISPLAY_CONF")"
+            if [[ "$res" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+                TARGET_W="${BASH_REMATCH[1]}"; TARGET_H="${BASH_REMATCH[2]}"
+            fi
+        fi
+        TARGET="fp1-${TARGET_W}x${TARGET_H}"
+
+        out_file="$OPT_DIR/${base}.mp4"
+        skip_marker="$OPT_DIR/.skip_${base}"
+        res_marker="$OPT_DIR/.res_${base}"
+        tmp_file="$OPT_DIR/.tmp_${base}.mp4"
+        prev_res="$(cat "$res_marker" 2>/dev/null || true)"
+
+        if [ -f "$out_file" ]; then
+            if [ "$vid" -nt "$out_file" ] || [ "$prev_res" != "$TARGET" ]; then
+                if [ "$prev_res" != "$TARGET" ]; then
+                    log "↻ Re-optimizing (target ${prev_res:-none}→$TARGET): $filename"
+                else
+                    log "↻ Re-optimizing (source changed): $filename"
+                fi
+                rm -f "$out_file" "$skip_marker" "$res_marker"
+            fi
+        elif [ -f "$skip_marker" ]; then
+            if [ "$vid" -nt "$skip_marker" ] || [ "$prev_res" != "$TARGET" ]; then
+                rm -f "$skip_marker" "$res_marker"
+            fi
+        fi
+        [ -f "$out_file" ] && continue
+        [ -f "$skip_marker" ] && continue
+
+        PROBE=$(python3 - "$vid" "$TARGET_W" "$TARGET_H" <<'PY'
+import sys, subprocess, json
+try:
+    vid = sys.argv[1]
+    tw = float(sys.argv[2]); th = float(sys.argv[3])
+    out = subprocess.check_output(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+         '-show_streams', '-show_entries', 'format=duration',
+         '-print_format', 'json', vid],
+        stdin=subprocess.DEVNULL
+    ).decode('utf-8')
+    d = json.loads(out)
+    s = d['streams'][0]
+    dur = float(d.get('format', {}).get('duration', 0))
+    w = float(s.get('width', 0))
+    h = float(s.get('height', 0))
+    rot = 0
+    if 'rotate' in s.get('tags', {}):
+        rot = int(float(s['tags']['rotate']))
+    for sd in s.get('side_data_list', []):
+        if 'rotation' in sd:
+            rot = int(float(sd['rotation']))
+    rot = ((rot % 360) + 360) % 360
+    eff_w, eff_h = (h, w) if rot in (90, 270) else (w, h)
+    if eff_h == 0:
+        print("ERROR\t0"); sys.exit(0)
+    ratio = eff_w / eff_h
+    target_ratio = tw / th
+    needs = (abs(ratio - target_ratio) > 0.02) or (eff_w > tw) or (eff_h > th)
+    print(f"{'YES' if needs else 'NO'}\t{int(dur)}")
+except Exception:
+    print("ERROR\t0")
+PY
+)
+        IFS=$'\t' read -r STATUS DURATION_S <<< "$PROBE"
+
+        if [ "$STATUS" = "ERROR" ] || [ -z "$STATUS" ]; then
+            log "⚠ Skip (probe failed): $filename"
+            continue
+        fi
+        if [ "$STATUS" = "NO" ]; then
+            touch "$skip_marker"
+            echo "$TARGET" > "$res_marker"
+            log "⏭ Skip (native, matches ${TARGET}): $filename"
+            continue
+        fi
+
+        FILTER="[0:v]split[bg][fg];[bg]scale=640:360,setsar=1,gblur=sigma=50,scale=${TARGET_W}:${TARGET_H},setsar=1[b];[fg]scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,setsar=1[f];[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
+
+        log "⚙ Optimizing: $filename (dur=${DURATION_S}s)"
+        echo "$filename — starting..." > "$STATUS_FILE"
+        rm -f "$STATUS_FILE.raw"
+
+        ffmpeg -nostdin -y -v error \
+            -i "$vid" \
+            -filter_complex "$FILTER" \
+            -map_metadata -1 -metadata:s:v:0 rotate=0 \
+            -c:v libx264 -preset veryfast -crf 23 \
+            -c:a aac -b:a 128k \
+            -movflags +faststart \
+            -progress "$STATUS_FILE.raw" \
+            "$tmp_file" </dev/null 2>>"$LOG_FILE" &
+        FFMPEG_PID=$!
+
+        (
+            while kill -0 "$FFMPEG_PID" 2>/dev/null; do
+                if [ -s "$STATUS_FILE.raw" ] && [ "$DURATION_S" -gt 0 ]; then
+                    t_us=$(grep '^out_time_us=' "$STATUS_FILE.raw" 2>/dev/null | tail -1 | cut -d= -f2)
+                    if [[ "$t_us" =~ ^[0-9]+$ ]]; then
+                        pct=$(( t_us / 10000 / DURATION_S ))
+                        [ "$pct" -gt 100 ] && pct=100
+                        printf '%s — %d%%\n' "$filename" "$pct" > "$STATUS_FILE"
+                    fi
+                fi
+                sleep 2
+            done
+        ) &
+        WATCHER_PID=$!
+
+        wait "$FFMPEG_PID"
+        FF_RC=$?
+        FFMPEG_PID=""
+        kill "$WATCHER_PID" 2>/dev/null
+        wait "$WATCHER_PID" 2>/dev/null
+        WATCHER_PID=""
+        rm -f "$STATUS_FILE.raw"
+
+        if [ "$FF_RC" -eq 0 ]; then
+            mv "$tmp_file" "$out_file"
+            echo "$TARGET" > "$res_marker"
+            log "✓ Done ($TARGET): $filename"
+            echo "$filename — done" > "$STATUS_FILE"
+        else
+            rm -f "$tmp_file"
+            log "❌ Failed (rc=$FF_RC): $filename — see preceding stderr in log"
+            echo "$filename — FAILED" > "$STATUS_FILE"
+        fi
+
+    done < <(find "$MEDIA_DIR" -maxdepth 1 -type f \
+        \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' -o -iname '*.webm' \) \
+        -print0)
+
+    echo "idle (next scan in $((VID_RESCAN_SECS / 60)) min)" > "$STATUS_FILE"
+    sleep "$VID_RESCAN_SECS" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null
+    SLEEP_PID=""
+done
+EOF
+chmod +x "$APP_DIR/vid-daemon.sh"
+
+# =============================================================================
+# 6. mpv.conf  (image-display-duration + volume now come from launch.sh/config)
+# =============================================================================
+echo "▶ Writing mpv.conf..."
+cat > "$CFG/mpv.conf" << 'EOF'
+fullscreen=yes
+loop-playlist=inf
+shuffle=no
+osc=no
+osd-bar=no
+keep-open=no
+input-conf=~~/input.conf
+script=~~/photo.lua
+hwdec=auto-safe
+EOF
+
+# =============================================================================
+# 7. launch.sh
+# =============================================================================
+echo "▶ Writing launch.sh..."
+cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
+#!/bin/bash
+pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
+
+# --- Load central config (single source of truth) ----------------------------
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+[ -r "$SS_CONF" ] && . "$SS_CONF"
+
+# Fallback defaults so we never run unset, even if the config is missing.
+: "${APP_DIR:=$HOME/Screensaver-App}"
+: "${DATA_DIR:=$APP_DIR/Data}"
+: "${CFG_DIR:=$APP_DIR/config}"
+: "${MEDIA_DIR:=$DATA_DIR/Media}"
+: "${MUSIC_DIR:=$DATA_DIR/Music}"
+: "${MAP_DIR:=$DATA_DIR/Maps}"
+: "${OPT_DIR:=$DATA_DIR/Optimized_Vids}"
+: "${TITLE_DIR:=$DATA_DIR/TitleCards}"
+: "${PLAYLIST_DIR:=$DATA_DIR/Playlist}"
+: "${PLAYLIST:=$PLAYLIST_DIR/playlist.m3u}"
+: "${POLICE:=$APP_DIR/xmp-police.sh}"
+: "${FONT_DIR:=$HOME/.local/share/fonts}"
+: "${AUDIO_SOCK:=/tmp/ss_audio.sock}"
+: "${PHOTO_DURATION:=7}"
+: "${VOLUME:=70}"
+: "${MIN_LOAD_SECS:=2}"
+
+# --- Self-healing: recreate any folder that was deleted ----------------------
+mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$OPT_DIR"
+
+command -v exiftool >/dev/null 2>&1 || \
+    echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
+
+MUSIC_PID=""
+POLICE_PID=""
+VID_PID=""
+LOADING_PID=""
+
+cleanup() {
+    [ -n "$MUSIC_PID" ]   && kill "$MUSIC_PID" 2>/dev/null
+    [ -n "$POLICE_PID" ]  && kill "$POLICE_PID" 2>/dev/null
+    [ -n "$VID_PID" ]     && kill "$VID_PID" 2>/dev/null
+    [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
+    rm -f "$AUDIO_SOCK"
+}
+trap cleanup EXIT INT TERM
+
+rm -f "$AUDIO_SOCK"
+
+nice -n 19 "$POLICE" >/dev/null 2>&1 &
+POLICE_PID=$!
+
+"$APP_DIR/vid-daemon.sh" >/dev/null 2>&1 &
+VID_PID=$!
+
+if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
+    mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" "$MUSIC_DIR" >/dev/null 2>&1 &
+    MUSIC_PID=$!
+fi
+
+# =============================================================================
+# CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven, rebuilt every launch)
+#   * EXTRACTION (police --once) stays INCREMENTAL.
+#   * ASSEMBLY runs UNCONDITIONALLY and reconciles media / sidecars / playlist,
+#     including dropping deleted media.
+#   HEAVY only decides whether to show the loading screen.
+# =============================================================================
+HEAVY=0
+if [ ! -f "$PLAYLIST" ]; then
+    HEAVY=1
+elif [ -z "$(ls -A "$TITLE_DIR" 2>/dev/null)" ]; then
+    HEAVY=1
+elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
+           -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
+           -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
+           -o -iname '*.webm' -o -iname '*.txt' \) \
+        -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
+    HEAVY=1
+fi
+
+if [ "$HEAVY" = 1 ]; then
+    echo "Building playlist..."
+    LOADING_ASS="/tmp/loading_$$.ass"
+    python3 - "$LOADING_ASS" <<'PY'
+import sys
+ass = """[Script Info]
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
+Style: Default,Montserrat ExtraBold,70,&H00FFFFFF,5
+
+[Events]
+Format: Layer, Start, End, Style, Text
+Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\fs40\\fsp20}PLEASE WAIT
+"""
+with open(sys.argv[1], "w") as f:
+    f.write(ass)
+PY
+    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar \
+        --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
+        --sub-file="$LOADING_ASS" --sub-fonts-dir="$FONT_DIR" >/dev/null 2>&1 &
+    LOADING_PID=$!
+    SECONDS=0
+fi
+
+"$POLICE" --once
+
+exiftool -q -m -j -d "%Y%m%d%H%M%S" \
+    -DateTimeOriginal -CreateDate -CreationDate \
+    -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
+
+python3 - "$PLAYLIST.json" <<'PY' > "$PLAYLIST.raw"
+import sys, json, os
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    data = []
+rows = []
+for e in data:
+    sf = e.get("SourceFile", "")
+    media = sf[:-4] if sf.lower().endswith(".xmp") else sf
+    if not media or not os.path.exists(media):
+        continue
+    d = e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate") or ""
+    d = "".join(c for c in str(d) if c.isdigit())
+    if len(d) < 6:
+        d = "99999999999999"
+    rows.append((d, media))
+rows.sort()
+for d, m in rows:
+    print(d + "|" + m)
+PY
+rm -f "$PLAYLIST.json"
+
+echo "#EXTM3U" > "$PLAYLIST.tmp"
+declare -A M_NAMES=( ["01"]="January" ["02"]="February" ["03"]="March" ["04"]="April" ["05"]="May" ["06"]="June" ["07"]="July" ["08"]="August" ["09"]="September" ["10"]="October" ["11"]="November" ["12"]="December" )
+
+LAST_YM=""
+while IFS='|' read -r D PATH_STR; do
+    [ -e "$PATH_STR" ] || continue
+    if [[ "$D" != "99999999999999" && ${#D} -ge 6 ]]; then
+        YM="${D:0:6}"
+        if [[ "$YM" != "$LAST_YM" ]]; then
+            LAST_YM="$YM"
+            Y="${YM:0:4}"
+            M="${YM:4:2}"
+            M_NAME="${M_NAMES[$M]}"
+            if [ -n "$M_NAME" ]; then
+                CARD_PATH="$TITLE_DIR/${Y}-${M_NAME}.mp4"
+                if [ ! -f "$CARD_PATH" ]; then
+                    echo "  Generating Animated Title Card: $M_NAME $Y..."
+                    "$CFG_DIR/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH"
+                fi
+                echo "#EXTINF:-1,$M_NAME $Y" >> "$PLAYLIST.tmp"
+                [ -f "$CARD_PATH" ] && echo "$CARD_PATH" >> "$PLAYLIST.tmp"
+            fi
+        fi
+    fi
+    echo "$PATH_STR" >> "$PLAYLIST.tmp"
+done < "$PLAYLIST.raw"
+
+mv "$PLAYLIST.tmp" "$PLAYLIST"
+rm -f "$PLAYLIST.raw"
+
+if [ -n "$LOADING_PID" ]; then
+    [ "$SECONDS" -lt "$MIN_LOAD_SECS" ] && sleep "$((MIN_LOAD_SECS - SECONDS))"
+    kill "$LOADING_PID" 2>/dev/null
+    wait "$LOADING_PID" 2>/dev/null
+    LOADING_PID=""
+    rm -f "$LOADING_ASS"
+fi
+
+# Photo display time + volume come from the config, not mpv.conf.
+mpv --config-dir="$CFG_DIR" \
+    --image-display-duration="$PHOTO_DURATION" \
+    --volume="$VOLUME" \
+    --playlist="$PLAYLIST"
+LAUNCH_EOF
+chmod +x "$APP_DIR/launch.sh"
+
+# =============================================================================
+# 8. idle-watcher.sh
+# =============================================================================
+echo "▶ Writing idle-watcher.sh..."
+cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
+#!/bin/bash
+
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+[ -r "$SS_CONF" ] && . "$SS_CONF"
+: "${APP_DIR:=$HOME/Screensaver-App}"
+: "${IDLE_TIMEOUT_MS:=300000}"
+
+IDLE_LIMIT="$IDLE_TIMEOUT_MS"
+while true; do
+    if playerctl -a status 2>/dev/null | grep -iq "playing"; then sleep 10; continue; fi
+
+    if pactl list sink-inputs 2>/dev/null | grep -iq "state: RUNNING"; then sleep 10; continue; fi
+
+    if dbus-send --session --dest=org.freedesktop.ScreenSaver --type=method_call --print-reply /org/freedesktop/ScreenSaver org.freedesktop.ScreenSaver.GetInhibitors 2>/dev/null | grep -q "string"; then 
+        sleep 10; continue; 
+    fi
+
+    if gdbus call --session --dest org.gnome.SessionManager --object-path /org/gnome/SessionManager --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null | grep -q "true"; then
+        sleep 10; continue;
+    fi
+
+    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+        RAW=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor --object-path /org/gnome/Mutter/IdleMonitor/Core --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null)
+        IDLE_MS=$(echo "$RAW" | awk '{print $2}' | tr -d '[,)]')
+    else
+        IDLE_MS=$(xdotool getidletime 2>/dev/null)
+    fi
+
+    IDLE_MS=${IDLE_MS:-0}
+    [ "$IDLE_MS" -gt "$IDLE_LIMIT" ] && "$APP_DIR/launch.sh"
+    sleep 10
+done
+EOF
+chmod +x "$APP_DIR/idle-watcher.sh"
+
+# =============================================================================
+# 9. Autostart + manual launcher  (absolute paths baked from config)
 # =============================================================================
 echo "▶ Writing autostart + app launcher..."
-cat > "$HOME/.config/autostart/idle-watcher.desktop" << 'EOF'
+cat > "$HOME/.config/autostart/idle-watcher.desktop" << EOF
 [Desktop Entry]
 Type=Application
-Exec=sh -c "$HOME/Screensaver-App/idle-watcher.sh"
+Exec=sh -c "$APP_DIR/idle-watcher.sh"
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 Name=Screensaver Idle Watcher
-Comment=Launches the photo screensaver after 5 minutes idle
+Comment=Launches the photo screensaver after the configured idle time
 EOF
 
-cat > "$HOME/.local/share/applications/screensaver-now.desktop" << 'EOF'
+cat > "$HOME/.local/share/applications/screensaver-now.desktop" << EOF
 [Desktop Entry]
 Type=Application
-Exec=sh -c "$HOME/Screensaver-App/launch.sh"
+Exec=sh -c "$APP_DIR/launch.sh"
 Icon=video-display
 Terminal=false
 Name=Start Screensaver
-Comment=Launch the 4K photo screensaver now
+Comment=Launch the photo screensaver now
 Categories=Utility;
 EOF
 
 # =============================================================================
-# 11. Done
+# 10. Done
 # =============================================================================
 echo ""
 echo "✅ Migration and Deployment finished!"
 echo "Your structure is:"
 echo "   App Code   : $APP_DIR"
+echo "   Config     : $CFG/screensaver.conf  (edit this to change any setting)"
 echo "   Media      : $MEDIA_DIR"
 echo "   Caches     : $MAP_DIR & $OPT_DIR"
 if [ "${#MISSING[@]}" -gt 0 ]; then
