@@ -682,50 +682,73 @@ local function build_all(lat, lon, w, h, mdir, cb, i)
     end)
 end
 
+-- Read the date / GPS / location the police already extracted into the
+-- "<media>.xmp" sidecar — no per-slide exiftool subprocess. Falls back to file
+-- mtime for the date, and a ".txt" override (read live) still wins on top.
+local function xml_unescape(s)
+    if not s then return s end
+    return (s:gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"')
+             :gsub("&#39;", "'"):gsub("&apos;", "'"):gsub("&amp;", "&"))
+end
+
+local function read_xmp(xmp_path)
+    local f = io.open(xmp_path, "r")
+    if not f then return nil end
+    local raw = f:read("*a"); f:close()
+    if not raw or raw == "" then return nil end
+    local function tag(name)
+        local v = raw:match("<" .. name .. ">(.-)</" .. name .. ">")
+        return v and xml_unescape(v) or nil
+    end
+    return {
+        date_iso = tag("exif:DateTimeOriginal") or tag("xmp:CreateDate") or tag("photoshop:DateCreated"),
+        lat      = tonumber(tag("exif:GPSLatitude")),
+        lon      = tonumber(tag("exif:GPSLongitude")),
+        city     = tag("photoshop:City"),
+        state    = tag("photoshop:State"),
+        country  = tag("photoshop:Country"),
+    }
+end
+
+local function iso_to_display(iso)
+    if not iso then return nil end
+    local y, mo, d = iso:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)")
+    if not y then return nil end
+    local t = os.time{year = tonumber(y), month = tonumber(mo), day = tonumber(d), hour = 12}
+    return t and os.date("%b %d, %Y", t) or nil
+end
+
 local function resolve_meta(orig_path, cb)
+    local date, location, lat, lon = nil, "", nil, nil
+
+    -- 1) Base values straight from the sidecar (a tiny file read, no subprocess).
+    local x = read_xmp(orig_path .. ".xmp")
+    if x then
+        date     = iso_to_display(x.date_iso)
+        lat, lon = x.lat, x.lon
+        local landmark, city, region, country =
+            niagara_fix(nil, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
+        location = join_loc(landmark, city, region, country)
+    end
+
+    -- 2) Date fallback: file mtime, if the sidecar carried no date.
+    if not date then
+        local fi = utils.file_info(orig_path)
+        if fi and fi.mtime then date = os.date("%b %d, %Y", fi.mtime) end
+    end
+
+    -- 3) Manual ".txt" override wins (read live, so edits apply immediately).
     local sc = parse_sidecar(orig_path)
-    local fallback_date
-    local fi = utils.file_info(orig_path)
-    if fi and fi.mtime then fallback_date = os.date("%b %d, %Y", fi.mtime) end
+    if sc then
+        if sc.date then date = sc.date end
+        if sc.location and sc.location ~= "" then location = sc.location end
+        if sc.lat and sc.lon then lat, lon = sc.lat, sc.lon end
+    end
 
-    local mdir = MAP_DIR
+    if lat and (lat < -90  or lat > 90 ) then lat = nil end
+    if lon and (lon < -180 or lon > 180) then lon = nil end
 
-    mp.command_native_async({
-        name = "subprocess", capture_stdout = true,
-        args = {
-            "exiftool", "-api", "Geolocation", "-j", "-d", "%b %d, %Y", "-c", "%f",
-            "-DateTimeOriginal", "-CreateDate", "-CreationDate", "-DateCreated", "-ModifyDate",
-            "-GeolocationCity", "-GeolocationRegion", "-GeolocationCountry",
-            "-City", "-State", "-Province-State", "-Country", "-Location", "-LocationName",
-            "-GPSLatitude", "-GPSLongitude", orig_path,
-        },
-    }, function(ok, res)
-        local date, location, lat, lon = fallback_date, "", nil, nil
-        if ok and res and res.stdout and res.stdout ~= "" then
-            local data = utils.parse_json(res.stdout)
-            local t = data and data[1]
-            if t then
-                date = t.DateTimeOriginal or t.CreateDate or t.CreationDate
-                    or t.DateCreated or t.ModifyDate or fallback_date
-                local landmark = t.LocationName or t.Location
-                local city     = t.GeolocationCity or t.City
-                local region   = abbr_subdiv(t.GeolocationRegion or t.State or t["Province-State"], nil)
-                local country  = abbr_country(t.GeolocationCountry or t.Country, nil)
-                landmark, city, region, country = niagara_fix(landmark, city, region, country)
-                location = join_loc(landmark, city, region, country)
-                lat = parse_coord(t.GPSLatitude)
-                lon = parse_coord(t.GPSLongitude)
-            end
-        end
-        if sc then
-            if sc.date then date = sc.date end
-            if sc.location and sc.location ~= "" then location = sc.location end
-            if sc.lat and sc.lon then lat, lon = sc.lat, sc.lon end
-        end
-        if lat and (lat < -90  or lat > 90 ) then lat = nil end
-        if lon and (lon < -180 or lon > 180) then lon = nil end
-        cb({ date = date, location = location, lat = lat, lon = lon, mdir = mdir })
-    end)
+    cb({ date = date, location = location, lat = lat, lon = lon, mdir = MAP_DIR })
 end
 
 local pq        = {}
