@@ -918,45 +918,43 @@ local function jump_month(direction)
     if not pl or not pos then return end
     
     local current_idx = pos + 1
-    local current_title = pl[current_idx].title or ""
+    
+    -- Find active chapter title by looking backward through sparse metadata
+    local active_title = nil
+    for i = current_idx, 1, -1 do
+        local t = pl[i].title
+        if t and t ~= "" and t ~= "Unknown Date" then
+            active_title = t
+            break
+        end
+    end
+    
     local target_idx = nil
     
     if direction > 0 then
         for i = current_idx + 1, #pl do
             local t = pl[i].title
-            if t and t ~= "" and t ~= current_title and t ~= "Unknown Date" then
+            if t and t ~= "" and t ~= "Unknown Date" and t ~= active_title then
                 target_idx = i
                 break
             end
         end
     else
-        local prev_title = nil
-        local scan_idx = current_idx - 1
-        while scan_idx >= 1 do
-            local t = pl[scan_idx].title
-            if t and t ~= "" and t ~= current_title and t ~= "Unknown Date" then
-                prev_title = t
+        -- Scan backward to find the title card for the previous month
+        for i = current_idx - 1, 1, -1 do
+            local t = pl[i].title
+            if t and t ~= "" and t ~= "Unknown Date" and t ~= active_title then
+                target_idx = i
                 break
             end
-            scan_idx = scan_idx - 1
         end
-        if prev_title then
-            target_idx = scan_idx
-            while target_idx > 1 do
-                if pl[target_idx - 1].title ~= prev_title then
-                    break
-                end
-                target_idx = target_idx - 1
-            end
-        else
-            target_idx = 1
-        end
+        -- If we are in the very first month, jump to the absolute beginning
+        if not target_idx and current_idx > 1 then target_idx = 1 end
     end
     
     if target_idx then
         mp.set_property_number("playlist-pos", target_idx - 1)
-        local t = pl[target_idx].title or ""
-        mp.osd_message("⏭ Chapter: " .. t, 3)
+        mp.osd_message("⏭ Chapter: " .. (pl[target_idx].title or ""), 3)
     else
         mp.osd_message(direction > 0 and "End of Playlist" or "Start of Playlist", 2)
     end
@@ -964,6 +962,73 @@ end
 
 mp.register_script_message("month-next", function() jump_month(1) end)
 mp.register_script_message("month-prev", function() jump_month(-1) end)
+
+-- ----------------------------------------------------------------------------
+-- Playlist Chapters (Jump by Year)
+-- ----------------------------------------------------------------------------
+local function extract_year(title)
+    if not title or title == "" or title == "Unknown Date" then return nil end
+    return title:match("(%d%d%d%d)$")
+end
+
+local function jump_year(direction)
+    local pl = mp.get_property_native("playlist")
+    local pos = mp.get_property_number("playlist-pos")
+    if not pl or not pos then return end
+    
+    local current_idx = pos + 1
+    
+    -- Find active chapter year by looking backward
+    local active_year = nil
+    for i = current_idx, 1, -1 do
+        local y = extract_year(pl[i].title)
+        if y then
+            active_year = y
+            break
+        end
+    end
+    
+    local target_idx = nil
+    
+    if direction > 0 then
+        for i = current_idx + 1, #pl do
+            local y = extract_year(pl[i].title)
+            if y and y ~= active_year then
+                target_idx = i
+                break
+            end
+        end
+    else
+        local prev_year = nil
+        -- Scan backward to find the absolute FIRST occurrence of the previous year
+        for i = current_idx - 1, 1, -1 do
+            local y = extract_year(pl[i].title)
+            if y and y ~= active_year then
+                if not prev_year then
+                    prev_year = y
+                    target_idx = i
+                elseif y == prev_year then
+                    target_idx = i -- Keep updating to the earlier index
+                else
+                    break -- We hit an even older year, so stop
+                end
+            end
+        end
+        -- If we are in the very first year, jump to the absolute beginning
+        if not target_idx and current_idx > 1 then target_idx = 1 end
+    end
+    
+    if target_idx then
+        mp.set_property_number("playlist-pos", target_idx - 1)
+        local target_year = extract_year(pl[target_idx].title) or pl[target_idx].title or ""
+        mp.osd_message("⏭ Year Chapter: " .. target_year, 3)
+    else
+        mp.osd_message(direction > 0 and "End of Playlist" or "Start of Playlist", 2)
+    end
+end
+
+mp.register_script_message("year-next", function() jump_year(1) end)
+mp.register_script_message("year-prev", function() jump_year(-1) end)
 
 -- ----------------------------------------------------------------------------
 -- Playlist Chapters (Jump by Year)
