@@ -1322,7 +1322,9 @@ PY
 ffmpeg -v error -nostdin -y \
     -f lavfi -i color=c=black:s=1920x1080:d=4 \
     -f lavfi -i anullsrc=r=44100:cl=stereo:d=4 \
-    -vf "ass='${TMP_ASS}':fontsdir='$HOME/.local/share/fonts',fade=t=out:st=3.2:d=0.8" \
+    -vf "ass='${TMP_ASS}':fontsdir='$HOME/.local/share/fonts', \
+         zoompan=z='min(zoom+0.0015,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=125:s=1920x1080, \
+         fade=t=out:st=3.2:d=0.8" \
     -c:v libx264 -preset fast -crf 22 -c:a aac -shortest "$OUT_FILE"
 
 rm -f "$TMP_ASS"
