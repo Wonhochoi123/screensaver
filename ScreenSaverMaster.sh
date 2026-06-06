@@ -35,7 +35,7 @@ export TITLE_DIR='$DATA_DIR/TitleCards'
 export PLAYLIST_DIR='$DATA_DIR/Playlist'
 export PLAYLIST='$PLAYLIST_DIR/playlist.m3u'
 export POLICE='$APP_DIR/xmp-police.sh'
-export FONT_DIR='$HOME/.local/share/fonts'
+export FONT_DIR='$MEDIA_DIR/Fonts'
 export AUDIO_SOCK='/tmp/ss_audio.sock'
 
 export PHOTO_DURATION=7        # seconds each still photo is shown (videos play in full)
@@ -185,9 +185,23 @@ for w in ExtraBold SemiBold; do
     fi
 done
 find "$FONT_DIR" -name 'Montserrat-*.ttf' -size 0 -delete 2>/dev/null || true
+
+# Media/Fonts is NOT on fontconfig's default search path, so register it. This
+# is the only per-machine bit written outside the app dir — re-run the installer
+# on a new computer to recreate it. (The mpv/ffmpeg calls also point at FONT_DIR
+# explicitly, so the fonts still work if you copy the app folder without it.)
 if [ "$got_font" = 1 ]; then
+    FC_CONF_DIR="$HOME/.config/fontconfig/conf.d"
+    mkdir -p "$FC_CONF_DIR"
+    cat > "$FC_CONF_DIR/00-screensaver-fonts.conf" << FCEOF
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>$FONT_DIR</dir>
+</fontconfig>
+FCEOF
     fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
-    echo "▶ Montserrat fonts installed (ExtraBold + SemiBold)."
+    echo "▶ Montserrat fonts installed to $FONT_DIR and registered."
 fi
 
 # =============================================================================
@@ -1117,9 +1131,6 @@ cat > "$CFG/build-minimap.sh" << 'EOF'
 #!/bin/bash
 set -u
 
-SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-[ -r "$SS_CONF" ] && . "$SS_CONF"
-
 LAT="$1"; LON="$2"; Z="$3"; OUT_MAP="$4"; OUT_QR="$5"; CACHE="$6"
 HUD_W="${7:-552}"; HUD_H="${8:-616}"; MAP_RING_COLOR="${9:-#FFFFFF}"
 
@@ -1354,8 +1365,7 @@ cat > "$CFG/build-title.sh" << 'EOF'
 set -u
 
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-[ -r "$SS_CONF" ] && . "$SS_CONF"
-: "${FONT_DIR:=$HOME/.local/share/fonts}"
+. "$SS_CONF" 2>/dev/null || { echo "build-title: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 YEAR="$1"
 MONTH="$2"
@@ -1429,9 +1439,7 @@ cat > "$APP_DIR/xmp-police.sh" << 'EOF'
 set -u
 
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-[ -r "$SS_CONF" ] && . "$SS_CONF"
-: "${MEDIA_DIR:=$HOME/Screensaver-App/Data/Media}"
-: "${VID_RESCAN_SECS:=300}"
+. "$SS_CONF" 2>/dev/null || { echo "xmp-police: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
@@ -1686,11 +1694,7 @@ cat > "$APP_DIR/vid-daemon.sh" << 'EOF'
 set -u
 
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-[ -r "$SS_CONF" ] && . "$SS_CONF"
-: "${APP_DIR:=$HOME/Screensaver-App}"
-: "${MEDIA_DIR:=$APP_DIR/Data/Media}"
-: "${OPT_DIR:=$APP_DIR/Data/Optimized_Vids}"
-: "${VID_RESCAN_SECS:=300}"
+. "$SS_CONF" 2>/dev/null || { echo "vid-daemon: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 LOG_FILE="$APP_DIR/vid-daemon.log"
 STATUS_FILE="$APP_DIR/vid-status"
@@ -1899,30 +1903,12 @@ cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
 #!/bin/bash
 pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
 
-# --- Load central config (single source of truth) ----------------------------
+# --- Load central config (single source of truth; required) ------------------
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-[ -r "$SS_CONF" ] && . "$SS_CONF"
-
-# Fallback defaults so we never run unset, even if the config is missing.
-: "${APP_DIR:=$HOME/Screensaver-App}"
-: "${DATA_DIR:=$APP_DIR/Data}"
-: "${CFG_DIR:=$APP_DIR/config}"
-: "${MEDIA_DIR:=$DATA_DIR/Media}"
-: "${MUSIC_DIR:=$DATA_DIR/Music}"
-: "${MAP_DIR:=$DATA_DIR/Maps}"
-: "${OPT_DIR:=$DATA_DIR/Optimized_Vids}"
-: "${TITLE_DIR:=$DATA_DIR/TitleCards}"
-: "${PLAYLIST_DIR:=$DATA_DIR/Playlist}"
-: "${PLAYLIST:=$PLAYLIST_DIR/playlist.m3u}"
-: "${POLICE:=$APP_DIR/xmp-police.sh}"
-: "${FONT_DIR:=$HOME/.local/share/fonts}"
-: "${AUDIO_SOCK:=/tmp/ss_audio.sock}"
-: "${PHOTO_DURATION:=7}"
-: "${VOLUME:=70}"
-: "${MIN_LOAD_SECS:=2}"
+. "$SS_CONF" 2>/dev/null || { echo "Screensaver: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 # --- Self-healing: recreate any folder that was deleted ----------------------
-mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$OPT_DIR"
+mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$OPT_DIR" "$FONT_DIR"
 
 command -v exiftool >/dev/null 2>&1 || \
     echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
@@ -2070,7 +2056,10 @@ if [ -n "$LOADING_PID" ]; then
 fi
 
 # Photo display time + volume come from the config, not mpv.conf.
+# --sub-fonts-dir makes the HUD find Montserrat in Media/Fonts (a non-default
+# font path) and keeps the app self-contained when copied between machines.
 mpv --config-dir="$CFG_DIR" \
+    --sub-fonts-dir="$FONT_DIR" \
     --image-display-duration="$PHOTO_DURATION" \
     --volume="$VOLUME" \
     --playlist="$PLAYLIST"
@@ -2085,9 +2074,7 @@ cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
 #!/bin/bash
 
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-[ -r "$SS_CONF" ] && . "$SS_CONF"
-: "${APP_DIR:=$HOME/Screensaver-App}"
-: "${IDLE_TIMEOUT_MS:=300000}"
+. "$SS_CONF" 2>/dev/null || { echo "idle-watcher: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 IDLE_LIMIT="$IDLE_TIMEOUT_MS"
 while true; do
