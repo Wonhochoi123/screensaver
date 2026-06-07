@@ -923,8 +923,10 @@ mp.register_event("file-loaded", function()
 
         local function draw_text()
             local d = compact_date(date)
+            if d then d = d:gsub(",", " "):upper() end
             local text = ""
-            if d and location ~= "" then text = d .. "  |  " .. location
+            if location ~= "" then location = location:gsub(",", " "):upper()
+            if d and location ~= "" then text = d .. "     " .. location
             elseif d then text = d
             elseif location ~= "" then text = location end
 
