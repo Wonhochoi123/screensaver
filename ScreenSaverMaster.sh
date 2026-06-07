@@ -1594,154 +1594,155 @@ cat > "$CFG/nearby-landmark.sh" << 'EOF'
 #!/bin/bash
 # nearby-landmark.sh LAT LON
 #  exit 0 + name on stdout  -> found a landmark
-#  exit 0 + no stdout       -> queried OK, nothing notable (caller may cache)
-#  exit 3                   -> lookup failed (network/parse); caller retries
-#
-# Engine: OpenStreetMap (Overpass API)
-# Priority: Natural landscapes (peaks, waterfalls, craters) > major tourism
-# (zoos, aquariums) > prominent man-made structures (towers, lighthouses).
+#  exit 0 + no stdout       -> queried OK, nothing notable
+#  exit 3                   -> lookup failed (network); caller retries
 set -u
 LAT="${1:-}"; LON="${2:-}"
 [ -z "$LAT" ] || [ -z "$LON" ] && exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
 
-python3 - "$LAT" "$LON" <<'PY'
-import sys, json, math, urllib.request
+LOG="/tmp/ss_landmark.log"
+TMP_JSON="$(mktemp)"
+trap 'rm -f "$TMP_JSON"' EXIT
+
+echo "--- $(date) | LAT:$LAT LON:$LON ---" >> "$LOG"
+
+# 1. OPTIMIZED OVERPASS QUERY
+# Removing regex and using exact matches drops server execution time
+# to a fraction of a second, preventing the server from dropping our request.
+QUERY="[out:json][timeout:5];
+(
+  node[\"natural\"=\"peak\"](around:15000,$LAT,$LON);
+  node[\"natural\"=\"volcano\"](around:15000,$LAT,$LON);
+  node[\"waterway\"=\"waterfall\"](around:15000,$LAT,$LON);
+  nwr[\"boundary\"=\"national_park\"](around:25000,$LAT,$LON);
+  nwr[\"leisure\"=\"nature_reserve\"](around:15000,$LAT,$LON);
+  nwr[\"tourism\"=\"zoo\"](around:10000,$LAT,$LON);
+  nwr[\"tourism\"=\"aquarium\"](around:10000,$LAT,$LON);
+  nwr[\"historic\"=\"castle\"](around:8000,$LAT,$LON);
+);
+out center tags;"
+
+MIRRORS=(
+    "https://overpass-api.de/api/interpreter"
+    "https://overpass.kumi.systems/api/interpreter"
+)
+
+SUCCESS=0
+for url in "${MIRRORS[@]}"; do
+    echo "Trying OSM: $url" >> "$LOG"
+    # curl is highly robust for API fetching; -sSf fails quietly on HTTP errors
+    if curl -sSf --max-time 8 -d "$QUERY" "$url" -o "$TMP_JSON" 2>>"$LOG"; then
+        SUCCESS=1
+        echo "OSM Success." >> "$LOG"
+        break
+    fi
+done
+
+# 2. PARSE OSM RESULTS
+if [ "$SUCCESS" = 1 ]; then
+    LANDMARK=$(python3 - "$LAT" "$LON" "$TMP_JSON" <<'PY'
+import sys, json, math
 
 def hav(la1, lo1, la2, lo2):
-    R = 6371.0
     p1, p2 = math.radians(la1), math.radians(la2)
-    dphi = math.radians(la2 - la1); dl = math.radians(lo2 - lo1)
-    x = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return 2 * R * math.asin(math.sqrt(x))
+    x = math.sin(math.radians(la2 - la1)/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(math.radians(lo2 - lo1)/2)**2
+    return 2 * 6371.0 * math.asin(math.sqrt(x))
 
-def main():
-    try:
-        lat, lon = float(sys.argv[1]), float(sys.argv[2])
-    except Exception:
-        sys.exit(0)
+try:
+    lat, lon = float(sys.argv[1]), float(sys.argv[2])
+    with open(sys.argv[3], 'r') as f: data = json.load(f)
+except Exception:
+    sys.exit(0)
 
-    # Overpass QL: Fetch nodes, ways, and relations for specific features
-    # 'out center' ensures polygons (like parks or zoos) return a center lat/lon.
-    query = f"""
-    [out:json][timeout:6];
-    (
-      nwr["natural"~"peak|volcano|crater"](around:20000,{lat},{lon});
-      nwr["waterway"="waterfall"](around:15000,{lat},{lon});
-      nwr["boundary"~"national_park|protected_area"](around:25000,{lat},{lon});
-      nwr["leisure"~"nature_reserve|park"](around:10000,{lat},{lon});
-      nwr["tourism"~"zoo|aquarium|viewpoint"](around:10000,{lat},{lon});
-      nwr["historic"~"castle|ruins|monument"](around:8000,{lat},{lon});
-      nwr["man_made"~"tower|lighthouse|observatory"](around:8000,{lat},{lon});
-      nwr["natural"~"bay|beach|glacier"](around:15000,{lat},{lon});
-    );
-    out center;
-    """
+best = None
+for el in data.get("elements", []):
+    tags = el.get("tags", {})
+    name = tags.get("name") or tags.get("name:en")
+    if not name: continue
 
-    url = "https://overpass-api.de/api/interpreter"
-    req = urllib.request.Request(
-        url, 
-        data=query.encode('utf-8'), 
-        headers={"User-Agent": "Screensaver-App/2.0 (Local GeoSearch)"}
-    )
+    clat = el.get("lat") or (el.get("center") or {}).get("lat")
+    clon = el.get("lon") or (el.get("center") or {}).get("lon")
+    if clat is None or clon is None: continue
 
-    try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.load(r)
-    except Exception:
-        # Exit 3 signals to photo.lua that it was a network failure,
-        # so it won't cache a "nothing here" result and will retry later.
-        sys.exit(3)
+    dist = hav(lat, lon, clat, clon)
+    weight = 5
 
-    elements = data.get("elements", [])
-    if not elements:
-        sys.exit(0)
+    if tags.get("boundary") == "national_park": weight = 10
+    elif tags.get("natural") in ("volcano", "crater"): weight = 9
+    elif tags.get("natural") == "peak": weight = 8
+    elif tags.get("waterway") == "waterfall": weight = 8
+    elif tags.get("tourism") in ("zoo", "aquarium"): weight = 8
 
-    # Base weights and maximum search distances (in km). 
-    # Higher base weight = prioritized over closer, lower-weight items.
-    TAG_WEIGHTS = {
-        "national_park": (10, 25),
-        "volcano": (9, 20),
-        "crater": (9, 15),
-        "peak": (8, 20),
-        "waterfall": (8, 15),
-        "zoo": (8, 10),
-        "aquarium": (8, 10),
-        "glacier": (8, 15),
-        "nature_reserve": (7, 10),
-        "castle": (7, 8),
-        "ruins": (6, 8),
-        "bay": (6, 15),
-        "lighthouse": (6, 8),
-        "tower": (5, 8),
-        "viewpoint": (5, 5),
-        "beach": (5, 10),
-        "park": (4, 10),
-        "monument": (4, 5),
-    }
+    if "wikipedia" in tags: weight += 4
+    if tags.get("natural") == "peak" and "ele" in tags:
+        try:
+            if float(tags["ele"]) > 2000: weight += 2
+        except: pass
 
-    best = None
+    score = weight - (dist / 5.0)
+    if best is None or score > best[0]: best = (score, name)
 
-    for el in elements:
-        tags = el.get("tags", {})
-        name = tags.get("name") or tags.get("name:en")
-        if not name:
-            continue
-
-        # Extract coordinates (node uses lat/lon, way/rel uses center)
-        clat = el.get("lat") or (el.get("center") or {}).get("lat")
-        clon = el.get("lon") or (el.get("center") or {}).get("lon")
-        if clat is None or clon is None:
-            continue
-
-        dist = hav(lat, lon, clat, clon)
-
-        # Categorize the feature
-        cat = None
-        for k, v in tags.items():
-            if v in TAG_WEIGHTS:
-                cat = v
-                break
-        if not cat and tags.get("boundary") in ("national_park", "protected_area"):
-            cat = "national_park"
-        if not cat:
-            cat = "viewpoint" # fallback
-
-        base_weight, max_dist = TAG_WEIGHTS.get(cat, (3, 5))
-
-        if dist > max_dist:
-            continue
-
-        weight = base_weight
-
-        # -- Prominence Boosters --
-        # 1. If it also has a Wikipedia page, it's a massive, notable landmark.
-        if "wikipedia" in tags:
-            weight += 4
-            
-        # 2. Boost mountains based on altitude to prioritize massive peaks
-        if cat in ("peak", "volcano") and "ele" in tags:
-            try:
-                ele = float(tags["ele"])
-                if ele > 2000: weight += 2
-                elif ele > 1000: weight += 1
-            except ValueError:
-                pass
-
-        # Score = Weight minus a distance penalty.
-        # This allows a 15km massive volcano to outscore a 1km minor park.
-        dist_penalty = (dist / max_dist) * 3.0
-        score = weight - dist_penalty
-
-        if best is None or score > best[0]:
-            best = (score, name)
-
-    if best:
-        print(best[1])
-
-if __name__ == "__main__":
-    main()
+if best: print(best[1])
 PY
+)
+    if [ -n "$LANDMARK" ]; then
+        echo "Found OSM: $LANDMARK" >> "$LOG"
+        echo "$LANDMARK"
+        exit 0
+    fi
+fi
+
+# 3. WIKIPEDIA FALLBACK
+echo "OSM found nothing, trying Wikipedia fallback..." >> "$LOG"
+WIKI_LANDMARK=$(python3 - "$LAT" "$LON" <<'PY'
+import sys, json, math, urllib.request, urllib.parse, re
+
+def hav(la1, lo1, la2, lo2):
+    p1, p2 = math.radians(la1), math.radians(la2)
+    x = math.sin(math.radians(la2 - la1)/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(math.radians(lo2 - lo1)/2)**2
+    return 2 * 6371.0 * math.asin(math.sqrt(x))
+
+try:
+    lat, lon = float(sys.argv[1]), float(sys.argv[2])
+    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+        "action":"query", "format":"json", "generator":"geosearch",
+        "ggscoord": f"{lat}|{lon}", "ggsradius": "10000", "ggslimit": "500",
+        "prop": "coordinates|pageprops", "ppprop": "wikibase-shortdesc"
+    })
+    req = urllib.request.Request(url, headers={"User-Agent":"Screensaver-App/3.0"})
+    with urllib.request.urlopen(req, timeout=6) as r: data = json.load(r)
+except Exception:
+    sys.exit(0)
+
+pages = (data.get("query") or {}).get("pages") or {}
+EXCLUDE = ["city","town","village","municipality","county","district","school","hospital","road","highway","airport"]
+
+best = None
+for p in pages.values():
+    title = p.get("title", "")
+    desc = ((p.get("pageprops") or {}).get("wikibase-shortdesc") or "").lower()
+    co = (p.get("coordinates") or [{}])[0]
+    clat, clon = co.get("lat"), co.get("lon")
+    
+    if clat is None or clon is None or not desc: continue
+    if any(re.search(r"\b" + x + r"s?\b", desc) for x in EXCLUDE): continue
+    
+    dist = hav(lat, lon, clat, clon)
+    score = 10 - dist
+    if best is None or score > best[0]: best = (score, title)
+
+if best: print(re.sub(r"\s*\([^()]*\)\s*$", "", best[1]).strip())
+PY
+)
+
+if [ -n "$WIKI_LANDMARK" ]; then
+    echo "Found WIKI: $WIKI_LANDMARK" >> "$LOG"
+    echo "$WIKI_LANDMARK"
+    exit 0
+fi
+
+echo "Nothing found in OSM or WIKI." >> "$LOG"
+exit 0
 EOF
 chmod +x "$CFG/nearby-landmark.sh"
 
