@@ -55,7 +55,7 @@ export GEODB='$MAP_DIR/geo/geonames.sqlite'
 # Bump GEODB_VERSION whenever the DB's contents change (country set or the
 # landmark feature-code table). On the next launch a version mismatch forces a
 # one-time rebuild so the change actually takes effect.
-export GEODB_VERSION='2'
+export GEODB_VERSION='3'
 
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
 # config goes. Everything deeper is resolved by sourcing the file we write.
@@ -300,9 +300,8 @@ local landmark_ov  = mp.create_osd_overlay("ass-events")
 
 -- Now-playing marquee state (forward-declared so the click handler, defined
 -- earlier in the file, can reference them as upvalues).
-local MUSIC_WIN    = 10        -- glyphs visible at once before it scrolls
 local music_shown  = nil       -- full track string currently displayed
-local music_glyphs = nil       -- its UTF-8 glyphs (with trailing gap if scrolling)
+local music_hit    = nil       -- clickable box {x0,y0,x1,y1}; nil when no track
 local poll_music               -- assigned later
 
 local seq       = 0
@@ -872,13 +871,9 @@ mp.register_script_message("handle-left-click", function()
 
     -- Click the now-playing marquee (top-left) to skip to the next track.
     -- Checked first so it works regardless of whether the photo has GPS.
-    if mouse and music_glyphs then
-        local w, h = refresh_display_size()
-        local px = math.floor(w * 0.025)
-        local py = math.floor(h * 0.04)
-        local fs = math.floor(h * 0.030)
-        if mouse.x >= px - fs and mouse.x <= px + math.floor(fs * 9.0)
-           and mouse.y >= py - fs and mouse.y <= py + math.floor(fs * 1.6) then
+    if mouse and music_hit then
+        if mouse.x >= music_hit.x0 and mouse.x <= music_hit.x1
+           and mouse.y >= music_hit.y0 and mouse.y <= music_hit.y1 then
             mp.commandv("run", "/bin/sh", "-c",
                 "printf '%s\\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
             if poll_music then mp.add_timeout(0.35, poll_music) end
@@ -1109,59 +1104,67 @@ mp.register_event("file-loaded", function()
 end)
 
 -- Now-playing marquee (top-left). Same title-card style as the rest of the HUD:
--- Montserrat ExtraBold, no outline, no shadow, white. Stays on. Only MUSIC_WIN
--- glyphs show at once; longer titles scroll. Click it to skip to the next track.
-local music_marq_gen = 0   -- bumped on each new track; cancels the old scroller
-local music_off      = 0   -- current scroll offset (glyph index)
-
-local function music_paint()
-    if not music_glyphs then music_ov:remove(); return end
-    local n = #music_glyphs
-    local shown
-    if n <= MUSIC_WIN then
-        shown = table.concat(music_glyphs)
-    else
-        local parts = {}
-        for k = 0, MUSIC_WIN - 1 do
-            parts[#parts + 1] = music_glyphs[((music_off + k) % n) + 1]
-        end
-        shown = table.concat(parts)
-    end
-    local w, h = refresh_display_size()
-    -- Mirror the top-right date/location: same font size, spacing, corner inset.
-    local px  = math.floor(w * 0.025)
-    local py  = math.floor(h * 0.04)
-    local fs  = math.floor(h * 0.030)
-    local fsp = math.floor(h * 0.003 + 0.5)
-    music_ov.res_x = w
-    music_ov.res_y = h
-    music_ov.data = string.format(
-        "{\\an7\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}\xe2\x99\xaa  %s",
-        px, py, fs, fsp, shown)
-    music_ov:update()
-end
+-- Montserrat ExtraBold, no outline, no shadow, white. Stays on. A fixed-width
+-- window shows ~MUSIC_VIS glyphs; longer titles scroll smoothly (pixel-by-pixel,
+-- two stitched copies for a seamless loop), masked by a \clip rectangle. Click
+-- it to skip to the next track.
+local MUSIC_VIS      = 16   -- approx glyphs visible in the window
+local music_scroll_gen = 0  -- bumped on each new track; cancels the old scroller
 
 local function set_music(text)
     if not text or text == "" then return end
-    text = text:sub(1, 80)
+    text = text:sub(1, 120)
     if text == music_shown then return end
     music_shown = text
-    local g = utf8_split(text)
-    -- Add a trailing gap only when scrolling, so the loop reads as a clean wrap.
-    music_glyphs = (#g > MUSIC_WIN) and utf8_split(text .. "      ") or g
-    music_off = 0
-    music_marq_gen = music_marq_gen + 1
-    local gen = music_marq_gen
-    music_paint()
-    local function tick()
-        if gen ~= music_marq_gen then return end
-        if music_glyphs and #music_glyphs > MUSIC_WIN then
-            music_off = (music_off + 1) % #music_glyphs
-            music_paint()
-        end
-        mp.add_timeout(0.30, tick)
+    music_scroll_gen = music_scroll_gen + 1
+    local gen = music_scroll_gen
+
+    local w, h = refresh_display_size()
+    local fs   = math.floor(h * 0.030)
+    local fsp  = math.floor(h * 0.003 + 0.5)
+    local px   = math.floor(w * 0.025)
+    local py   = math.floor(h * 0.04)
+    local gw   = fs * 0.60 + fsp                 -- estimated per-glyph advance (px)
+    local win_px = math.floor(gw * MUSIC_VIS)
+    local y_top  = py - math.floor(fs * 0.25)
+    local y_bot  = py + math.floor(fs * 1.30)
+
+    music_ov.res_x = w
+    music_ov.res_y = h
+
+    local label  = "\xe2\x99\xaa  " .. text       -- ♪ + title
+    local glyphs = utf8_split(label)
+    local style  = string.format(
+        "\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&", fs, fsp)
+
+    if #glyphs <= MUSIC_VIS then
+        -- Fits: static, no scroll, no clip. Hit box hugs the actual text width.
+        music_ov.data = string.format("{\\an7\\pos(%d,%d)%s}%s", px, py, style, label)
+        music_ov:update()
+        music_hit = { x0 = px - fs, y0 = y_top, x1 = px + math.floor(gw * #glyphs) + fs, y1 = y_bot }
+        return
     end
-    mp.add_timeout(0.30, tick)
+
+    -- Scrolls: two stitched copies separated by a gap; advance left smoothly and
+    -- wrap by exactly one copy-width so the loop seam falls inside the gap.
+    local one    = label .. "        "            -- copy + trailing gap
+    local copy_w = gw * #utf8_split(one)
+    local doubled = one .. one
+    local clip   = string.format("\\clip(%d,%d,%d,%d)", px, y_top, px + win_px, y_bot)
+    local SPEED  = math.max(1, fs * 0.045)        -- px per frame (~50 px/s)
+    music_hit = { x0 = px - fs, y0 = y_top, x1 = px + win_px + fs, y1 = y_bot }
+
+    local sx = 0
+    local function frame()
+        if gen ~= music_scroll_gen then return end
+        sx = sx + SPEED
+        if sx >= copy_w then sx = sx - copy_w end
+        music_ov.data = string.format("{\\an7\\pos(%d,%d)%s%s}%s",
+            math.floor(px - sx), py, clip, style, doubled)
+        music_ov:update()
+        mp.add_timeout(0.03, frame)
+    end
+    frame()
 end
 
 -- Poll the audio player; only rebuild the marquee when the track changes.
@@ -1765,35 +1768,34 @@ import sys, sqlite3, os
 # GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
 # max_km = how far away the feature can still be the photo's "landmark".
 LANDMARK = {
-    # --- iconic cultural / historic: you're essentially standing there, so a
-    #     high weight + small radius lets them win over a distant mountain. ---
-    "PAL":(11,8),                                  # palace (e.g. Gyeongbokgung)
-    "CSTL":(11,8),                                 # castle
-    "PYR":(11,12),"PYRS":(11,12),                  # pyramid(s)
-    "ANS":(10,8),"HSTS":(10,8),"RUIN":(10,8),      # ancient/historic site, ruins
-    "MNMT":(10,6),"MNMTS":(10,6),                  # monument(s)
-    "TMPL":(10,6),"SHRN":(9,6),"PGDA":(9,6),       # temple, shrine, pagoda
-    "MSTY":(9,8),"MSQE":(8,6),"CTHL":(8,6),        # monastery, mosque, cathedral
-    "FT":(9,8),"TOWR":(8,8),"GATE":(8,5),          # fort, tower, gate
-    "WALLA":(8,8),"WALL":(7,8),                    # ancient wall / wall
-    "AMTH":(9,8),"ARCH":(7,12),                    # amphitheatre, arch
-    # --- attractions / civic ---
-    "MUS":(7,5),"OPRA":(8,5),"THTR":(6,5),         # museum, opera, theatre
-    "OBS":(7,8),"STDM":(6,5),"ZOO":(6,5),          # observatory, stadium, zoo
-    "GDN":(6,5),"AMUS":(8,8),"SQR":(6,4),          # garden, amusement park, square
-    "LTHSE":(7,12),"BDG":(5,8),                    # lighthouse, bridge
-    "CH":(5,4),"SYG":(5,4),                        # church, synagogue (common)
-    "BTL":(8,10),                                  # battlefield
-    # --- parks / protected areas (visible / spanning a wide area) ---
-    "PRK":(7,30),"RESN":(6,30),"RESW":(6,30),
-    # --- prominent natural features ---
-    "VLC":(10,40),"MT":(9,35),"PK":(9,35),"PKS":(9,35),
-    "FLLS":(9,15),"GLCR":(8,25),"GYSR":(7,15),
-    "CNYN":(8,25),"CRTR":(8,25),"VAL":(6,20),"DUNE":(6,20),"DSRT":(7,40),
-    "LK":(6,20),"LKS":(6,20),"BAY":(6,20),
-    "CLF":(6,15),"CAPE":(5,15),"ISL":(6,30),"ISLS":(6,30),
-    "BCH":(6,15),"RDGE":(5,20),"SPNG":(5,10),
+    # --- iconic cultural / historic: small radius so PROXIMITY decides. You have
+    #     to be essentially on-site for these to win. ---
+    "PAL":(11,3),"CSTL":(11,3),                    # palace (Gyeongbokgung), castle
+    "PYR":(11,5),"PYRS":(11,5),                    # pyramid(s)
+    "ANS":(10,3),"HSTS":(10,3),"RUIN":(10,3),      # ancient/historic site, ruins
+    "MNMT":(10,2.5),"MNMTS":(10,2.5),              # monument(s)
+    "TMPL":(9,2),"SHRN":(8,2),"PGDA":(9,2),        # temple, shrine, pagoda
+    "MSTY":(9,3),"CTHL":(9,3),"MSQE":(7,2),        # monastery, cathedral, mosque
+    "FT":(9,3),"GATE":(8,1.5),"WALLA":(8,3),       # fort, gate, ancient wall
+    "AMTH":(9,3),"TOWR":(8,3),                     # amphitheatre, tower (callsigns filtered)
+    # --- attractions / civic (tight: you're there) ---
+    "MUS":(7,2),"OPRA":(8,2),"OBS":(7,3),          # museum, opera, observatory
+    "STDM":(7,2.5),"ZOO":(7,2.5),"GDN":(6,2),      # stadium, zoo, garden
+    "AMUS":(8,3),"LTHSE":(7,4),"BTL":(8,4),        # amusement park, lighthouse, battlefield
+    # --- parks / protected areas (span a wide area) ---
+    "PRK":(7,12),"RESN":(5,12),"RESW":(5,12),
+    # --- prominent natural features (can be "at" them from farther off) ---
+    "VLC":(11,30),"MT":(8,15),"PK":(9,18),"PKS":(9,18),
+    "FLLS":(9,8),"GLCR":(8,15),"GYSR":(8,8),
+    "CNYN":(9,18),"CRTR":(8,15),"VAL":(6,12),"DUNE":(6,10),"DSRT":(7,30),
+    "LK":(8,12),"LKS":(8,12),"BAY":(6,12),
+    "CLF":(6,8),"CAPE":(6,10),"ISL":(7,20),"ISLS":(7,20),
+    "BCH":(7,6),"SPNG":(5,5),
 }
+import re as _re
+_CALLSIGN = _re.compile(r'^[KWC][A-Z]{2,3}(-(FM|AM|TV|LP|LD|CD|CA|DT))?$')
+def _is_broadcast(nm):
+    return bool(_CALLSIGN.match(nm)) or '-FM' in nm or '-AM' in nm or '-TV' in nm
 db, cinfo, admin1, dumps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 
 country = {}
@@ -1845,6 +1847,8 @@ for dump in dumps:
                         (name, lat, lon, pop, a1.get(cc + "." + adm1, ""), country.get(cc, "")))
             np += 1
         elif fcode in LANDMARK:
+            if _is_broadcast(name):       # skip radio/TV stations (e.g. WLVV-FM)
+                continue
             w, mk = LANDMARK[fcode]
             cur.execute("INSERT INTO feature VALUES(?,?,?,?,?,?,?)",
                         (name, lat, lon, fcode, elev, w, mk))
@@ -1892,8 +1896,12 @@ def win(r):
     dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: weight + elevation bonus - distance, within per-code radius ---
-la0, la1, lo0, lo1 = win(40)
+# --- landmark: proximity-dominant within each feature's own radius. Distance
+#     matters far more than prominence now (a feature at the edge of its radius
+#     loses ~7 pts), and a minimum score is required — so when nothing relevant
+#     is genuinely close we show NO landmark rather than a far-fetched guess. ---
+la0, la1, lo0, lo1 = win(35)
+MIN_SCORE = 4.0
 best = None
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
         "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
@@ -1901,12 +1909,12 @@ for name, flat, flon, fcode, elev, w, mk in cur.execute(
     d = hav(lat, lon, flat, flon)
     if d > mk:
         continue
-    s = w - d / 5.0
-    if fcode in ("PK", "MT", "VLC") and elev:
-        s += min(elev / 1500.0, 3.0)
+    s = w - 7.0 * (d / mk)
+    if fcode in ("PK", "MT", "VLC", "CNYN", "CRTR") and elev:
+        s += min(elev / 2000.0, 2.0)
     if best is None or s > best[0]:
         best = (s, name)
-landmark = best[1] if best else ""
+landmark = best[1] if (best and best[0] >= MIN_SCORE) else ""
 
 # --- city: nearest sizable populated place (population-aware) ----------------
 la0, la1, lo0, lo1 = win(30)
