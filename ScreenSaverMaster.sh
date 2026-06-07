@@ -303,6 +303,21 @@ local landmark_ov  = mp.create_osd_overlay("ass-events")
 local music_shown  = nil       -- full track string currently displayed
 local music_hit    = nil       -- clickable box {x0,y0,x1,y1}; nil when no track
 local poll_music               -- assigned later
+local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
+
+-- Strip distracting separators (comma, slash, hyphen, pipe, dot-sep, dashes…)
+-- from display labels, collapsing to single spaces. Used everywhere EXCEPT the
+-- coordinate read-outs (which keep their °, ', " punctuation).
+local function clean_text(s)
+    if not s then return s end
+    s = s:gsub("[,/\\|;:_]", " ")
+    s = s:gsub("%-", " ")
+    s = s:gsub("\xc2\xb7", " ")          -- · middle dot
+    s = s:gsub("\xe2\x80\x93", " ")      -- – en dash
+    s = s:gsub("\xe2\x80\x94", " ")      -- — em dash
+    s = s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    return s
+end
 
 local seq       = 0
 local prewarmed = {}
@@ -749,19 +764,20 @@ local function iso_to_display(iso)
 end
 
 local function resolve_meta(orig_path, cb)
-    -- "general" = city / state / country (top-right, with the date).
-    -- "landmark" = the notable place name (bottom-center, the headline).
-    local date, general, landmark, lat, lon = nil, "", nil, nil, nil
+    -- Simple by design: the bottom-center headline is just the CITY name, and
+    -- the top-right line is the date + the broader region (state / country).
+    -- No detailed-landmark lookup any more.
+    local date, city, general, lat, lon = nil, "", "", nil, nil
 
     -- 1) Base values straight from the sidecar (a tiny file read, no subprocess).
     local x = read_xmp(orig_path .. ".xmp")
     if x then
         date     = iso_to_display(x.date_iso)
         lat, lon = x.lat, x.lon
-        local lm, city, region, country =
-            niagara_fix(x.landmark, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
-        landmark = (lm and lm ~= "") and lm or nil
-        general  = join_loc(nil, city, region, country)
+        local _, c, region, country =
+            niagara_fix(nil, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
+        city    = c or ""
+        general = join_loc(nil, nil, region, country)   -- state + country only
     end
 
     -- 2) Date fallback: file mtime, if the sidecar carried no date.
@@ -771,18 +787,18 @@ local function resolve_meta(orig_path, cb)
     end
 
     -- 3) Manual ".txt" override wins (read live, so edits apply immediately).
-    --    A manual location string is treated as the general (top-right) label.
+    --    A manual location string becomes the headline (city) label.
     local sc = parse_sidecar(orig_path)
     if sc then
         if sc.date then date = sc.date end
-        if sc.location and sc.location ~= "" then general = sc.location; landmark = nil end
+        if sc.location and sc.location ~= "" then city = sc.location; general = "" end
         if sc.lat and sc.lon then lat, lon = sc.lat, sc.lon end
     end
 
     if lat and (lat < -90  or lat > 90 ) then lat = nil end
     if lon and (lon < -180 or lon > 180) then lon = nil end
 
-    cb({ date = date, general = general, landmark = landmark, lat = lat, lon = lon, mdir = MAP_DIR })
+    cb({ date = date, city = city, general = general, lat = lat, lon = lon, mdir = MAP_DIR })
 end
 
 local pq        = {}
@@ -1014,27 +1030,26 @@ mp.register_event("file-loaded", function()
 
         cur = { seq = my_seq, path = path, orig = orig_path, lat = m.lat, lon = m.lon, mdir = m.mdir, zidx = 1, w = w, h = h, auto = true }
 
-        local date     = m.date
-        local general  = m.general or ""
-        local landmark = m.landmark
-        local mdir     = m.mdir
+        local date    = m.date
+        local general = m.general or ""
+        local mdir    = m.mdir
 
-        -- Everything (date, admin, landmark) already comes from the XMP sidecar,
-        -- resolved offline by the police. No runtime network lookups here.
         -- Style matches the title cards: Montserrat ExtraBold, no outline, no
-        -- shadow, pure white, with letter-spacing.
+        -- shadow, white, alpha &H40&. Distracting separators are stripped from
+        -- every label (the coordinate read-outs keep their punctuation).
         local function draw_text()
             local L = hud_geom()
             local m_top    = math.floor(L.win_h * 0.04)   -- top inset
             local m_right  = math.floor(L.win_w * 0.025)   -- right inset
             local m_bottom = math.floor(L.win_h * 0.07)    -- bottom inset
 
-            -- Top-right: date over general location (right-aligned stack).
-            local d = compact_date(date)
+            -- Top-right: date over the broader region (state / country).
+            local d = clean_text(compact_date(date))
+            local g = clean_text(general)
             local stack = ""
-            if d and general ~= "" then stack = d .. "\\N" .. general
-            elseif d then stack = d
-            elseif general ~= "" then stack = general end
+            if d and d ~= "" and g and g ~= "" then stack = d .. "\\N" .. g
+            elseif d and d ~= "" then stack = d
+            elseif g and g ~= "" then stack = g end
 
             ov.res_x = L.win_w
             ov.res_y = L.win_h
@@ -1049,16 +1064,29 @@ mp.register_event("file-loaded", function()
                 ov:update()
             end
 
-            -- Bottom-center: the landmark / headline, bigger with wide spacing,
-            -- revealed glyph-by-glyph like the title cards.
-            if landmark and landmark ~= "" then
-                local fs  = math.floor(L.win_h * 0.052)
-                local fsp = math.floor(L.win_h * 0.012 + 0.5)
-                animate_landmark(landmark:upper(), math.floor(L.win_w / 2),
-                    L.win_h - m_bottom, fs, fsp, L.win_w, L.win_h)
-            else
+            -- Bottom-center headline: just the CITY name. Doubled letter spacing.
+            -- The glyph-by-glyph reveal only plays when the city actually CHANGES
+            -- — repeated same-city photos just show it (no rebuild animation).
+            local city = clean_text(m.city or ""):upper()
+            local fs   = math.floor(L.win_h * 0.052)
+            local fsp  = math.floor(L.win_h * 0.024 + 0.5)   -- doubled spacing
+            local cx   = math.floor(L.win_w / 2)
+            local by   = L.win_h - m_bottom
+            if city == "" then
+                main_shown = nil
                 lm_gen = lm_gen + 1
                 landmark_ov:remove()
+            elseif city ~= main_shown then
+                main_shown = city
+                animate_landmark(city, cx, by, fs, fsp, L.win_w, L.win_h)
+            else
+                lm_gen = lm_gen + 1   -- cancel any stray animation; show statically
+                landmark_ov.res_x = L.win_w
+                landmark_ov.res_y = L.win_h
+                landmark_ov.data = string.format(
+                    "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H40&}%s",
+                    cx, by, fs, fsp, city)
+                landmark_ov:update()
             end
         end
         draw_text()
@@ -1113,7 +1141,8 @@ local music_scroll_gen = 0  -- bumped on each new track; cancels the old scrolle
 
 local function set_music(text)
     if not text or text == "" then return end
-    text = text:sub(1, 120)
+    text = clean_text(text):sub(1, 120)        -- drop ·, commas, hyphens, etc.
+    if text == "" then return end
     if text == music_shown then return end
     music_shown = text
     music_scroll_gen = music_scroll_gen + 1
