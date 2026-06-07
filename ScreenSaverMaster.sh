@@ -55,7 +55,7 @@ export GEODB='$MAP_DIR/geo/geonames.sqlite'
 # Bump GEODB_VERSION whenever the DB's contents change (country set or the
 # landmark feature-code table). On the next launch a version mismatch forces a
 # one-time rebuild so the change actually takes effect.
-export GEODB_VERSION='3'
+export GEODB_VERSION='4'
 
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
 # config goes. Everything deeper is resolved by sourcing the file we write.
@@ -649,7 +649,7 @@ end
 
 local function coord_tags(x, y, fs)
     return string.format(
-        "{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&\\bord0\\shad0}",
+        "{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&\\bord0\\shad0\\alpha&H40&}",
         x, y, fs, math.floor(fs * 0.06 + 0.5))
 end
 
@@ -1044,7 +1044,7 @@ mp.register_event("file-loaded", function()
                 local fs  = math.floor(L.win_h * 0.030)
                 local fsp = math.floor(L.win_h * 0.003 + 0.5)
                 ov.data = string.format(
-                    "{\\an9\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
+                    "{\\an9\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H40&}%s",
                     L.win_w - m_right, m_top, fs, fsp, stack)
                 ov:update()
             end
@@ -1135,7 +1135,7 @@ local function set_music(text)
     local label  = "\xe2\x99\xaa  " .. text       -- ♪ + title
     local glyphs = utf8_split(label)
     local style  = string.format(
-        "\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&", fs, fsp)
+        "\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H40&", fs, fsp)
 
     if #glyphs <= MUSIC_VIS then
         -- Fits: static, no scroll, no clip. Hit box hugs the actual text width.
@@ -1768,27 +1768,29 @@ import sys, sqlite3, os
 # GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
 # max_km = how far away the feature can still be the photo's "landmark".
 LANDMARK = {
-    # --- iconic cultural / historic: small radius so PROXIMITY decides. You have
-    #     to be essentially on-site for these to win. ---
+    # Weights set a clear hierarchy so that when several features are about
+    # equally close, the specific iconic destination wins over a sprawling park
+    # or lake. maxkm is just the hard cutoff; the score uses ABSOLUTE distance.
+    # --- iconic cultural / historic (top priority) ---
     "PAL":(11,3),"CSTL":(11,3),                    # palace (Gyeongbokgung), castle
     "PYR":(11,5),"PYRS":(11,5),                    # pyramid(s)
     "ANS":(10,3),"HSTS":(10,3),"RUIN":(10,3),      # ancient/historic site, ruins
-    "MNMT":(10,2.5),"MNMTS":(10,2.5),              # monument(s)
-    "TMPL":(9,2),"SHRN":(8,2),"PGDA":(9,2),        # temple, shrine, pagoda
-    "MSTY":(9,3),"CTHL":(9,3),"MSQE":(7,2),        # monastery, cathedral, mosque
-    "FT":(9,3),"GATE":(8,1.5),"WALLA":(8,3),       # fort, gate, ancient wall
-    "AMTH":(9,3),"TOWR":(8,3),                     # amphitheatre, tower (callsigns filtered)
-    # --- attractions / civic (tight: you're there) ---
-    "MUS":(7,2),"OPRA":(8,2),"OBS":(7,3),          # museum, opera, observatory
-    "STDM":(7,2.5),"ZOO":(7,2.5),"GDN":(6,2),      # stadium, zoo, garden
-    "AMUS":(8,3),"LTHSE":(7,4),"BTL":(8,4),        # amusement park, lighthouse, battlefield
-    # --- parks / protected areas (span a wide area) ---
-    "PRK":(7,12),"RESN":(5,12),"RESW":(5,12),
-    # --- prominent natural features (can be "at" them from farther off) ---
-    "VLC":(11,30),"MT":(8,15),"PK":(9,18),"PKS":(9,18),
-    "FLLS":(9,8),"GLCR":(8,15),"GYSR":(8,8),
-    "CNYN":(9,18),"CRTR":(8,15),"VAL":(6,12),"DUNE":(6,10),"DSRT":(7,30),
-    "LK":(8,12),"LKS":(8,12),"BAY":(6,12),
+    "MNMT":(10,3),"MNMTS":(10,3),                  # monument(s)
+    "TMPL":(10,2),"SHRN":(10,2),"PGDA":(10,2),     # temple, shrine, pagoda
+    "MSTY":(10,3),"CTHL":(10,3),"MSQE":(10,2),     # monastery, cathedral, mosque
+    "FT":(10,3),"GATE":(10,2),"WALLA":(10,3),      # fort, gate, ancient wall
+    "AMTH":(10,3),"TOWR":(10,3),                   # amphitheatre, tower (e.g. Lotte World Tower)
+    # --- attractions / civic (beat parks & natural features) ---
+    "MUS":(9,2),"OPRA":(9,2),"OBS":(9,3),          # museum (e.g. National Museum), opera, observatory
+    "STDM":(9,3),"ZOO":(9,3),"GDN":(8,2),          # stadium, zoo, garden
+    "AMUS":(9,3),"LTHSE":(9,4),"BTL":(9,4),        # amusement park, lighthouse, battlefield
+    # --- parks / protected areas (lower: lose to any nearby built landmark) ---
+    "PRK":(5,12),"RESN":(5,12),"RESW":(5,12),
+    # --- natural features (lower weight; far centroids limit them anyway) ---
+    "VLC":(9,30),"MT":(7,15),"PK":(8,18),"PKS":(8,18),
+    "FLLS":(8,8),"GLCR":(8,15),"GYSR":(8,8),
+    "CNYN":(8,18),"CRTR":(8,15),"VAL":(6,12),"DUNE":(6,10),"DSRT":(7,30),
+    "LK":(6,12),"LKS":(6,12),"BAY":(6,12),
     "CLF":(6,8),"CAPE":(6,10),"ISL":(7,20),"ISLS":(7,20),
     "BCH":(7,6),"SPNG":(5,5),
 }
@@ -1896,12 +1898,14 @@ def win(r):
     dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: proximity-dominant within each feature's own radius. Distance
-#     matters far more than prominence now (a feature at the edge of its radius
-#     loses ~7 pts), and a minimum score is required — so when nothing relevant
-#     is genuinely close we show NO landmark rather than a far-fetched guess. ---
+# --- landmark: ABSOLUTE distance penalty (km), not normalized by radius — so a
+#     wide-radius park/lake gets no unfair advantage over a tight-radius museum
+#     or tower you're actually standing at. Weight breaks near-ties toward the
+#     iconic destination. maxkm is only the hard cutoff. A minimum score is
+#     required, so when nothing relevant is close we show NO landmark. ---
 la0, la1, lo0, lo1 = win(35)
 MIN_SCORE = 4.0
+DIST_K    = 2.0          # points lost per km of distance
 best = None
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
         "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
@@ -1909,7 +1913,7 @@ for name, flat, flon, fcode, elev, w, mk in cur.execute(
     d = hav(lat, lon, flat, flon)
     if d > mk:
         continue
-    s = w - 7.0 * (d / mk)
+    s = w - DIST_K * d
     if fcode in ("PK", "MT", "VLC", "CNYN", "CRTR") and elev:
         s += min(elev / 2000.0, 2.0)
     if best is None or s > best[0]:
