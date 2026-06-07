@@ -79,8 +79,6 @@ export VOLUME="$VOLUME"
 export IDLE_TIMEOUT_MS="$IDLE_TIMEOUT_MS"
 export MIN_LOAD_SECS="$MIN_LOAD_SECS"
 export VID_RESCAN_SECS="$VID_RESCAN_SECS"
-export GEOAPIFY_KEY="$GEOAPIFY_KEY"
-
 CONF
 
 # Run the installer on its own config — this resolves every level, top-down.
@@ -269,7 +267,6 @@ local OPT_DIR    = env("OPT_DIR",    DATA_DIR .. "/Optimized_Vids")
 local MAP_DIR    = env("MAP_DIR",    DATA_DIR .. "/Maps")
 
 local builder    = CFG_DIR .. "/build-minimap.sh"
-local landmark_tool = CFG_DIR .. "/nearby-landmark.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
 
 local ZOOMS        = {11, 14, 16}
@@ -912,48 +909,24 @@ mp.register_event("file-loaded", function()
         cur = { seq = my_seq, path = path, orig = orig_path, lat = m.lat, lon = m.lon, mdir = m.mdir, zidx = 1, w = w, h = h, auto = true }
 
         local date     = m.date
-        local admin    = m.location or ""    -- city / state / country (XMP or Nominatim)
-        local landmark = ""                  -- nearby prominent feature (Wikipedia)
+        local location = m.location or ""
         local mdir     = m.mdir
 
-        -- Per-location caches (~11 m). place_* = admin string; mark_* = landmark
-        -- ("-" means "looked it up, nothing notable" so we don't re-query).
-        local place_cache, mark_cache
-        local mark_done = false
-        if m.lat and m.lon then
-            place_cache = mdir .. string.format("/place_%.4f_%.4f.txt", m.lat, m.lon)
-            mark_cache  = mdir .. string.format("/mark_%.4f_%.4f.txt",  m.lat, m.lon)
-            if admin == "" and file_exists(place_cache) then
-                local lf = io.open(place_cache, "r")
-                if lf then admin = (lf:read("*a") or ""):gsub("[\r\n]+", ""); lf:close() end
+        local loc_cache
+        if m.lat and m.lon and location == "" then
+            loc_cache = mdir .. string.format("/place_%.4f_%.4f.txt", m.lat, m.lon)
+            if file_exists(loc_cache) then
+                local lf = io.open(loc_cache, "r")
+                if lf then location = (lf:read("*a") or ""):gsub("[\r\n]+", ""); lf:close() end
             end
-            if file_exists(mark_cache) then
-                local mf = io.open(mark_cache, "r")
-                if mf then
-                    local raw = (mf:read("*a") or ""):gsub("[\r\n]+", ""); mf:close()
-                    mark_done = true
-                    if raw ~= "-" then landmark = raw end
-                end
-            end
-        end
-
-        local function compose()
-            if landmark == "" then return admin end
-            if admin == "" then return landmark end
-            for part in admin:gmatch("[^,]+") do
-                local p = part:gsub("^%s+", ""):gsub("%s+$", "")
-                if p:lower() == landmark:lower() then return admin end
-            end
-            return landmark .. ", " .. admin
         end
 
         local function draw_text()
             local d = compact_date(date)
-            local loc = compose()
             local text = ""
-            if d and loc ~= "" then text = d .. "  |  " .. loc
+            if d and location ~= "" then text = d .. "  |  " .. location
             elseif d then text = d
-            elseif loc ~= "" then text = loc end
+            elseif location ~= "" then text = location end
 
             if text == "" then ov:remove(); return end
 
@@ -971,8 +944,7 @@ mp.register_event("file-loaded", function()
         end
         draw_text()
 
-        -- City / state / country via Nominatim — only when we still have none.
-        if m.lat and m.lon and admin == "" and place_cache then
+        if m.lat and m.lon and location == "" and loc_cache then
             mp.command_native_async({
                 name = "subprocess", capture_stdout = true,
                 args = {
@@ -988,7 +960,7 @@ mp.register_event("file-loaded", function()
                     local j = utils.parse_json(rres.stdout)
                     if j and j.address then
                         local a = j.address
-                        local landmark2 = nil
+                        local landmark = nil
                         local poi_keys = {
                             "historic","tourism","national_park","park","nature_reserve",
                             "castle","palace","monument","ruins","museum","attraction",
@@ -997,43 +969,20 @@ mp.register_event("file-loaded", function()
                             "natural","leisure","bridge","building","aeroway","amenity","man_made"
                         }
                         for _, k in ipairs(poi_keys) do
-                            if a[k] and type(a[k]) == "string" then landmark2 = a[k] break end
+                            if a[k] and type(a[k]) == "string" then landmark = a[k] break end
                         end
                         local city  = a.city or a.town or a.village or a.hamlet
                         local state = abbr_subdiv(a.state or a.province, a["ISO3166-2-lvl4"] or a["ISO3166-2-lvl3"])
                         local ctry  = abbr_country(a.country, a.country_code)
-                        landmark2, city, state, ctry = niagara_fix(landmark2, city, state, ctry)
-                        local loc = join_loc(landmark2, city, state, ctry)
+                        landmark, city, state, ctry = niagara_fix(landmark, city, state, ctry)
+                        local loc = join_loc(landmark, city, state, ctry)
                         if loc ~= "" then
-                            admin = loc
+                            location = loc
                             os.execute("mkdir -p '" .. mdir:gsub("'", "'\\''") .. "'")
-                            local cf = io.open(place_cache, "w")
-                            if cf then cf:write(admin); cf:close() end
+                            local cf = io.open(loc_cache, "w")
+                            if cf then cf:write(location); cf:close() end
                             draw_text()
                         end
-                    end
-                end
-            end)
-        end
-
-        -- Nearby prominent landmark via the Wikipedia helper — runs for any
-        -- geotagged photo we haven't resolved yet, and prepends to the label.
-        if m.lat and m.lon and not mark_done and mark_cache then
-            mp.command_native_async({
-                name = "subprocess", capture_stdout = true, capture_stderr = true,
-                args = { landmark_tool, string.format("%.6f", m.lat), string.format("%.6f", m.lon) },
-            }, function(lok, lres)
-                if my_seq ~= seq then return end
-                -- Only cache on success (status 0); a network failure should be
-                -- retried later, not remembered as "nothing here".
-                if lok and lres and lres.status == 0 then
-                    local lm = (lres.stdout or ""):gsub("[\r\n]+", ""):gsub("^%s+", ""):gsub("%s+$", "")
-                    os.execute("mkdir -p '" .. mdir:gsub("'", "'\\''") .. "'")
-                    local cf = io.open(mark_cache, "w")
-                    if cf then cf:write(lm ~= "" and lm or "-"); cf:close() end
-                    if lm ~= "" then
-                        landmark = lm
-                        draw_text()
                     end
                 end
             end)
@@ -1585,99 +1534,6 @@ else
 fi
 EOF
 chmod +x "$CFG/build-title.sh"
-
-
-
-# =============================================================================
-# 3c. geo-enrich.sh  (Geoapify reverse + nearby landmark, cached per location)
-# =============================================================================
-echo "▶ Writing geo-enrich.sh..."
-cat > "$CFG/geo-enrich.sh" << 'EOF'
-#!/bin/bash
-# geo-enrich.sh LAT LON  -> "landmark<TAB>city<TAB>state<TAB>country"
-# Resolves admin + the most prominent nearby landmark via Geoapify, cached per
-# ~100m coordinate so the API is hit ONCE per place, ever.
-#   exit 0 -> result on stdout (any field may be empty); cached
-#   exit 3 -> lookup failed; NOT cached (caller may retry later)
-set -u
-export LC_ALL=C
-SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-. "$SS_CONF" 2>/dev/null || true
-LAT="${1:-}"; LON="${2:-}"
-[ -z "$LAT" ] || [ -z "$LON" ] && exit 0
-[ -z "${GEOAPIFY_KEY:-}" ] && exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
-CACHE_DIR="${MAP_DIR:-/tmp}/geo"; mkdir -p "$CACHE_DIR" 2>/dev/null || true
-LAT4="$(printf '%.4f' "$LAT")"; LON4="$(printf '%.4f' "$LON")"
-CACHE="$CACHE_DIR/geo_${LAT4}_${LON4}.tsv"
-[ -s "$CACHE" ] && { cat "$CACHE"; exit 0; }
-OUT="$(python3 - "$LAT" "$LON" "${GEOAPIFY_KEY}" <<'PY'
-import sys, urllib.request, urllib.parse, json
-lat, lon, key = float(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
-def get(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Screensaver-App/1.0"})
-    with urllib.request.urlopen(req, timeout=8) as r: return json.load(r)
-RULES = [
-    ("natural.mountain.volcano",    10, 40), ("natural.mountain.peak",        9, 35),
-    ("natural.mountain.glacier",     8, 25), ("national_park",                7, 30),
-    ("natural.protected_area",       7, 30), ("tourism.sights.tower",         7,  8),
-    ("man_made.tower",               7,  8), ("tourism.attraction.viewpoint", 6, 15),
-    ("tourism.sights.castle",        6,  8), ("tourism.sights.fort",          6,  8),
-    ("tourism.sights.lighthouse",    6, 10), ("man_made.lighthouse",          6, 10),
-    ("tourism.sights.monastery",     6,  6), ("natural.water.bay",            6, 25),
-    ("natural.mountain.cliff",       6, 20), ("beach",                        6, 20),
-    ("natural.water",                5, 20), ("tourism.sights",               5,  6),
-    ("tourism.attraction",           4,  6),
-]
-CATS = ("natural.mountain,natural.water,national_park,natural.protected_area,"
-        "tourism.sights,tourism.attraction,man_made.tower,man_made.lighthouse,beach")
-failed = False
-city = state = country = ""
-try:
-    rev = get("https://api.geoapify.com/v1/geocode/reverse?" + urllib.parse.urlencode({
-        "lat": lat, "lon": lon, "format": "json", "apiKey": key}))
-    res = rev.get("results") or []
-    if res:
-        a = res[0]
-        city    = a.get("city") or a.get("town") or a.get("village") or a.get("county") or ""
-        state   = a.get("state") or a.get("province") or ""
-        country = a.get("country") or ""
-except Exception:
-    failed = True
-landmark = ""
-try:
-    pl = get("https://api.geoapify.com/v2/places?" + urllib.parse.urlencode({
-        "categories": CATS, "filter": f"circle:{lon},{lat},25000",
-        "bias": f"proximity:{lon},{lat}", "conditions": "named",
-        "limit": "100", "apiKey": key}))
-    best = None
-    for f in pl.get("features", []):
-        p = f.get("properties", {}); name = p.get("name")
-        if not name: continue
-        cats = p.get("categories", []) or []; distm = p.get("distance")
-        if distm is None: continue
-        dist = distm / 1000.0; score = None
-        for prefix, weight, maxkm in RULES:
-            if dist <= maxkm and any(c == prefix or c.startswith(prefix + ".") for c in cats):
-                sc = weight - dist / 5.0
-                if score is None or sc > score: score = sc
-        if score is not None and (best is None or score > best[0]): best = (score, name)
-    if best: landmark = best[1]
-except Exception:
-    failed = True
-if failed and not (city or state or country or landmark): sys.exit(3)
-print("\t".join([landmark, city, state, country]))
-PY
-)"
-RC=$?
-[ "$RC" = 3 ] && exit 3
-[ "$RC" = 0 ] || exit 0
-printf '%s\n' "$OUT" | tee "$CACHE"
-exit 0
-EOF
-chmod +x "$CFG/geo-enrich.sh"
-
-
 
 # =============================================================================
 # 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
