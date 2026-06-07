@@ -79,6 +79,8 @@ export VOLUME="$VOLUME"
 export IDLE_TIMEOUT_MS="$IDLE_TIMEOUT_MS"
 export MIN_LOAD_SECS="$MIN_LOAD_SECS"
 export VID_RESCAN_SECS="$VID_RESCAN_SECS"
+export GEOAPIFY_KEY="$GEOAPIFY_KEY"
+
 CONF
 
 # Run the installer on its own config — this resolves every level, top-down.
@@ -1587,164 +1589,93 @@ chmod +x "$CFG/build-title.sh"
 
 
 # =============================================================================
-# 3c. nearby-landmark.sh  (prominent nearby landmark via Wikipedia geosearch)
+# 3c. geo-enrich.sh  (Geoapify reverse + nearby landmark, cached per location)
 # =============================================================================
-echo "▶ Writing nearby-landmark.sh..."
-cat > "$CFG/nearby-landmark.sh" << 'EOF'
+echo "▶ Writing geo-enrich.sh..."
+cat > "$CFG/geo-enrich.sh" << 'EOF'
 #!/bin/bash
-# nearby-landmark.sh LAT LON
-#  exit 0 + name on stdout  -> found a landmark
-#  exit 0 + no stdout       -> queried OK, nothing notable
-#  exit 3                   -> lookup failed (network); caller retries
+# geo-enrich.sh LAT LON  -> "landmark<TAB>city<TAB>state<TAB>country"
+# Resolves admin + the most prominent nearby landmark via Geoapify, cached per
+# ~100m coordinate so the API is hit ONCE per place, ever.
+#   exit 0 -> result on stdout (any field may be empty); cached
+#   exit 3 -> lookup failed; NOT cached (caller may retry later)
 set -u
+export LC_ALL=C
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+. "$SS_CONF" 2>/dev/null || true
 LAT="${1:-}"; LON="${2:-}"
 [ -z "$LAT" ] || [ -z "$LON" ] && exit 0
-
-LOG="/tmp/ss_landmark.log"
-TMP_JSON="$(mktemp)"
-trap 'rm -f "$TMP_JSON"' EXIT
-
-echo "--- $(date) | LAT:$LAT LON:$LON ---" >> "$LOG"
-
-# 1. OPTIMIZED OVERPASS QUERY
-# Removing regex and using exact matches drops server execution time
-# to a fraction of a second, preventing the server from dropping our request.
-QUERY="[out:json][timeout:5];
-(
-  node[\"natural\"=\"peak\"](around:15000,$LAT,$LON);
-  node[\"natural\"=\"volcano\"](around:15000,$LAT,$LON);
-  node[\"waterway\"=\"waterfall\"](around:15000,$LAT,$LON);
-  nwr[\"boundary\"=\"national_park\"](around:25000,$LAT,$LON);
-  nwr[\"leisure\"=\"nature_reserve\"](around:15000,$LAT,$LON);
-  nwr[\"tourism\"=\"zoo\"](around:10000,$LAT,$LON);
-  nwr[\"tourism\"=\"aquarium\"](around:10000,$LAT,$LON);
-  nwr[\"historic\"=\"castle\"](around:8000,$LAT,$LON);
-);
-out center tags;"
-
-MIRRORS=(
-    "https://overpass-api.de/api/interpreter"
-    "https://overpass.kumi.systems/api/interpreter"
-)
-
-SUCCESS=0
-for url in "${MIRRORS[@]}"; do
-    echo "Trying OSM: $url" >> "$LOG"
-    # curl is highly robust for API fetching; -sSf fails quietly on HTTP errors
-    if curl -sSf --max-time 8 -d "$QUERY" "$url" -o "$TMP_JSON" 2>>"$LOG"; then
-        SUCCESS=1
-        echo "OSM Success." >> "$LOG"
-        break
-    fi
-done
-
-# 2. PARSE OSM RESULTS
-if [ "$SUCCESS" = 1 ]; then
-    LANDMARK=$(python3 - "$LAT" "$LON" "$TMP_JSON" <<'PY'
-import sys, json, math
-
-def hav(la1, lo1, la2, lo2):
-    p1, p2 = math.radians(la1), math.radians(la2)
-    x = math.sin(math.radians(la2 - la1)/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(math.radians(lo2 - lo1)/2)**2
-    return 2 * 6371.0 * math.asin(math.sqrt(x))
-
+[ -z "${GEOAPIFY_KEY:-}" ] && exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+CACHE_DIR="${MAP_DIR:-/tmp}/geo"; mkdir -p "$CACHE_DIR" 2>/dev/null || true
+LAT4="$(printf '%.4f' "$LAT")"; LON4="$(printf '%.4f' "$LON")"
+CACHE="$CACHE_DIR/geo_${LAT4}_${LON4}.tsv"
+[ -s "$CACHE" ] && { cat "$CACHE"; exit 0; }
+OUT="$(python3 - "$LAT" "$LON" "${GEOAPIFY_KEY}" <<'PY'
+import sys, urllib.request, urllib.parse, json
+lat, lon, key = float(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
+def get(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Screensaver-App/1.0"})
+    with urllib.request.urlopen(req, timeout=8) as r: return json.load(r)
+RULES = [
+    ("natural.mountain.volcano",    10, 40), ("natural.mountain.peak",        9, 35),
+    ("natural.mountain.glacier",     8, 25), ("national_park",                7, 30),
+    ("natural.protected_area",       7, 30), ("tourism.sights.tower",         7,  8),
+    ("man_made.tower",               7,  8), ("tourism.attraction.viewpoint", 6, 15),
+    ("tourism.sights.castle",        6,  8), ("tourism.sights.fort",          6,  8),
+    ("tourism.sights.lighthouse",    6, 10), ("man_made.lighthouse",          6, 10),
+    ("tourism.sights.monastery",     6,  6), ("natural.water.bay",            6, 25),
+    ("natural.mountain.cliff",       6, 20), ("beach",                        6, 20),
+    ("natural.water",                5, 20), ("tourism.sights",               5,  6),
+    ("tourism.attraction",           4,  6),
+]
+CATS = ("natural.mountain,natural.water,national_park,natural.protected_area,"
+        "tourism.sights,tourism.attraction,man_made.tower,man_made.lighthouse,beach")
+failed = False
+city = state = country = ""
 try:
-    lat, lon = float(sys.argv[1]), float(sys.argv[2])
-    with open(sys.argv[3], 'r') as f: data = json.load(f)
+    rev = get("https://api.geoapify.com/v1/geocode/reverse?" + urllib.parse.urlencode({
+        "lat": lat, "lon": lon, "format": "json", "apiKey": key}))
+    res = rev.get("results") or []
+    if res:
+        a = res[0]
+        city    = a.get("city") or a.get("town") or a.get("village") or a.get("county") or ""
+        state   = a.get("state") or a.get("province") or ""
+        country = a.get("country") or ""
 except Exception:
-    sys.exit(0)
-
-best = None
-for el in data.get("elements", []):
-    tags = el.get("tags", {})
-    name = tags.get("name") or tags.get("name:en")
-    if not name: continue
-
-    clat = el.get("lat") or (el.get("center") or {}).get("lat")
-    clon = el.get("lon") or (el.get("center") or {}).get("lon")
-    if clat is None or clon is None: continue
-
-    dist = hav(lat, lon, clat, clon)
-    weight = 5
-
-    if tags.get("boundary") == "national_park": weight = 10
-    elif tags.get("natural") in ("volcano", "crater"): weight = 9
-    elif tags.get("natural") == "peak": weight = 8
-    elif tags.get("waterway") == "waterfall": weight = 8
-    elif tags.get("tourism") in ("zoo", "aquarium"): weight = 8
-
-    if "wikipedia" in tags: weight += 4
-    if tags.get("natural") == "peak" and "ele" in tags:
-        try:
-            if float(tags["ele"]) > 2000: weight += 2
-        except: pass
-
-    score = weight - (dist / 5.0)
-    if best is None or score > best[0]: best = (score, name)
-
-if best: print(best[1])
-PY
-)
-    if [ -n "$LANDMARK" ]; then
-        echo "Found OSM: $LANDMARK" >> "$LOG"
-        echo "$LANDMARK"
-        exit 0
-    fi
-fi
-
-# 3. WIKIPEDIA FALLBACK
-echo "OSM found nothing, trying Wikipedia fallback..." >> "$LOG"
-WIKI_LANDMARK=$(python3 - "$LAT" "$LON" <<'PY'
-import sys, json, math, urllib.request, urllib.parse, re
-
-def hav(la1, lo1, la2, lo2):
-    p1, p2 = math.radians(la1), math.radians(la2)
-    x = math.sin(math.radians(la2 - la1)/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(math.radians(lo2 - lo1)/2)**2
-    return 2 * 6371.0 * math.asin(math.sqrt(x))
-
+    failed = True
+landmark = ""
 try:
-    lat, lon = float(sys.argv[1]), float(sys.argv[2])
-    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
-        "action":"query", "format":"json", "generator":"geosearch",
-        "ggscoord": f"{lat}|{lon}", "ggsradius": "10000", "ggslimit": "500",
-        "prop": "coordinates|pageprops", "ppprop": "wikibase-shortdesc"
-    })
-    req = urllib.request.Request(url, headers={"User-Agent":"Screensaver-App/3.0"})
-    with urllib.request.urlopen(req, timeout=6) as r: data = json.load(r)
+    pl = get("https://api.geoapify.com/v2/places?" + urllib.parse.urlencode({
+        "categories": CATS, "filter": f"circle:{lon},{lat},25000",
+        "bias": f"proximity:{lon},{lat}", "conditions": "named",
+        "limit": "100", "apiKey": key}))
+    best = None
+    for f in pl.get("features", []):
+        p = f.get("properties", {}); name = p.get("name")
+        if not name: continue
+        cats = p.get("categories", []) or []; distm = p.get("distance")
+        if distm is None: continue
+        dist = distm / 1000.0; score = None
+        for prefix, weight, maxkm in RULES:
+            if dist <= maxkm and any(c == prefix or c.startswith(prefix + ".") for c in cats):
+                sc = weight - dist / 5.0
+                if score is None or sc > score: score = sc
+        if score is not None and (best is None or score > best[0]): best = (score, name)
+    if best: landmark = best[1]
 except Exception:
-    sys.exit(0)
-
-pages = (data.get("query") or {}).get("pages") or {}
-EXCLUDE = ["city","town","village","municipality","county","district","school","hospital","road","highway","airport"]
-
-best = None
-for p in pages.values():
-    title = p.get("title", "")
-    desc = ((p.get("pageprops") or {}).get("wikibase-shortdesc") or "").lower()
-    co = (p.get("coordinates") or [{}])[0]
-    clat, clon = co.get("lat"), co.get("lon")
-    
-    if clat is None or clon is None or not desc: continue
-    if any(re.search(r"\b" + x + r"s?\b", desc) for x in EXCLUDE): continue
-    
-    dist = hav(lat, lon, clat, clon)
-    score = 10 - dist
-    if best is None or score > best[0]: best = (score, title)
-
-if best: print(re.sub(r"\s*\([^()]*\)\s*$", "", best[1]).strip())
+    failed = True
+if failed and not (city or state or country or landmark): sys.exit(3)
+print("\t".join([landmark, city, state, country]))
 PY
-)
-
-if [ -n "$WIKI_LANDMARK" ]; then
-    echo "Found WIKI: $WIKI_LANDMARK" >> "$LOG"
-    echo "$WIKI_LANDMARK"
-    exit 0
-fi
-
-echo "Nothing found in OSM or WIKI." >> "$LOG"
+)"
+RC=$?
+[ "$RC" = 3 ] && exit 3
+[ "$RC" = 0 ] || exit 0
+printf '%s\n' "$OUT" | tee "$CACHE"
 exit 0
 EOF
-chmod +x "$CFG/nearby-landmark.sh"
+chmod +x "$CFG/geo-enrich.sh"
 
 
 
