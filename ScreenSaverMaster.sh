@@ -922,24 +922,62 @@ mp.register_event("file-loaded", function()
         end
 
         local function draw_text()
-            local d = compact_date(date)
+            -- 1. Clean formatting: Strip commas
+            local clean_d = compact_date(date)
+            if clean_d then clean_d = clean_d:gsub(",", "") end
+
+            local clean_loc = location
+            if clean_loc then clean_loc = clean_loc:gsub(",", "") end
+
+            -- 2. Build string: Replace the '|' with heavy spacing
             local text = ""
-            if d and location ~= "" then text = d .. "  |  " .. location
-            elseif d then text = d
-            elseif location ~= "" then text = location end
+            if clean_d and clean_loc and clean_loc ~= "" then
+                text = clean_d .. "   " .. clean_loc
+            elseif clean_d then
+                text = clean_d
+            elseif clean_loc and clean_loc ~= "" then
+                text = clean_loc
+            end
 
             if text == "" then ov:remove(); return end
 
+            -- Title card aesthetic: always uppercase
+            text = text:upper()
+
             local L  = hud_geom()
-            local fs = math.floor(L.win_h * 0.045)
+            -- Slightly smaller font to accommodate the wide tracking
+            local fs = math.floor(L.win_h * 0.035) 
+            local fsp = math.floor(fs * 0.4) -- Wide letter space
             local cx = math.floor(L.win_w / 2)
             local baseline = L.win_h - math.floor(L.win_h * 0.085)
 
+            -- 3. Styling: \bord0\shad0 for clean edges
+            local prefix = string.format("{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}", cx, baseline, fs, fsp)
+
+            -- 4. Calculate current playback time in milliseconds
+            local now = math.floor((mp.get_property_number("time-pos") or 0) * 1000)
+
+            -- 5. Build the random-reveal animation tags
+            local anim_text = ""
+            math.randomseed(os.time() + seq)
+
+            -- We iterate using a UTF-8 pattern so multi-byte characters don't get split 
+            -- (crucial for international locations like Seoul, Jeju, or Québec).
+            for char in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+                if char == " " then
+                    anim_text = anim_text .. char
+                else
+                    local start_t = now + math.random(100, 1500)
+                    local end_t = start_t + math.random(500, 800)
+                    
+                    -- Start transparent (\alpha&HFF&), fade to opaque (\alpha&H00&)
+                    anim_text = anim_text .. string.format("{\\alpha&HFF&\\t(%d,%d,\\alpha&H00&)}%s", start_t, end_t, char)
+                end
+            end
+
             ov.res_x = L.win_w
             ov.res_y = L.win_h
-            ov.data = string.format(
-                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord1\\3c&H000000&\\shad2\\4c&H000000&}%s",
-                cx, baseline, fs, text)
+            ov.data = prefix .. anim_text
             ov:update()
         end
         draw_text()
