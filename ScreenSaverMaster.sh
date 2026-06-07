@@ -922,13 +922,12 @@ mp.register_event("file-loaded", function()
         end
 
         local function draw_text()
-            -- 1. Format date and location: uppercase, no commas
+            -- 1. Clean and Uppercase
             local d = compact_date(date)
             if d then d = d:gsub(",", ""):upper() end
             local loc = location:gsub(",", ""):upper()
 
             local text = ""
-            -- 2. Replace the '|' with generous empty spacing
             if d and loc ~= "" then text = d .. "       " .. loc
             elseif d then text = d
             elseif loc ~= "" then text = loc end
@@ -937,17 +936,19 @@ mp.register_event("file-loaded", function()
 
             local L  = hud_geom()
             local fs = math.floor(L.win_h * 0.045)
-            -- 3. Calculate cinematic letter spacing proportional to font size
-            local fsp = math.floor(fs * 0.35) 
+            local fsp = math.floor(fs * 0.4) 
             local cx = math.floor(L.win_w / 2)
             local baseline = L.win_h - math.floor(L.win_h * 0.085)
 
             ov.res_x = L.win_w
             ov.res_y = L.win_h
-            -- 4. Removed \bord and \shad tags, added the \fsp tag
+            
+            -- Use \3c&H000000& and \shad to create a soft, cinematic "lift" 
+            -- rather than a harsh border.
             ov.data = string.format(
-                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0}%s",
+                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad2\\3c&H000000&\\4c&H000000&\\1c&HFFFFFF&}%s",
                 cx, baseline, fs, fsp, text)
+            
             ov:update()
         end
         draw_text()
