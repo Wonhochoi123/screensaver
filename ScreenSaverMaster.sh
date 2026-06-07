@@ -291,6 +291,7 @@ pause_ov.res_y = 1080
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
+local landmark_ov  = mp.create_osd_overlay("ass-events")
 
 local seq       = 0
 local prewarmed = {}
@@ -637,8 +638,8 @@ end
 
 local function coord_tags(x, y, fs)
     return string.format(
-        "{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\1c&HFFFFFF&\\bord1\\3c&H000000&\\shad1\\4c&H000000&\\4a&H50&}",
-        x, y, fs)
+        "{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&\\bord0\\shad0}",
+        x, y, fs, math.floor(fs * 0.06 + 0.5))
 end
 
 local function draw_coord_labels(L, lat, lon)
@@ -737,16 +738,19 @@ local function iso_to_display(iso)
 end
 
 local function resolve_meta(orig_path, cb)
-    local date, location, lat, lon = nil, "", nil, nil
+    -- "general" = city / state / country (top-right, with the date).
+    -- "landmark" = the notable place name (bottom-center, the headline).
+    local date, general, landmark, lat, lon = nil, "", nil, nil, nil
 
     -- 1) Base values straight from the sidecar (a tiny file read, no subprocess).
     local x = read_xmp(orig_path .. ".xmp")
     if x then
         date     = iso_to_display(x.date_iso)
         lat, lon = x.lat, x.lon
-        local landmark, city, region, country =
+        local lm, city, region, country =
             niagara_fix(x.landmark, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
-        location = join_loc(landmark, city, region, country)
+        landmark = (lm and lm ~= "") and lm or nil
+        general  = join_loc(nil, city, region, country)
     end
 
     -- 2) Date fallback: file mtime, if the sidecar carried no date.
@@ -756,17 +760,18 @@ local function resolve_meta(orig_path, cb)
     end
 
     -- 3) Manual ".txt" override wins (read live, so edits apply immediately).
+    --    A manual location string is treated as the general (top-right) label.
     local sc = parse_sidecar(orig_path)
     if sc then
         if sc.date then date = sc.date end
-        if sc.location and sc.location ~= "" then location = sc.location end
+        if sc.location and sc.location ~= "" then general = sc.location; landmark = nil end
         if sc.lat and sc.lon then lat, lon = sc.lat, sc.lon end
     end
 
     if lat and (lat < -90  or lat > 90 ) then lat = nil end
     if lon and (lon < -180 or lon > 180) then lon = nil end
 
-    cb({ date = date, location = location, lat = lat, lon = lon, mdir = MAP_DIR })
+    cb({ date = date, general = general, landmark = landmark, lat = lat, lon = lon, mdir = MAP_DIR })
 end
 
 local pq        = {}
@@ -896,6 +901,7 @@ mp.register_event("file-loaded", function()
 
     clear_hud_osd()
     ov:remove()
+    landmark_ov:remove()
     seq = seq + 1
     local my_seq = seq
     prewarmed[orig_path] = true
@@ -923,31 +929,53 @@ mp.register_event("file-loaded", function()
         cur = { seq = my_seq, path = path, orig = orig_path, lat = m.lat, lon = m.lon, mdir = m.mdir, zidx = 1, w = w, h = h, auto = true }
 
         local date     = m.date
-        local location = m.location or ""
+        local general  = m.general or ""
+        local landmark = m.landmark
         local mdir     = m.mdir
 
         -- Everything (date, admin, landmark) already comes from the XMP sidecar,
         -- resolved offline by the police. No runtime network lookups here.
+        -- Style matches the title cards: Montserrat ExtraBold, no outline, no
+        -- shadow, pure white, with letter-spacing.
         local function draw_text()
+            local L = hud_geom()
+            local m_top    = math.floor(L.win_h * 0.04)   -- top inset
+            local m_right  = math.floor(L.win_w * 0.025)   -- right inset
+            local m_bottom = math.floor(L.win_h * 0.07)    -- bottom inset
+
+            -- Top-right: date over general location (right-aligned stack).
             local d = compact_date(date)
-            local text = ""
-            if d and location ~= "" then text = d .. "  |  " .. location
-            elseif d then text = d
-            elseif location ~= "" then text = location end
-
-            if text == "" then ov:remove(); return end
-
-            local L  = hud_geom()
-            local fs = math.floor(L.win_h * 0.045)
-            local cx = math.floor(L.win_w / 2)
-            local baseline = L.win_h - math.floor(L.win_h * 0.085)
+            local stack = ""
+            if d and general ~= "" then stack = d .. "\\N" .. general
+            elseif d then stack = d
+            elseif general ~= "" then stack = general end
 
             ov.res_x = L.win_w
             ov.res_y = L.win_h
-            ov.data = string.format(
-                "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord1\\3c&H000000&\\shad2\\4c&H000000&}%s",
-                cx, baseline, fs, text)
-            ov:update()
+            if stack == "" then
+                ov:remove()
+            else
+                local fs  = math.floor(L.win_h * 0.030)
+                local fsp = math.floor(L.win_h * 0.003 + 0.5)
+                ov.data = string.format(
+                    "{\\an9\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
+                    L.win_w - m_right, m_top, fs, fsp, stack)
+                ov:update()
+            end
+
+            -- Bottom-center: the landmark / headline, bigger with wide spacing.
+            landmark_ov.res_x = L.win_w
+            landmark_ov.res_y = L.win_h
+            if landmark and landmark ~= "" then
+                local fs  = math.floor(L.win_h * 0.052)
+                local fsp = math.floor(L.win_h * 0.012 + 0.5)
+                landmark_ov.data = string.format(
+                    "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
+                    math.floor(L.win_w / 2), L.win_h - m_bottom, fs, fsp, landmark:upper())
+                landmark_ov:update()
+            else
+                landmark_ov:remove()
+            end
         end
         draw_text()
 
@@ -991,66 +1019,98 @@ mp.register_event("file-loaded", function()
     end)
 end)
 
-local function update_music_display()
+-- Now-playing toast (top-left). Same title-card style as the rest of the HUD:
+-- Montserrat ExtraBold, no outline, no shadow, white. Small and tucked into the
+-- corner. It appears ONLY when the track changes, holds a few seconds, then
+-- fades out — it is not a permanent label.
+local music_shown = nil   -- text of the track currently/last displayed
+local music_gen   = 0     -- bumped on each new toast; cancels stale callbacks
+
+local function music_render(text, alpha)
+    local w, h = refresh_display_size()
+    local pad = math.floor(h * 0.028)
+    local fs  = math.floor(h * 0.017 + 0.5)
+    local fsp = math.floor(h * 0.002 + 0.5)
+    music_ov.res_x = w
+    music_ov.res_y = h
+    music_ov.data = string.format(
+        "{\\an7\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H%02X&}\xe2\x99\xaa  %s",
+        pad, pad, fs, fsp, alpha, text)
+    music_ov:update()
+end
+
+local function music_show(text)
+    music_gen = music_gen + 1
+    local gen = music_gen
+    music_render(text, 0x00)
+    -- Hold ~6s at full opacity, then a short stepped fade to clear.
+    mp.add_timeout(6.0, function()
+        if gen ~= music_gen then return end
+        local steps = {0x30, 0x60, 0x90, 0xC0, 0xF0}
+        local function step(i)
+            if gen ~= music_gen then return end
+            if i > #steps then music_ov:remove(); return end
+            music_render(text, steps[i])
+            mp.add_timeout(0.10, function() step(i + 1) end)
+        end
+        step(1)
+    end)
+end
+
+local function maybe_toast(text)
+    if not text or text == "" then return end
+    text = text:sub(1, 70)
+    if text ~= music_shown then
+        music_shown = text
+        music_show(text)
+    end
+end
+
+-- Poll the audio player; only re-toast when the track actually changes.
+local function poll_music()
     mp.command_native_async({
         name = "subprocess", capture_stdout = true,
         args = { "/bin/sh", "-c",
             "printf '%s\\n' '{\"command\":[\"get_property\",\"metadata\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
     }, function(ok, res)
+        local title, artist
         if ok and res and res.stdout and res.stdout ~= "" then
             local j = utils.parse_json(res.stdout)
             if j and j.data and j.error == "success" then
                 local meta = j.data
-                local title  = meta.title  or meta.Title  or meta.TITLE
-                local artist = meta.artist or meta.Artist or meta.ARTIST
-                if not title then
-                    mp.command_native_async({
-                        name = "subprocess", capture_stdout = true,
-                        args = { "/bin/sh", "-c",
-                            "printf '%s\\n' '{\"command\":[\"get_property\",\"media-title\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
-                    }, function(ok2, res2)
-                        if ok2 and res2 and res2.stdout and res2.stdout ~= "" then
-                            local j2 = utils.parse_json(res2.stdout)
-                            if j2 and j2.data and j2.error == "success" then
-                                local t = tostring(j2.data):gsub("%.[^%.]+$", ""):sub(1, 60)
-                                local w, h = refresh_display_size()
-                                local pad = math.floor(h * 0.025)
-                                local fs  = math.floor(h * 0.022 + 0.5)
-                                music_ov.data = string.format(
-                                    "{\\an7\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad2\\1c&HFFFFFF&}\xe2\x99\xaa  %s",
-                                    pad, pad, fs, t)
-                                music_ov:update()
-                                return
-                            end
-                        end
-                        music_ov:remove()
-                    end)
-                    return
-                end
-                local line = title
-                if artist and artist ~= "" then line = line .. "  \xc2\xb7  " .. artist end
-                line = line:sub(1, 70)
-                local w, h = refresh_display_size()
-                local pad = math.floor(h * 0.025)
-                local fs  = math.floor(h * 0.022 + 0.5)
-                music_ov.data = string.format(
-                    "{\\an7\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad2\\1c&HFFFFFF&}\xe2\x99\xaa  %s",
-                    pad, pad, fs, line)
-                music_ov:update()
-                return
+                title  = meta.title  or meta.Title  or meta.TITLE
+                artist = meta.artist or meta.Artist or meta.ARTIST
             end
         end
-        music_ov:remove()
+        if title and title ~= "" then
+            local line = title
+            if artist and artist ~= "" then line = line .. "  \xc2\xb7  " .. artist end
+            maybe_toast(line)
+            return
+        end
+        -- No embedded title tag: fall back to the filename (media-title).
+        mp.command_native_async({
+            name = "subprocess", capture_stdout = true,
+            args = { "/bin/sh", "-c",
+                "printf '%s\\n' '{\"command\":[\"get_property\",\"media-title\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
+        }, function(ok2, res2)
+            if ok2 and res2 and res2.stdout and res2.stdout ~= "" then
+                local j2 = utils.parse_json(res2.stdout)
+                if j2 and j2.data and j2.error == "success" then
+                    maybe_toast(tostring(j2.data):gsub("%.[^%.]+$", ""))
+                end
+            end
+        end)
     end)
 end
-mp.add_periodic_timer(10, update_music_display)
-mp.register_event("start-file", update_music_display)
-update_music_display()
+mp.add_periodic_timer(3, poll_music)
+poll_music()
 
 mp.register_event("shutdown", function()
     ov:remove()
     pause_ov:remove()
     music_ov:remove()
+    landmark_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
