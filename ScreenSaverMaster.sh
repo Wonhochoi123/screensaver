@@ -44,6 +44,15 @@ export IDLE_TIMEOUT_MS=300000  # idle ms before the screensaver auto-launches (=
 export MIN_LOAD_SECS=2         # minimum seconds the "please wait" screen stays visible
 export VID_RESCAN_SECS=300     # how often vid-daemon rescans Media/ for new videos
 
+# Offline place-name resolution (GeoNames). The screensaver resolves the nearby
+# prominent landmark + city/state/country ENTIRELY OFFLINE from a local SQLite
+# built once by config/build-geodb.sh. No API key, no rate limit, no runtime
+# network. GEONAMES_COUNTRIES is a space-separated list of ISO country codes to
+# index (small, fast); leave it EMPTY to index the whole planet (~390MB
+# download, larger DB). Data © GeoNames, licensed CC-BY 4.0.
+export GEONAMES_COUNTRIES='US CA'
+export GEODB='$MAP_DIR/geo/geonames.sqlite'
+
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
 # config goes. Everything deeper is resolved by sourcing the file we write.
 eval "REAL_APP=\"$APP_DIR\""
@@ -79,6 +88,8 @@ export VOLUME="$VOLUME"
 export IDLE_TIMEOUT_MS="$IDLE_TIMEOUT_MS"
 export MIN_LOAD_SECS="$MIN_LOAD_SECS"
 export VID_RESCAN_SECS="$VID_RESCAN_SECS"
+export GEONAMES_COUNTRIES="$GEONAMES_COUNTRIES"
+export GEODB="$GEODB"
 CONF
 
 # Run the installer on its own config — this resolves every level, top-down.
@@ -99,7 +110,7 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
-mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
+mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$MAP_DIR/geo" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
          "$HOME/.config/autostart" "$HOME/.local/share/applications" "$FONT_DIR"
 
 if [ -d "$BASE_DIR/_map" ]; then
@@ -118,7 +129,7 @@ find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -in
 # =============================================================================
 echo "▶ Resolving and installing dependencies..."
 
-REQUIRED_CMDS=(mpv exiftool python3 curl qrencode ffmpeg socat playerctl pactl fc-match)
+REQUIRED_CMDS=(mpv exiftool python3 curl qrencode ffmpeg socat playerctl pactl fc-match unzip)
 
 detect_pm() {
     for pm in dnf apt-get pacman zypper; do
@@ -132,20 +143,20 @@ INSTALL=""
 PKGS=""
 case "$PM" in
   dnf)
-    PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
+    PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
     INSTALL="sudo dnf install -y"
     ;;
   apt-get)
-    PKGS="mpv libimage-exiftool-perl python3 python3-qrcode python3-pil curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool"
+    PKGS="mpv libimage-exiftool-perl python3 python3-qrcode python3-pil curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool unzip"
     sudo apt-get update -y || true
     INSTALL="sudo apt-get install -y"
     ;;
   pacman)
-    PKGS="mpv perl-image-exiftool python python-qrcode python-pillow curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool"
+    PKGS="mpv perl-image-exiftool python python-qrcode python-pillow curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool unzip"
     INSTALL="sudo pacman -S --needed --noconfirm"
     ;;
   zypper)
-    PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool"
+    PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
     INSTALL="sudo zypper install -y"
     ;;
   *)
@@ -682,9 +693,10 @@ local function build_all(lat, lon, w, h, mdir, cb, i)
     end)
 end
 
--- Read the date / GPS / location the police already extracted into the
--- "<media>.xmp" sidecar — no per-slide exiftool subprocess. Falls back to file
--- mtime for the date, and a ".txt" override (read live) still wins on top.
+-- Read the date / GPS / location / landmark the police already extracted into
+-- the "<media>.xmp" sidecar — no per-slide subprocess, no runtime network.
+-- Falls back to file mtime for the date, and a ".txt" override (read live)
+-- still wins on top.
 local function xml_unescape(s)
     if not s then return s end
     return (s:gsub("&lt;", "<")
@@ -711,6 +723,7 @@ local function read_xmp(xmp_path)
         city     = tag("photoshop:City"),
         state    = tag("photoshop:State"),
         country  = tag("photoshop:Country"),
+        landmark = tag("ss:Landmark"),
     }
 end
 
@@ -731,7 +744,7 @@ local function resolve_meta(orig_path, cb)
         date     = iso_to_display(x.date_iso)
         lat, lon = x.lat, x.lon
         local landmark, city, region, country =
-            niagara_fix(nil, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
+            niagara_fix(x.landmark, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
         location = join_loc(landmark, city, region, country)
     end
 
@@ -912,15 +925,8 @@ mp.register_event("file-loaded", function()
         local location = m.location or ""
         local mdir     = m.mdir
 
-        local loc_cache
-        if m.lat and m.lon and location == "" then
-            loc_cache = mdir .. string.format("/place_%.4f_%.4f.txt", m.lat, m.lon)
-            if file_exists(loc_cache) then
-                local lf = io.open(loc_cache, "r")
-                if lf then location = (lf:read("*a") or ""):gsub("[\r\n]+", ""); lf:close() end
-            end
-        end
-
+        -- Everything (date, admin, landmark) already comes from the XMP sidecar,
+        -- resolved offline by the police. No runtime network lookups here.
         local function draw_text()
             local d = compact_date(date)
             local text = ""
@@ -943,50 +949,6 @@ mp.register_event("file-loaded", function()
             ov:update()
         end
         draw_text()
-
-        if m.lat and m.lon and location == "" and loc_cache then
-            mp.command_native_async({
-                name = "subprocess", capture_stdout = true,
-                args = {
-                    "curl", "-sf", "--max-time", "5",
-                    "-A", "Screensaver-App/1.0",
-                    "https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&lat="
-                        .. string.format("%.6f", m.lat) .. "&lon=" .. string.format("%.6f", m.lon)
-                        .. "&zoom=18&accept-language=en",
-                },
-            }, function(rok, rres)
-                if my_seq ~= seq then return end
-                if rok and rres and rres.stdout then
-                    local j = utils.parse_json(rres.stdout)
-                    if j and j.address then
-                        local a = j.address
-                        local landmark = nil
-                        local poi_keys = {
-                            "historic","tourism","national_park","park","nature_reserve",
-                            "castle","palace","monument","ruins","museum","attraction",
-                            "theme_park","viewpoint","zoo","aquarium","stadium","peak",
-                            "mountain","volcano","beach","bay","island","waterfall",
-                            "natural","leisure","bridge","building","aeroway","amenity","man_made"
-                        }
-                        for _, k in ipairs(poi_keys) do
-                            if a[k] and type(a[k]) == "string" then landmark = a[k] break end
-                        end
-                        local city  = a.city or a.town or a.village or a.hamlet
-                        local state = abbr_subdiv(a.state or a.province, a["ISO3166-2-lvl4"] or a["ISO3166-2-lvl3"])
-                        local ctry  = abbr_country(a.country, a.country_code)
-                        landmark, city, state, ctry = niagara_fix(landmark, city, state, ctry)
-                        local loc = join_loc(landmark, city, state, ctry)
-                        if loc ~= "" then
-                            location = loc
-                            os.execute("mkdir -p '" .. mdir:gsub("'", "'\\''") .. "'")
-                            local cf = io.open(loc_cache, "w")
-                            if cf then cf:write(location); cf:close() end
-                            draw_text()
-                        end
-                    end
-                end
-            end)
-        end
 
         if not (m.lat and m.lon) then
             mp.add_timeout(1.0, start_prewarm)
@@ -1536,6 +1498,198 @@ EOF
 chmod +x "$CFG/build-title.sh"
 
 # =============================================================================
+# 3c. build-geodb.sh  (one-time: download GeoNames dumps -> offline SQLite)
+#     Data © GeoNames, CC-BY 4.0 (https://www.geonames.org). Re-run to refresh
+#     or after changing GEONAMES_COUNTRIES. Needs: curl, unzip, python3.
+# =============================================================================
+echo "▶ Writing build-geodb.sh..."
+cat > "$CFG/build-geodb.sh" << 'EOF'
+#!/bin/bash
+set -u
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+. "$SS_CONF" 2>/dev/null || { echo "build-geodb: missing config $SS_CONF — run the installer." >&2; exit 1; }
+
+command -v curl  >/dev/null 2>&1 || { echo "build-geodb: curl not found."  >&2; exit 1; }
+command -v unzip >/dev/null 2>&1 || { echo "build-geodb: unzip not found." >&2; exit 1; }
+
+BASE="https://download.geonames.org/export/dump"
+WORK="$MAP_DIR/geo"; mkdir -p "$WORK"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+echo "▶ Fetching GeoNames support tables..."
+curl -fsSL -o "$TMP/admin1.txt"  "$BASE/admin1CodesASCII.txt" || { echo "download failed (admin1)"; exit 1; }
+curl -fsSL -o "$TMP/country.txt" "$BASE/countryInfo.txt"      || { echo "download failed (countryInfo)"; exit 1; }
+
+DUMPS=()
+if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
+    for cc in $GEONAMES_COUNTRIES; do
+        echo "▶ Fetching ${cc}.zip..."
+        if curl -fsSL -o "$TMP/$cc.zip" "$BASE/$cc.zip"; then
+            if (cd "$TMP" && unzip -oq "$cc.zip" "$cc.txt"); then
+                DUMPS+=("$TMP/$cc.txt")
+            else
+                echo "⚠ could not unzip $cc.zip"
+            fi
+        else
+            echo "⚠ could not fetch $cc.zip"
+        fi
+    done
+else
+    echo "▶ Fetching allCountries.zip (whole planet, ~390MB)..."
+    if curl -fsSL -o "$TMP/all.zip" "$BASE/allCountries.zip" \
+        && (cd "$TMP" && unzip -oq all.zip allCountries.txt); then
+        DUMPS+=("$TMP/allCountries.txt")
+    fi
+fi
+[ "${#DUMPS[@]}" -gt 0 ] || { echo "build-geodb: no dumps downloaded — aborting."; exit 1; }
+
+echo "▶ Building offline place database -> $GEODB ..."
+python3 - "$GEODB" "$TMP/country.txt" "$TMP/admin1.txt" "${DUMPS[@]}" <<'PY'
+import sys, sqlite3, os
+# GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
+# max_km = how far away the feature can still be the photo's "landmark".
+LANDMARK = {
+    "VLC":(10,40),"PK":(9,35),"MT":(9,35),"FLLS":(9,15),"GLCR":(8,25),
+    "PRK":(7,30),"RESN":(7,30),"GYSR":(7,15),"TOWR":(7,8),
+    "CSTL":(6,8),"FT":(6,8),"LTHSE":(6,10),"LK":(6,20),"BAY":(6,20),
+    "CLF":(6,15),"ARCH":(6,15),"ISL":(6,30),"BCH":(6,15),
+    "CAPE":(5,15),"MNMT":(5,6),"HSTS":(5,6),"RDGE":(5,20),"SPNG":(5,10),
+    "MUS":(4,4),
+}
+db, cinfo, admin1, dumps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+
+country = {}
+for ln in open(cinfo, encoding="utf-8", errors="ignore"):
+    if ln.startswith("#"):
+        continue
+    c = ln.rstrip("\n").split("\t")
+    if len(c) > 4 and c[0]:
+        country[c[0]] = c[4]
+
+a1 = {}
+for ln in open(admin1, encoding="utf-8", errors="ignore"):
+    c = ln.rstrip("\n").split("\t")
+    if len(c) >= 2 and c[0]:
+        a1[c[0]] = c[1]
+
+os.makedirs(os.path.dirname(db), exist_ok=True)
+if os.path.exists(db):
+    os.remove(db)
+con = sqlite3.connect(db); cur = con.cursor()
+cur.execute("CREATE TABLE place(name TEXT, lat REAL, lon REAL, pop INTEGER, state TEXT, country TEXT)")
+cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, elev REAL, weight INTEGER, maxkm REAL)")
+
+np = nf = 0
+for dump in dumps:
+    for ln in open(dump, encoding="utf-8", errors="ignore"):
+        c = ln.rstrip("\n").split("\t")
+        if len(c) < 19:
+            continue
+        name, lat, lon, fclass, fcode, cc, adm1 = c[1], c[4], c[5], c[6], c[7], c[8], c[10]
+        if not name:
+            continue
+        try:
+            lat = float(lat); lon = float(lon)
+        except ValueError:
+            continue
+        try:
+            pop = int(c[14] or 0)
+        except ValueError:
+            pop = 0
+        elev = 0.0
+        for col in (c[15], c[16]):
+            try:
+                elev = float(col); break
+            except (ValueError, IndexError):
+                pass
+        if fclass == "P" and fcode.startswith("PPL") and pop > 0:
+            cur.execute("INSERT INTO place VALUES(?,?,?,?,?,?)",
+                        (name, lat, lon, pop, a1.get(cc + "." + adm1, ""), country.get(cc, "")))
+            np += 1
+        elif fcode in LANDMARK:
+            w, mk = LANDMARK[fcode]
+            cur.execute("INSERT INTO feature VALUES(?,?,?,?,?,?,?)",
+                        (name, lat, lon, fcode, elev, w, mk))
+            nf += 1
+
+cur.execute("CREATE INDEX ix_place_lat ON place(lat)")
+cur.execute("CREATE INDEX ix_feat_lat  ON feature(lat)")
+con.commit(); con.close()
+sys.stderr.write("geodb: %d places, %d landmark features -> %s\n" % (np, nf, db))
+PY
+echo "✅ Offline place database ready."
+EOF
+chmod +x "$CFG/build-geodb.sh"
+
+# =============================================================================
+# 3d. geo-resolve.sh  (offline: nearest prominent landmark + city via GeoNames)
+#     Prints "landmark<TAB>city<TAB>state<TAB>country". No network, no key.
+# =============================================================================
+echo "▶ Writing geo-resolve.sh..."
+cat > "$CFG/geo-resolve.sh" << 'EOF'
+#!/bin/bash
+# geo-resolve.sh LAT LON -> "landmark<TAB>city<TAB>state<TAB>country"  (offline)
+set -u
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+. "$SS_CONF" 2>/dev/null || true
+LAT="${1:-}"; LON="${2:-}"
+[ -z "$LAT" ] || [ -z "$LON" ] && exit 0
+[ -s "${GEODB:-}" ] || exit 0          # DB not built yet -> no enrichment
+command -v python3 >/dev/null 2>&1 || exit 0
+python3 - "$GEODB" "$LAT" "$LON" <<'PY'
+import sys, sqlite3, math
+DB = sys.argv[1]; lat = float(sys.argv[2]); lon = float(sys.argv[3])
+
+def hav(a, b, c, d):
+    p1, p2 = math.radians(a), math.radians(c)
+    x = math.sin(math.radians(c - a) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(d - b) / 2) ** 2
+    return 2 * 6371.0 * math.asin(math.sqrt(x))
+
+con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True); cur = con.cursor()
+
+def win(r):
+    dla = r / 111.0
+    dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
+    return lat - dla, lat + dla, lon - dlo, lon + dlo
+
+# --- landmark: weight + elevation bonus - distance, within per-code radius ---
+la0, la1, lo0, lo1 = win(40)
+best = None
+for name, flat, flon, fcode, elev, w, mk in cur.execute(
+        "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
+        "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+    d = hav(lat, lon, flat, flon)
+    if d > mk:
+        continue
+    s = w - d / 5.0
+    if fcode in ("PK", "MT", "VLC") and elev:
+        s += min(elev / 1500.0, 3.0)
+    if best is None or s > best[0]:
+        best = (s, name)
+landmark = best[1] if best else ""
+
+# --- city: nearest sizable populated place (population-aware) ----------------
+la0, la1, lo0, lo1 = win(30)
+bc = None
+for name, plat, plon, pop, state, country in cur.execute(
+        "SELECT name,lat,lon,pop,state,country FROM place "
+        "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+    d = hav(lat, lon, plat, plon)
+    if d > 30:
+        continue
+    s = math.log10(pop + 10) - d / 10.0
+    if bc is None or s > bc[0]:
+        bc = (s, name, state, country)
+city    = bc[1] if bc else ""
+state   = bc[2] if bc else ""
+country = bc[3] if bc else ""
+
+print("\t".join([landmark, city, state, country]))
+PY
+EOF
+chmod +x "$CFG/geo-resolve.sh"
+
+# =============================================================================
 # 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
 #    Supersedes the old exif-daemon.sh and apply-overrides.sh.
 # =============================================================================
@@ -1543,13 +1697,16 @@ echo "▶ Writing xmp-police.sh..."
 cat > "$APP_DIR/xmp-police.sh" << 'EOF'
 #!/bin/bash
 # Walks Media/ and writes one Immich-style "<media>.<ext>.xmp" sidecar per file,
-# carrying the resolved capture date (+ GPS / city-state-country when known).
-# Incremental, non-destructive. Precedence: .txt override > embedded EXIF >
-# filename timestamp. Usage: xmp-police.sh [--once]
+# carrying the resolved capture date (+ GPS / city-state-country / nearby
+# landmark when known). Incremental, non-destructive. Precedence: .txt override
+# > embedded EXIF > filename timestamp. Geo enrichment is OFFLINE via GeoNames
+# (config/geo-resolve.sh). Usage: xmp-police.sh [--once]
 set -u
 
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$SS_CONF" 2>/dev/null || { echo "xmp-police: missing config $SS_CONF — run the installer." >&2; exit 1; }
+
+export GEO_RESOLVE="$CFG_DIR/geo-resolve.sh"
 
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
@@ -1597,8 +1754,24 @@ run_pass() {
 
         if [ -s "$JSON" ]; then
             python3 - "$JSON" <<'PY'
-import sys, json, os, re
+import sys, json, os, re, subprocess
 from xml.sax.saxutils import escape
+
+GEO_RESOLVE = os.environ.get("GEO_RESOLVE", "")
+
+def resolve_geo(lat, lon):
+    """Offline GeoNames lookup -> (landmark, city, state, country); blanks on miss."""
+    if not GEO_RESOLVE or lat is None or lon is None:
+        return "", None, None, None
+    try:
+        r = subprocess.run([GEO_RESOLVE, "%.6f" % lat, "%.6f" % lon],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            p = (r.stdout.rstrip("\n").split("\t") + ["", "", "", ""])[:4]
+            return p[0], (p[1] or None), (p[2] or None), (p[3] or None)
+    except Exception:
+        pass
+    return "", None, None, None
 
 def parse_coord(s):
     s = re.sub(r'\(.*?\)', '', str(s)).upper()
@@ -1689,7 +1862,7 @@ def filename_date(media):
     if m: return to_iso(m.group(1))
     return None
 
-def write_xmp(media, date_iso, lat, lon, city, state, country):
+def write_xmp(media, date_iso, lat, lon, city, state, country, landmark=""):
     fields = []
     if date_iso:
         fields.append("   <exif:DateTimeOriginal>%s</exif:DateTimeOriginal>" % escape(date_iso))
@@ -1698,9 +1871,10 @@ def write_xmp(media, date_iso, lat, lon, city, state, country):
     if lat is not None and lon is not None:
         fields.append("   <exif:GPSLatitude>%.7f</exif:GPSLatitude>" % lat)
         fields.append("   <exif:GPSLongitude>%.7f</exif:GPSLongitude>" % lon)
-    if city:    fields.append("   <photoshop:City>%s</photoshop:City>" % escape(str(city)))
-    if state:   fields.append("   <photoshop:State>%s</photoshop:State>" % escape(str(state)))
-    if country: fields.append("   <photoshop:Country>%s</photoshop:Country>" % escape(str(country)))
+    if city:     fields.append("   <photoshop:City>%s</photoshop:City>" % escape(str(city)))
+    if state:    fields.append("   <photoshop:State>%s</photoshop:State>" % escape(str(state)))
+    if country:  fields.append("   <photoshop:Country>%s</photoshop:Country>" % escape(str(country)))
+    if landmark: fields.append("   <ss:Landmark>%s</ss:Landmark>" % escape(str(landmark)))
 
     doc = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Screensaver-Police 1.0">\n'
@@ -1708,7 +1882,8 @@ def write_xmp(media, date_iso, lat, lon, city, state, country):
            '  <rdf:Description rdf:about=""\n'
            '   xmlns:exif="http://ns.adobe.com/exif/1.0/"\n'
            '   xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
-           '   xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">\n'
+           '   xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"\n'
+           '   xmlns:ss="https://screensaver.local/ns/1.0/">\n'
            + "\n".join(fields) + ("\n" if fields else "") +
            '  </rdf:Description>\n'
            ' </rdf:RDF>\n'
@@ -1743,6 +1918,13 @@ for e in data:
     state   = e.get("GeolocationRegion")  or e.get("State") or e.get("Province-State") or ""
     country = e.get("GeolocationCountry") or e.get("Country") or ""
 
+    # Offline GeoNames enrichment: always take the landmark; fill any admin
+    # field exiftool left blank (exiftool's geolocation stays primary).
+    landmark, gcity, gstate, gcountry = resolve_geo(lat, lon)
+    if not city    and gcity:    city = gcity
+    if not state   and gstate:   state = gstate
+    if not country and gcountry: country = gcountry
+
     txt = find_txt(media)
     if txt:
         td, tla, tlo, tloc = parse_txt(txt)
@@ -1766,7 +1948,7 @@ for e in data:
         lat = lon = None
 
     try:
-        write_xmp(media, date_iso, lat, lon, city, state, country)
+        write_xmp(media, date_iso, lat, lon, city, state, country, landmark)
     except Exception as ex:
         sys.stderr.write("xmp-police: failed on %s: %s\n" % (media, ex))
 PY
@@ -2018,10 +2200,18 @@ SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$SS_CONF" 2>/dev/null || { echo "Screensaver: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 # --- Self-healing: recreate any folder that was deleted ----------------------
-mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$OPT_DIR" "$FONT_DIR"
+mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$MAP_DIR/geo" "$OPT_DIR" "$FONT_DIR"
 
 command -v exiftool >/dev/null 2>&1 || \
     echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
+
+# --- Build the offline place DB once, in the background, if it's missing -----
+#     (only when GEONAMES_COUNTRIES is set; otherwise allCountries is large and
+#     better triggered manually via config/build-geodb.sh).
+if [ -n "${GEONAMES_COUNTRIES:-}" ] && [ ! -s "${GEODB:-/nonexistent}" ] \
+   && command -v unzip >/dev/null 2>&1; then
+    ( "$CFG_DIR/build-geodb.sh" >/dev/null 2>&1 & )
+fi
 
 MUSIC_PID=""
 POLICE_PID=""
@@ -2281,7 +2471,17 @@ Categories=Utility;
 EOF
 
 # =============================================================================
-# 10. Done
+# 10. Offline place database (build now if possible)
+# =============================================================================
+if command -v unzip >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+    echo "▶ Building offline GeoNames place database (one-time)..."
+    "$CFG/build-geodb.sh" || echo "⚠ Place DB build failed — you can re-run: $CFG/build-geodb.sh"
+else
+    echo "⚠ Skipping place DB build (need curl + unzip). Run later: $CFG/build-geodb.sh"
+fi
+
+# =============================================================================
+# 11. Done
 # =============================================================================
 echo ""
 echo "✅ Migration and Deployment finished!"
@@ -2290,6 +2490,8 @@ echo "   App Code   : $APP_DIR"
 echo "   Config     : $CFG/screensaver.conf  (edit this to change any setting)"
 echo "   Media      : $MEDIA_DIR"
 echo "   Caches     : $MAP_DIR & $OPT_DIR"
+echo "   Place DB   : $GEODB  (offline; rebuild with $CFG/build-geodb.sh)"
+echo "                Place data © GeoNames, CC-BY 4.0 (https://www.geonames.org)"
 if [ "${#MISSING[@]}" -gt 0 ]; then
     echo ""
     echo "⚠ Reminder: still missing -> ${MISSING[*]}"
