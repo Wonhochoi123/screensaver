@@ -50,7 +50,7 @@ export VID_RESCAN_SECS=300     # how often vid-daemon rescans Media/ for new vid
 # network. GEONAMES_COUNTRIES is a space-separated list of ISO country codes to
 # index (small, fast); leave it EMPTY to index the whole planet (~390MB
 # download, larger DB). Data © GeoNames, licensed CC-BY 4.0.
-export GEONAMES_COUNTRIES='US CA'
+export GEONAMES_COUNTRIES=''
 export GEODB='$MAP_DIR/geo/geonames.sqlite'
 
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
@@ -887,6 +887,67 @@ mp.register_script_message("handle-left-click", function()
     end
 end)
 
+-- UTF-8-aware split into glyphs (mpv's Lua ships no utf8 library), so worldwide
+-- landmark names with accents / non-Latin scripts animate one character at a time.
+local function utf8_split(s)
+    local t = {}
+    local i, len = 1, #s
+    while i <= len do
+        local b = s:byte(i)
+        local n = 1
+        if     b >= 0xF0 then n = 4
+        elseif b >= 0xE0 then n = 3
+        elseif b >= 0xC0 then n = 2 end
+        t[#t + 1] = s:sub(i, i + n - 1)
+        i = i + n
+    end
+    return t
+end
+
+-- Animated landmark reveal, mirroring the title cards: each glyph fades in at a
+-- random moment and settles at ~0.75 opacity (alpha &H40&). Driven by timers so
+-- it animates reliably on the live OSD overlay (which has no event clock).
+math.randomseed(os.time())
+local LM_FINAL_ALPHA = 0x40
+local lm_gen = 0
+
+local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
+    lm_gen = lm_gen + 1
+    local gen = lm_gen
+    local glyphs = utf8_split(text)
+    local n = #glyphs
+    local header = string.format(
+        "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}",
+        cx, by, fs, fsp)
+    local FADE, last = 0.55, 0
+    local start_t = {}
+    for i = 1, n do
+        local st = math.random() * 0.9          -- spread reveals over 0..0.9s
+        start_t[i] = st
+        if st > last then last = st end
+    end
+    local total = last + FADE
+    local t0 = mp.get_time()
+    landmark_ov.res_x = win_w
+    landmark_ov.res_y = win_h
+    local function frame()
+        if gen ~= lm_gen then return end
+        local el = mp.get_time() - t0
+        local parts = { header }
+        for i = 1, n do
+            local st, a = start_t[i], nil
+            if el <= st then a = 0xFF
+            elseif el >= st + FADE then a = LM_FINAL_ALPHA
+            else a = math.floor(0xFF + (LM_FINAL_ALPHA - 0xFF) * ((el - st) / FADE) + 0.5) end
+            parts[#parts + 1] = string.format("{\\alpha&H%02X&}%s", a, glyphs[i])
+        end
+        landmark_ov.data = table.concat(parts)
+        landmark_ov:update()
+        if el < total then mp.add_timeout(0.033, frame) end
+    end
+    frame()
+end
+
 mp.register_event("file-loaded", function()
     local path = mp.get_property("path")
     if not path then return end
@@ -901,6 +962,7 @@ mp.register_event("file-loaded", function()
 
     clear_hud_osd()
     ov:remove()
+    lm_gen = lm_gen + 1   -- cancel any in-flight landmark animation
     landmark_ov:remove()
     seq = seq + 1
     local my_seq = seq
@@ -963,17 +1025,15 @@ mp.register_event("file-loaded", function()
                 ov:update()
             end
 
-            -- Bottom-center: the landmark / headline, bigger with wide spacing.
-            landmark_ov.res_x = L.win_w
-            landmark_ov.res_y = L.win_h
+            -- Bottom-center: the landmark / headline, bigger with wide spacing,
+            -- revealed glyph-by-glyph like the title cards.
             if landmark and landmark ~= "" then
                 local fs  = math.floor(L.win_h * 0.052)
                 local fsp = math.floor(L.win_h * 0.012 + 0.5)
-                landmark_ov.data = string.format(
-                    "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
-                    math.floor(L.win_w / 2), L.win_h - m_bottom, fs, fsp, landmark:upper())
-                landmark_ov:update()
+                animate_landmark(landmark:upper(), math.floor(L.win_w / 2),
+                    L.win_h - m_bottom, fs, fsp, L.win_w, L.win_h)
             else
+                lm_gen = lm_gen + 1
                 landmark_ov:remove()
             end
         end
@@ -1028,14 +1088,17 @@ local music_gen   = 0     -- bumped on each new toast; cancels stale callbacks
 
 local function music_render(text, alpha)
     local w, h = refresh_display_size()
-    local pad = math.floor(h * 0.028)
-    local fs  = math.floor(h * 0.017 + 0.5)
-    local fsp = math.floor(h * 0.002 + 0.5)
+    -- Match the top-right date/location: same font size + spacing, mirrored
+    -- corner inset, so the two top corners are visually symmetric.
+    local px  = math.floor(w * 0.025)
+    local py  = math.floor(h * 0.04)
+    local fs  = math.floor(h * 0.030)
+    local fsp = math.floor(h * 0.003 + 0.5)
     music_ov.res_x = w
     music_ov.res_y = h
     music_ov.data = string.format(
         "{\\an7\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H%02X&}\xe2\x99\xaa  %s",
-        pad, pad, fs, fsp, alpha, text)
+        px, py, fs, fsp, alpha, text)
     music_ov:update()
 end
 
@@ -2324,10 +2387,10 @@ command -v exiftool >/dev/null 2>&1 || \
     echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
 # --- Build the offline place DB once, in the background, if it's missing -----
-#     (only when GEONAMES_COUNTRIES is set; otherwise allCountries is large and
-#     better triggered manually via config/build-geodb.sh).
-if [ -n "${GEONAMES_COUNTRIES:-}" ] && [ ! -s "${GEODB:-/nonexistent}" ] \
-   && command -v unzip >/dev/null 2>&1; then
+#     Runs whether GEONAMES_COUNTRIES lists specific countries or is empty
+#     (empty = whole planet, ~390MB download on first build). Backgrounded so
+#     the slideshow starts immediately; landmarks light up once it finishes.
+if [ ! -s "${GEODB:-/nonexistent}" ] && command -v unzip >/dev/null 2>&1; then
     ( "$CFG_DIR/build-geodb.sh" >/dev/null 2>&1 & )
 fi
 
