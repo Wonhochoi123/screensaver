@@ -267,6 +267,7 @@ local OPT_DIR    = env("OPT_DIR",    DATA_DIR .. "/Optimized_Vids")
 local MAP_DIR    = env("MAP_DIR",    DATA_DIR .. "/Maps")
 
 local builder    = CFG_DIR .. "/build-minimap.sh"
+local landmark_tool = CFG_DIR .. "/nearby-landmark.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
 
 local ZOOMS        = {11, 14, 16}
@@ -909,24 +910,48 @@ mp.register_event("file-loaded", function()
         cur = { seq = my_seq, path = path, orig = orig_path, lat = m.lat, lon = m.lon, mdir = m.mdir, zidx = 1, w = w, h = h, auto = true }
 
         local date     = m.date
-        local location = m.location or ""
+        local admin    = m.location or ""    -- city / state / country (XMP or Nominatim)
+        local landmark = ""                  -- nearby prominent feature (Wikipedia)
         local mdir     = m.mdir
 
-        local loc_cache
-        if m.lat and m.lon and location == "" then
-            loc_cache = mdir .. string.format("/place_%.4f_%.4f.txt", m.lat, m.lon)
-            if file_exists(loc_cache) then
-                local lf = io.open(loc_cache, "r")
-                if lf then location = (lf:read("*a") or ""):gsub("[\r\n]+", ""); lf:close() end
+        -- Per-location caches (~11 m). place_* = admin string; mark_* = landmark
+        -- ("-" means "looked it up, nothing notable" so we don't re-query).
+        local place_cache, mark_cache
+        local mark_done = false
+        if m.lat and m.lon then
+            place_cache = mdir .. string.format("/place_%.4f_%.4f.txt", m.lat, m.lon)
+            mark_cache  = mdir .. string.format("/mark_%.4f_%.4f.txt",  m.lat, m.lon)
+            if admin == "" and file_exists(place_cache) then
+                local lf = io.open(place_cache, "r")
+                if lf then admin = (lf:read("*a") or ""):gsub("[\r\n]+", ""); lf:close() end
             end
+            if file_exists(mark_cache) then
+                local mf = io.open(mark_cache, "r")
+                if mf then
+                    local raw = (mf:read("*a") or ""):gsub("[\r\n]+", ""); mf:close()
+                    mark_done = true
+                    if raw ~= "-" then landmark = raw end
+                end
+            end
+        end
+
+        local function compose()
+            if landmark == "" then return admin end
+            if admin == "" then return landmark end
+            for part in admin:gmatch("[^,]+") do
+                local p = part:gsub("^%s+", ""):gsub("%s+$", "")
+                if p:lower() == landmark:lower() then return admin end
+            end
+            return landmark .. ", " .. admin
         end
 
         local function draw_text()
             local d = compact_date(date)
+            local loc = compose()
             local text = ""
-            if d and location ~= "" then text = d .. "  |  " .. location
+            if d and loc ~= "" then text = d .. "  |  " .. loc
             elseif d then text = d
-            elseif location ~= "" then text = location end
+            elseif loc ~= "" then text = loc end
 
             if text == "" then ov:remove(); return end
 
@@ -944,7 +969,8 @@ mp.register_event("file-loaded", function()
         end
         draw_text()
 
-        if m.lat and m.lon and location == "" and loc_cache then
+        -- City / state / country via Nominatim — only when we still have none.
+        if m.lat and m.lon and admin == "" and place_cache then
             mp.command_native_async({
                 name = "subprocess", capture_stdout = true,
                 args = {
@@ -960,7 +986,7 @@ mp.register_event("file-loaded", function()
                     local j = utils.parse_json(rres.stdout)
                     if j and j.address then
                         local a = j.address
-                        local landmark = nil
+                        local landmark2 = nil
                         local poi_keys = {
                             "historic","tourism","national_park","park","nature_reserve",
                             "castle","palace","monument","ruins","museum","attraction",
@@ -969,20 +995,43 @@ mp.register_event("file-loaded", function()
                             "natural","leisure","bridge","building","aeroway","amenity","man_made"
                         }
                         for _, k in ipairs(poi_keys) do
-                            if a[k] and type(a[k]) == "string" then landmark = a[k] break end
+                            if a[k] and type(a[k]) == "string" then landmark2 = a[k] break end
                         end
                         local city  = a.city or a.town or a.village or a.hamlet
                         local state = abbr_subdiv(a.state or a.province, a["ISO3166-2-lvl4"] or a["ISO3166-2-lvl3"])
                         local ctry  = abbr_country(a.country, a.country_code)
-                        landmark, city, state, ctry = niagara_fix(landmark, city, state, ctry)
-                        local loc = join_loc(landmark, city, state, ctry)
+                        landmark2, city, state, ctry = niagara_fix(landmark2, city, state, ctry)
+                        local loc = join_loc(landmark2, city, state, ctry)
                         if loc ~= "" then
-                            location = loc
+                            admin = loc
                             os.execute("mkdir -p '" .. mdir:gsub("'", "'\\''") .. "'")
-                            local cf = io.open(loc_cache, "w")
-                            if cf then cf:write(location); cf:close() end
+                            local cf = io.open(place_cache, "w")
+                            if cf then cf:write(admin); cf:close() end
                             draw_text()
                         end
+                    end
+                end
+            end)
+        end
+
+        -- Nearby prominent landmark via the Wikipedia helper — runs for any
+        -- geotagged photo we haven't resolved yet, and prepends to the label.
+        if m.lat and m.lon and not mark_done and mark_cache then
+            mp.command_native_async({
+                name = "subprocess", capture_stdout = true, capture_stderr = true,
+                args = { landmark_tool, string.format("%.6f", m.lat), string.format("%.6f", m.lon) },
+            }, function(lok, lres)
+                if my_seq ~= seq then return end
+                -- Only cache on success (status 0); a network failure should be
+                -- retried later, not remembered as "nothing here".
+                if lok and lres and lres.status == 0 then
+                    local lm = (lres.stdout or ""):gsub("[\r\n]+", ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    os.execute("mkdir -p '" .. mdir:gsub("'", "'\\''") .. "'")
+                    local cf = io.open(mark_cache, "w")
+                    if cf then cf:write(lm ~= "" and lm or "-"); cf:close() end
+                    if lm ~= "" then
+                        landmark = lm
+                        draw_text()
                     end
                 end
             end)
@@ -1534,6 +1583,129 @@ else
 fi
 EOF
 chmod +x "$CFG/build-title.sh"
+
+
+
+# =============================================================================
+# 3c. nearby-landmark.sh  (prominent nearby landmark via Wikipedia geosearch)
+# =============================================================================
+echo "▶ Writing nearby-landmark.sh..."
+cat > "$CFG/nearby-landmark.sh" << 'EOF'
+#!/bin/bash
+# nearby-landmark.sh LAT LON
+#   exit 0 + name on stdout  -> found a landmark
+#   exit 0 + no stdout       -> queried OK, nothing notable (caller may cache)
+#   exit 3                   -> lookup failed (network/parse); caller retries
+# "Has a Wikipedia article" is the prominence filter; the article's short
+# description gives the feature type, so we use category-aware search radii
+# (a mountain is nameable from 35km; a museum only from a few hundred metres)
+# and skip administrative articles (towns, counties, etc.).
+set -u
+LAT="${1:-}"; LON="${2:-}"
+[ -z "$LAT" ] || [ -z "$LON" ] && exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+
+python3 - "$LAT" "$LON" <<'PY'
+import sys, json, math, re
+
+def pick(lat, lon, pages):
+    CATS = [
+        (["volcano","stratovolcano","caldera"],            9, 40),
+        (["mountain","peak","summit","massif","sierra","cordillera","mountain range"], 8, 35),
+        (["waterfall","cascade"],                          8, 15),
+        (["national park","state park","provincial park","national monument",
+          "national forest","wilderness","nature reserve","protected area",
+          "national recreation area","regional park"],     7, 30),
+        (["glacier","icefield","icecap"],                  7, 25),
+        (["canyon","gorge","ravine"],                      7, 25),
+        (["observation tower","tower","skyscraper"],       7,  6),
+        (["castle","palace","fortress","citadel","fort","chateau","château"], 6, 6),
+        (["lake","reservoir","lagoon"],                    6, 20),
+        (["bay","fjord","cove","sound","strait","gulf","harbour","harbor"], 6, 25),
+        (["island","archipelago","atoll","islet"],         6, 30),
+        (["cliff","butte","mesa","rock formation","natural arch","arch","cave",
+          "cavern","geyser","hot spring","spring","cape","headland","peninsula",
+          "beach","dune","valley","plateau","crater","ridge","pass","hill"], 6, 25),
+        (["lighthouse"],                                   6, 10),
+        (["dam"],                                          6, 10),
+        (["bridge","viaduct","aqueduct"],                  6,  6),
+        (["theme park","amusement park"],                  5,  6),
+        (["monument","memorial","statue","obelisk"],       5,  5),
+        (["cathedral","basilica","minster","temple","shrine","mosque",
+          "synagogue","monastery","abbey","pagoda"],       5,  5),
+        (["stadium","arena","amphitheatre","amphitheater"],4,  4),
+        (["museum","gallery"],                             4,  3),
+    ]
+    EXCLUDE = ["city","town","village","municipality","census-designated","neighborhood",
+               "neighbourhood","suburb","community","human settlement","county","district",
+               "region","commune","hamlet","borough","ward","metropolitan","unincorporated",
+               "locality","prefecture","province","capital","airport","railway","station",
+               "road","highway","street","school","university","college","hospital","company"]
+
+    def has(word, text):
+        return re.search(r"\b" + re.escape(word) + r"s?\b", text) is not None
+
+    def hav(la1, lo1, la2, lo2):
+        R = 6371.0
+        p1, p2 = math.radians(la1), math.radians(la2)
+        dphi = math.radians(la2 - la1); dl = math.radians(lo2 - lo1)
+        x = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+        return 2 * R * math.asin(math.sqrt(x))
+
+    best = None
+    for p in pages.values():
+        title = p.get("title", "")
+        co = (p.get("coordinates") or [{}])[0]
+        clat, clon = co.get("lat"), co.get("lon")
+        if clat is None or clon is None:
+            continue
+        desc = ((p.get("pageprops") or {}).get("wikibase-shortdesc") or "").lower()
+        if not desc:
+            continue
+        if any(has(x, desc) for x in EXCLUDE):
+            continue
+        dist = hav(lat, lon, clat, clon)
+        for kws, prio, maxkm in CATS:
+            if any(has(k, desc) for k in kws):
+                if dist <= maxkm:
+                    score = (prio, -dist)
+                    if best is None or score > best[0]:
+                        best = (score, title)
+                break
+    if not best:
+        return ""
+    return re.sub(r"\s*\([^()]*\)\s*$", "", best[1]).strip()
+
+def main():
+    import urllib.request, urllib.parse
+    try:
+        lat, lon = float(sys.argv[1]), float(sys.argv[2])
+    except Exception:
+        sys.exit(0)
+    params = {
+        "action":"query","format":"json","generator":"geosearch",
+        "ggscoord":f"{lat}|{lon}","ggsradius":"20000","ggslimit":"30",
+        "prop":"coordinates|pageprops","ppprop":"wikibase-shortdesc","coprop":"",
+    }
+    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent":"Screensaver-App/1.0 (personal photo screensaver)"})
+    try:
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.load(r)
+    except Exception:
+        sys.exit(3)
+    pages = (data.get("query") or {}).get("pages") or {}
+    name = pick(lat, lon, pages)
+    if name:
+        print(name)
+
+if __name__ == "__main__":
+    main()
+PY
+EOF
+chmod +x "$CFG/nearby-landmark.sh"
+
+
 
 # =============================================================================
 # 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
