@@ -55,7 +55,7 @@ export GEODB='$MAP_DIR/geo/geonames.sqlite'
 # Bump GEODB_VERSION whenever the DB's contents change (country set or the
 # landmark feature-code table). On the next launch a version mismatch forces a
 # one-time rebuild so the change actually takes effect.
-export GEODB_VERSION='4'
+export GEODB_VERSION='5'
 
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
 # config goes. Everything deeper is resolved by sourcing the file we write.
@@ -1733,18 +1733,31 @@ command -v unzip >/dev/null 2>&1 || { echo "build-geodb: unzip not found." >&2; 
 
 BASE="https://download.geonames.org/export/dump"
 WORK="$MAP_DIR/geo"; mkdir -p "$WORK"
+CACHE="$WORK/cache"; mkdir -p "$CACHE"     # persistent: raw downloads live here
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
+# Download to the persistent cache only when the file is missing. This is what
+# stops the ~390MB GeoNames dump from being re-fetched every time the landmark
+# scoring changes — a rebuild then just re-runs the local processing below.
+# Force a fresh pull anytime with:  REFRESH=1 build-geodb.sh
+fetch_cached() {   # $1 = remote filename, $2 = local cache path
+    if [ "${REFRESH:-0}" != 1 ] && [ -s "$2" ]; then
+        echo "  ✓ using cached $(basename "$2")"
+        return 0
+    fi
+    echo "▶ Downloading $1 ..."
+    curl -fsSL -o "$2.part" "$BASE/$1" && mv -f "$2.part" "$2"
+}
+
 echo "▶ Fetching GeoNames support tables..."
-curl -fsSL -o "$TMP/admin1.txt"  "$BASE/admin1CodesASCII.txt" || { echo "download failed (admin1)"; exit 1; }
-curl -fsSL -o "$TMP/country.txt" "$BASE/countryInfo.txt"      || { echo "download failed (countryInfo)"; exit 1; }
+fetch_cached "admin1CodesASCII.txt" "$CACHE/admin1.txt"  || { echo "download failed (admin1)"; exit 1; }
+fetch_cached "countryInfo.txt"      "$CACHE/country.txt" || { echo "download failed (countryInfo)"; exit 1; }
 
 DUMPS=()
 if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
     for cc in $GEONAMES_COUNTRIES; do
-        echo "▶ Fetching ${cc}.zip..."
-        if curl -fsSL -o "$TMP/$cc.zip" "$BASE/$cc.zip"; then
-            if (cd "$TMP" && unzip -oq "$cc.zip" "$cc.txt"); then
+        if fetch_cached "$cc.zip" "$CACHE/$cc.zip"; then
+            if (cd "$TMP" && unzip -oq "$CACHE/$cc.zip" "$cc.txt"); then
                 DUMPS+=("$TMP/$cc.txt")
             else
                 echo "⚠ could not unzip $cc.zip"
@@ -1754,43 +1767,40 @@ if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
         fi
     done
 else
-    echo "▶ Fetching allCountries.zip (whole planet, ~390MB)..."
-    if curl -fsSL -o "$TMP/all.zip" "$BASE/allCountries.zip" \
-        && (cd "$TMP" && unzip -oq all.zip allCountries.txt); then
+    echo "▶ Whole-planet dump (allCountries.zip, ~390MB; cached after first time)..."
+    if fetch_cached "allCountries.zip" "$CACHE/allCountries.zip" \
+        && (cd "$TMP" && unzip -oq "$CACHE/allCountries.zip" allCountries.txt); then
         DUMPS+=("$TMP/allCountries.txt")
     fi
 fi
-[ "${#DUMPS[@]}" -gt 0 ] || { echo "build-geodb: no dumps downloaded — aborting."; exit 1; }
+[ "${#DUMPS[@]}" -gt 0 ] || { echo "build-geodb: no dumps available — aborting."; exit 1; }
 
 echo "▶ Building offline place database -> $GEODB ..."
-python3 - "$GEODB" "$TMP/country.txt" "$TMP/admin1.txt" "${DUMPS[@]}" <<'PY'
+python3 - "$GEODB" "$CACHE/country.txt" "$CACHE/admin1.txt" "${DUMPS[@]}" <<'PY'
 import sys, sqlite3, os
 # GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
 # max_km = how far away the feature can still be the photo's "landmark".
 LANDMARK = {
-    # Weights set a clear hierarchy so that when several features are about
-    # equally close, the specific iconic destination wins over a sprawling park
-    # or lake. maxkm is just the hard cutoff; the score uses ABSOLUTE distance.
-    # --- iconic cultural / historic (top priority) ---
+    # --- iconic cultural / historic: small radius so PROXIMITY decides. ---
     "PAL":(11,3),"CSTL":(11,3),                    # palace (Gyeongbokgung), castle
     "PYR":(11,5),"PYRS":(11,5),                    # pyramid(s)
     "ANS":(10,3),"HSTS":(10,3),"RUIN":(10,3),      # ancient/historic site, ruins
-    "MNMT":(10,3),"MNMTS":(10,3),                  # monument(s)
-    "TMPL":(10,2),"SHRN":(10,2),"PGDA":(10,2),     # temple, shrine, pagoda
-    "MSTY":(10,3),"CTHL":(10,3),"MSQE":(10,2),     # monastery, cathedral, mosque
-    "FT":(10,3),"GATE":(10,2),"WALLA":(10,3),      # fort, gate, ancient wall
-    "AMTH":(10,3),"TOWR":(10,3),                   # amphitheatre, tower (e.g. Lotte World Tower)
-    # --- attractions / civic (beat parks & natural features) ---
-    "MUS":(9,2),"OPRA":(9,2),"OBS":(9,3),          # museum (e.g. National Museum), opera, observatory
-    "STDM":(9,3),"ZOO":(9,3),"GDN":(8,2),          # stadium, zoo, garden
-    "AMUS":(9,3),"LTHSE":(9,4),"BTL":(9,4),        # amusement park, lighthouse, battlefield
-    # --- parks / protected areas (lower: lose to any nearby built landmark) ---
-    "PRK":(5,12),"RESN":(5,12),"RESW":(5,12),
-    # --- natural features (lower weight; far centroids limit them anyway) ---
-    "VLC":(9,30),"MT":(7,15),"PK":(8,18),"PKS":(8,18),
-    "FLLS":(8,8),"GLCR":(8,15),"GYSR":(8,8),
-    "CNYN":(8,18),"CRTR":(8,15),"VAL":(6,12),"DUNE":(6,10),"DSRT":(7,30),
-    "LK":(6,12),"LKS":(6,12),"BAY":(6,12),
+    "MNMT":(10,2.5),"MNMTS":(10,2.5),              # monument(s)
+    "TMPL":(9,2),"SHRN":(8,2),"PGDA":(9,2),        # temple, shrine, pagoda
+    "MSTY":(9,3),"CTHL":(9,3),"MSQE":(7,2),        # monastery, cathedral, mosque
+    "FT":(9,3),"GATE":(8,1.5),"WALLA":(8,3),       # fort, gate, ancient wall
+    "AMTH":(9,3),"TOWR":(8,3),                     # amphitheatre, tower (callsigns filtered)
+    # --- attractions / civic (tight: you're there) ---
+    "MUS":(7,2),"OPRA":(8,2),"OBS":(7,3),          # museum, opera, observatory
+    "STDM":(7,2.5),"ZOO":(7,2.5),"GDN":(6,2),      # stadium, zoo, garden
+    "AMUS":(8,3),"LTHSE":(7,4),"BTL":(8,4),        # amusement park, lighthouse, battlefield
+    # --- parks / protected areas (span a wide area) ---
+    "PRK":(7,12),"RESN":(5,12),"RESW":(5,12),
+    # --- prominent natural features (can be "at" them from farther off) ---
+    "VLC":(11,30),"MT":(8,15),"PK":(9,18),"PKS":(9,18),
+    "FLLS":(9,8),"GLCR":(8,15),"GYSR":(8,8),
+    "CNYN":(9,18),"CRTR":(8,15),"VAL":(6,12),"DUNE":(6,10),"DSRT":(7,30),
+    "LK":(8,12),"LKS":(8,12),"BAY":(6,12),
     "CLF":(6,8),"CAPE":(6,10),"ISL":(7,20),"ISLS":(7,20),
     "BCH":(7,6),"SPNG":(5,5),
 }
@@ -1898,14 +1908,12 @@ def win(r):
     dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: ABSOLUTE distance penalty (km), not normalized by radius — so a
-#     wide-radius park/lake gets no unfair advantage over a tight-radius museum
-#     or tower you're actually standing at. Weight breaks near-ties toward the
-#     iconic destination. maxkm is only the hard cutoff. A minimum score is
-#     required, so when nothing relevant is close we show NO landmark. ---
+# --- landmark: score within each feature's own radius, with a minimum score so
+#     that when nothing relevant is close we show NO landmark rather than a
+#     far-fetched guess. (Interim heuristic; the real prominence fix comes in the
+#     OSM/Wikidata rework.) ---
 la0, la1, lo0, lo1 = win(35)
 MIN_SCORE = 4.0
-DIST_K    = 2.0          # points lost per km of distance
 best = None
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
         "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
@@ -1913,7 +1921,7 @@ for name, flat, flon, fcode, elev, w, mk in cur.execute(
     d = hav(lat, lon, flat, flon)
     if d > mk:
         continue
-    s = w - DIST_K * d
+    s = w - 7.0 * (d / mk)
     if fcode in ("PK", "MT", "VLC", "CNYN", "CRTR") and elev:
         s += min(elev / 2000.0, 2.0)
     if best is None or s > best[0]:
