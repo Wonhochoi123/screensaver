@@ -290,6 +290,7 @@ pause_ov.res_x = 1920
 pause_ov.res_y = 1080
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
+local music_ov     = mp.create_osd_overlay("ass-events")
 
 local seq       = 0
 local prewarmed = {}
@@ -990,9 +991,66 @@ mp.register_event("file-loaded", function()
     end)
 end)
 
+local function update_music_display()
+    mp.command_native_async({
+        name = "subprocess", capture_stdout = true,
+        args = { "/bin/sh", "-c",
+            "printf '%s\\n' '{\"command\":[\"get_property\",\"metadata\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
+    }, function(ok, res)
+        if ok and res and res.stdout and res.stdout ~= "" then
+            local j = utils.parse_json(res.stdout)
+            if j and j.data and j.error == "success" then
+                local meta = j.data
+                local title  = meta.title  or meta.Title  or meta.TITLE
+                local artist = meta.artist or meta.Artist or meta.ARTIST
+                if not title then
+                    mp.command_native_async({
+                        name = "subprocess", capture_stdout = true,
+                        args = { "/bin/sh", "-c",
+                            "printf '%s\\n' '{\"command\":[\"get_property\",\"media-title\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
+                    }, function(ok2, res2)
+                        if ok2 and res2 and res2.stdout and res2.stdout ~= "" then
+                            local j2 = utils.parse_json(res2.stdout)
+                            if j2 and j2.data and j2.error == "success" then
+                                local t = tostring(j2.data):gsub("%.[^%.]+$", ""):sub(1, 60)
+                                local w, h = refresh_display_size()
+                                local pad = math.floor(h * 0.025)
+                                local fs  = math.floor(h * 0.022 + 0.5)
+                                music_ov.data = string.format(
+                                    "{\\an7\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad2\\1c&HFFFFFF&}\xe2\x99\xaa  %s",
+                                    pad, pad, fs, t)
+                                music_ov:update()
+                                return
+                            end
+                        end
+                        music_ov:remove()
+                    end)
+                    return
+                end
+                local line = title
+                if artist and artist ~= "" then line = line .. "  \xc2\xb7  " .. artist end
+                line = line:sub(1, 70)
+                local w, h = refresh_display_size()
+                local pad = math.floor(h * 0.025)
+                local fs  = math.floor(h * 0.022 + 0.5)
+                music_ov.data = string.format(
+                    "{\\an7\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad2\\1c&HFFFFFF&}\xe2\x99\xaa  %s",
+                    pad, pad, fs, line)
+                music_ov:update()
+                return
+            end
+        end
+        music_ov:remove()
+    end)
+end
+mp.add_periodic_timer(10, update_music_display)
+mp.register_event("start-file", update_music_display)
+update_music_display()
+
 mp.register_event("shutdown", function()
     ov:remove()
     pause_ov:remove()
+    music_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
