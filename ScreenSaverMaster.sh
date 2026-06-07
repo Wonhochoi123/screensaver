@@ -52,6 +52,10 @@ export VID_RESCAN_SECS=300     # how often vid-daemon rescans Media/ for new vid
 # download, larger DB). Data © GeoNames, licensed CC-BY 4.0.
 export GEONAMES_COUNTRIES=''
 export GEODB='$MAP_DIR/geo/geonames.sqlite'
+# Bump GEODB_VERSION whenever the DB's contents change (country set or the
+# landmark feature-code table). On the next launch a version mismatch forces a
+# one-time rebuild so the change actually takes effect.
+export GEODB_VERSION='2'
 
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
 # config goes. Everything deeper is resolved by sourcing the file we write.
@@ -90,6 +94,7 @@ export MIN_LOAD_SECS="$MIN_LOAD_SECS"
 export VID_RESCAN_SECS="$VID_RESCAN_SECS"
 export GEONAMES_COUNTRIES="$GEONAMES_COUNTRIES"
 export GEODB="$GEODB"
+export GEODB_VERSION="$GEODB_VERSION"
 CONF
 
 # Run the installer on its own config — this resolves every level, top-down.
@@ -292,6 +297,13 @@ local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
 local landmark_ov  = mp.create_osd_overlay("ass-events")
+
+-- Now-playing marquee state (forward-declared so the click handler, defined
+-- earlier in the file, can reference them as upvalues).
+local MUSIC_WIN    = 10        -- glyphs visible at once before it scrolls
+local music_shown  = nil       -- full track string currently displayed
+local music_glyphs = nil       -- its UTF-8 glyphs (with trailing gap if scrolling)
+local poll_music               -- assigned later
 
 local seq       = 0
 local prewarmed = {}
@@ -856,12 +868,29 @@ mp.register_script_message("hud-zoom-out", function()
 end)
 
 mp.register_script_message("handle-left-click", function()
+    local mouse = mp.get_property_native("mouse-pos")
+
+    -- Click the now-playing marquee (top-left) to skip to the next track.
+    -- Checked first so it works regardless of whether the photo has GPS.
+    if mouse and music_glyphs then
+        local w, h = refresh_display_size()
+        local px = math.floor(w * 0.025)
+        local py = math.floor(h * 0.04)
+        local fs = math.floor(h * 0.030)
+        if mouse.x >= px - fs and mouse.x <= px + math.floor(fs * 9.0)
+           and mouse.y >= py - fs and mouse.y <= py + math.floor(fs * 1.6) then
+            mp.commandv("run", "/bin/sh", "-c",
+                "printf '%s\\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+            if poll_music then mp.add_timeout(0.35, poll_music) end
+            return
+        end
+    end
+
     if not (cur.lat and cur.lon) then
         mp.command("script-message ss-toggle-pause")
         return
     end
 
-    local mouse = mp.get_property_native("mouse-pos")
     if not mouse then return end
 
     local L = hud_geom()
@@ -1079,17 +1108,27 @@ mp.register_event("file-loaded", function()
     end)
 end)
 
--- Now-playing toast (top-left). Same title-card style as the rest of the HUD:
--- Montserrat ExtraBold, no outline, no shadow, white. Small and tucked into the
--- corner. It appears ONLY when the track changes, holds a few seconds, then
--- fades out — it is not a permanent label.
-local music_shown = nil   -- text of the track currently/last displayed
-local music_gen   = 0     -- bumped on each new toast; cancels stale callbacks
+-- Now-playing marquee (top-left). Same title-card style as the rest of the HUD:
+-- Montserrat ExtraBold, no outline, no shadow, white. Stays on. Only MUSIC_WIN
+-- glyphs show at once; longer titles scroll. Click it to skip to the next track.
+local music_marq_gen = 0   -- bumped on each new track; cancels the old scroller
+local music_off      = 0   -- current scroll offset (glyph index)
 
-local function music_render(text, alpha)
+local function music_paint()
+    if not music_glyphs then music_ov:remove(); return end
+    local n = #music_glyphs
+    local shown
+    if n <= MUSIC_WIN then
+        shown = table.concat(music_glyphs)
+    else
+        local parts = {}
+        for k = 0, MUSIC_WIN - 1 do
+            parts[#parts + 1] = music_glyphs[((music_off + k) % n) + 1]
+        end
+        shown = table.concat(parts)
+    end
     local w, h = refresh_display_size()
-    -- Match the top-right date/location: same font size + spacing, mirrored
-    -- corner inset, so the two top corners are visually symmetric.
+    -- Mirror the top-right date/location: same font size, spacing, corner inset.
     local px  = math.floor(w * 0.025)
     local py  = math.floor(h * 0.04)
     local fs  = math.floor(h * 0.030)
@@ -1097,40 +1136,36 @@ local function music_render(text, alpha)
     music_ov.res_x = w
     music_ov.res_y = h
     music_ov.data = string.format(
-        "{\\an7\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H%02X&}\xe2\x99\xaa  %s",
-        px, py, fs, fsp, alpha, text)
+        "{\\an7\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}\xe2\x99\xaa  %s",
+        px, py, fs, fsp, shown)
     music_ov:update()
 end
 
-local function music_show(text)
-    music_gen = music_gen + 1
-    local gen = music_gen
-    music_render(text, 0x00)
-    -- Hold ~6s at full opacity, then a short stepped fade to clear.
-    mp.add_timeout(6.0, function()
-        if gen ~= music_gen then return end
-        local steps = {0x30, 0x60, 0x90, 0xC0, 0xF0}
-        local function step(i)
-            if gen ~= music_gen then return end
-            if i > #steps then music_ov:remove(); return end
-            music_render(text, steps[i])
-            mp.add_timeout(0.10, function() step(i + 1) end)
-        end
-        step(1)
-    end)
-end
-
-local function maybe_toast(text)
+local function set_music(text)
     if not text or text == "" then return end
-    text = text:sub(1, 70)
-    if text ~= music_shown then
-        music_shown = text
-        music_show(text)
+    text = text:sub(1, 80)
+    if text == music_shown then return end
+    music_shown = text
+    local g = utf8_split(text)
+    -- Add a trailing gap only when scrolling, so the loop reads as a clean wrap.
+    music_glyphs = (#g > MUSIC_WIN) and utf8_split(text .. "      ") or g
+    music_off = 0
+    music_marq_gen = music_marq_gen + 1
+    local gen = music_marq_gen
+    music_paint()
+    local function tick()
+        if gen ~= music_marq_gen then return end
+        if music_glyphs and #music_glyphs > MUSIC_WIN then
+            music_off = (music_off + 1) % #music_glyphs
+            music_paint()
+        end
+        mp.add_timeout(0.30, tick)
     end
+    mp.add_timeout(0.30, tick)
 end
 
--- Poll the audio player; only re-toast when the track actually changes.
-local function poll_music()
+-- Poll the audio player; only rebuild the marquee when the track changes.
+function poll_music()
     mp.command_native_async({
         name = "subprocess", capture_stdout = true,
         args = { "/bin/sh", "-c",
@@ -1148,7 +1183,7 @@ local function poll_music()
         if title and title ~= "" then
             local line = title
             if artist and artist ~= "" then line = line .. "  \xc2\xb7  " .. artist end
-            maybe_toast(line)
+            set_music(line)
             return
         end
         -- No embedded title tag: fall back to the filename (media-title).
@@ -1160,7 +1195,7 @@ local function poll_music()
             if ok2 and res2 and res2.stdout and res2.stdout ~= "" then
                 local j2 = utils.parse_json(res2.stdout)
                 if j2 and j2.data and j2.error == "success" then
-                    maybe_toast(tostring(j2.data):gsub("%.[^%.]+$", ""))
+                    set_music(tostring(j2.data):gsub("%.[^%.]+$", ""))
                 end
             end
         end)
@@ -1730,12 +1765,34 @@ import sys, sqlite3, os
 # GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
 # max_km = how far away the feature can still be the photo's "landmark".
 LANDMARK = {
-    "VLC":(10,40),"PK":(9,35),"MT":(9,35),"FLLS":(9,15),"GLCR":(8,25),
-    "PRK":(7,30),"RESN":(7,30),"GYSR":(7,15),"TOWR":(7,8),
-    "CSTL":(6,8),"FT":(6,8),"LTHSE":(6,10),"LK":(6,20),"BAY":(6,20),
-    "CLF":(6,15),"ARCH":(6,15),"ISL":(6,30),"BCH":(6,15),
-    "CAPE":(5,15),"MNMT":(5,6),"HSTS":(5,6),"RDGE":(5,20),"SPNG":(5,10),
-    "MUS":(4,4),
+    # --- iconic cultural / historic: you're essentially standing there, so a
+    #     high weight + small radius lets them win over a distant mountain. ---
+    "PAL":(11,8),                                  # palace (e.g. Gyeongbokgung)
+    "CSTL":(11,8),                                 # castle
+    "PYR":(11,12),"PYRS":(11,12),                  # pyramid(s)
+    "ANS":(10,8),"HSTS":(10,8),"RUIN":(10,8),      # ancient/historic site, ruins
+    "MNMT":(10,6),"MNMTS":(10,6),                  # monument(s)
+    "TMPL":(10,6),"SHRN":(9,6),"PGDA":(9,6),       # temple, shrine, pagoda
+    "MSTY":(9,8),"MSQE":(8,6),"CTHL":(8,6),        # monastery, mosque, cathedral
+    "FT":(9,8),"TOWR":(8,8),"GATE":(8,5),          # fort, tower, gate
+    "WALLA":(8,8),"WALL":(7,8),                    # ancient wall / wall
+    "AMTH":(9,8),"ARCH":(7,12),                    # amphitheatre, arch
+    # --- attractions / civic ---
+    "MUS":(7,5),"OPRA":(8,5),"THTR":(6,5),         # museum, opera, theatre
+    "OBS":(7,8),"STDM":(6,5),"ZOO":(6,5),          # observatory, stadium, zoo
+    "GDN":(6,5),"AMUS":(8,8),"SQR":(6,4),          # garden, amusement park, square
+    "LTHSE":(7,12),"BDG":(5,8),                    # lighthouse, bridge
+    "CH":(5,4),"SYG":(5,4),                        # church, synagogue (common)
+    "BTL":(8,10),                                  # battlefield
+    # --- parks / protected areas (visible / spanning a wide area) ---
+    "PRK":(7,30),"RESN":(6,30),"RESW":(6,30),
+    # --- prominent natural features ---
+    "VLC":(10,40),"MT":(9,35),"PK":(9,35),"PKS":(9,35),
+    "FLLS":(9,15),"GLCR":(8,25),"GYSR":(7,15),
+    "CNYN":(8,25),"CRTR":(8,25),"VAL":(6,20),"DUNE":(6,20),"DSRT":(7,40),
+    "LK":(6,20),"LKS":(6,20),"BAY":(6,20),
+    "CLF":(6,15),"CAPE":(5,15),"ISL":(6,30),"ISLS":(6,30),
+    "BCH":(6,15),"RDGE":(5,20),"SPNG":(5,10),
 }
 db, cinfo, admin1, dumps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 
@@ -1798,6 +1855,8 @@ cur.execute("CREATE INDEX ix_feat_lat  ON feature(lat)")
 con.commit(); con.close()
 sys.stderr.write("geodb: %d places, %d landmark features -> %s\n" % (np, nf, db))
 PY
+# Stamp the version so launch.sh knows this DB matches the current schema.
+printf '%s' "${GEODB_VERSION:-1}" > "${GEODB}.version"
 echo "✅ Offline place database ready."
 EOF
 chmod +x "$CFG/build-geodb.sh"
@@ -1921,6 +1980,7 @@ run_pass() {
         if   [ ! -s "$xmp" ];                        then stale=1
         elif [ "$m" -nt "$xmp" ];                    then stale=1
         elif [ -n "$txt" ] && [ "$txt" -nt "$xmp" ]; then stale=1
+        elif [ -n "${GEODB:-}" ] && [ -s "$GEODB" ] && [ "$GEODB" -nt "$xmp" ]; then stale=1
         fi
         [ "$stale" = 1 ] && printf '%s\n' "$m"
     done > "$STALE"
@@ -2386,11 +2446,18 @@ mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$MAP
 command -v exiftool >/dev/null 2>&1 || \
     echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
-# --- Build the offline place DB once, in the background, if it's missing -----
-#     Runs whether GEONAMES_COUNTRIES lists specific countries or is empty
-#     (empty = whole planet, ~390MB download on first build). Backgrounded so
-#     the slideshow starts immediately; landmarks light up once it finishes.
-if [ ! -s "${GEODB:-/nonexistent}" ] && command -v unzip >/dev/null 2>&1; then
+# --- Build the offline place DB once, in the background, if it's missing or -
+#     out of date. Runs whether GEONAMES_COUNTRIES lists specific countries or
+#     is empty (empty = whole planet, ~390MB download on first build).
+#     Backgrounded so the slideshow starts immediately; landmarks light up once
+#     it finishes. A GEODB_VERSION change forces a one-time rebuild.
+geodb_needs_build=0
+if [ ! -s "${GEODB:-/nonexistent}" ]; then
+    geodb_needs_build=1
+elif [ "$(cat "${GEODB}.version" 2>/dev/null)" != "${GEODB_VERSION:-1}" ]; then
+    geodb_needs_build=1
+fi
+if [ "$geodb_needs_build" = 1 ] && command -v unzip >/dev/null 2>&1; then
     ( "$CFG_DIR/build-geodb.sh" >/dev/null 2>&1 & )
 fi
 
