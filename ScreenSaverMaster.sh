@@ -1593,378 +1593,155 @@ echo "▶ Writing nearby-landmark.sh..."
 cat > "$CFG/nearby-landmark.sh" << 'EOF'
 #!/bin/bash
 # nearby-landmark.sh LAT LON
-#   exit 0 + name on stdout  -> found a landmark
-#   exit 0 + no stdout       -> queried OK, nothing notable (caller may cache)
-#   exit 3                   -> lookup failed (network/parse); caller retries
-# "Has a Wikipedia article" is the prominence filter; the article's short
-# description gives the feature type, so we use category-aware search radii
-# (a mountain is nameable from 35km; a museum only from a few hundred metres)
-# and skip administrative articles (towns, counties, etc.).
+#  exit 0 + name on stdout  -> found a landmark
+#  exit 0 + no stdout       -> queried OK, nothing notable (caller may cache)
+#  exit 3                   -> lookup failed (network/parse); caller retries
+#
+# Engine: OpenStreetMap (Overpass API)
+# Priority: Natural landscapes (peaks, waterfalls, craters) > major tourism
+# (zoos, aquariums) > prominent man-made structures (towers, lighthouses).
 set -u
 LAT="${1:-}"; LON="${2:-}"
 [ -z "$LAT" ] || [ -z "$LON" ] && exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
 python3 - "$LAT" "$LON" <<'PY'
-import sys, json, math, re
+import sys, json, math, urllib.request
 
-def pick(lat, lon, pages):
-    CATS = [
-        (["volcano","stratovolcano","caldera"],            9, 40),
-        (["mountain","peak","summit","massif","sierra","cordillera","mountain range"], 8, 35),
-        (["waterfall","cascade"],                          8, 15),
-        (["national park","state park","provincial park","national monument",
-          "national forest","wilderness","nature reserve","protected area",
-          "national recreation area","regional park"],     7, 30),
-        (["glacier","icefield","icecap"],                  7, 25),
-        (["canyon","gorge","ravine"],                      7, 25),
-        (["observation tower","tower","skyscraper"],       7,  6),
-        (["castle","palace","fortress","citadel","fort","chateau","château"], 6, 6),
-        (["lake","reservoir","lagoon"],                    6, 20),
-        (["bay","fjord","cove","sound","strait","gulf","harbour","harbor"], 6, 25),
-        (["island","archipelago","atoll","islet"],         6, 30),
-        (["cliff","butte","mesa","rock formation","natural arch","arch","cave",
-          "cavern","geyser","hot spring","spring","cape","headland","peninsula",
-          "beach","dune","valley","plateau","crater","ridge","pass","hill"], 6, 25),
-        (["lighthouse"],                                   6, 10),
-        (["dam"],                                          6, 10),
-        (["bridge","viaduct","aqueduct"],                  6,  6),
-        (["theme park","amusement park"],                  5,  6),
-        (["monument","memorial","statue","obelisk"],       5,  5),
-        (["cathedral","basilica","minster","temple","shrine","mosque",
-          "synagogue","monastery","abbey","pagoda"],       5,  5),
-        (["stadium","arena","amphitheatre","amphitheater"],4,  4),
-        (["museum","gallery"],                             4,  3),
-    ]
-    EXCLUDE = ["city","town","village","municipality","census-designated","neighborhood",
-               "neighbourhood","suburb","community","human settlement","county","district",
-               "region","commune","hamlet","borough","ward","metropolitan","unincorporated",
-               "locality","prefecture","province","capital","airport","railway","station",
-               "road","highway","street","school","university","college","hospital","company"]
-
-    def has(word, text):
-        return re.search(r"\b" + re.escape(word) + r"s?\b", text) is not None
-
-    def hav(la1, lo1, la2, lo2):
-        R = 6371.0
-        p1, p2 = math.radians(la1), math.radians(la2)
-        dphi = math.radians(la2 - la1); dl = math.radians(lo2 - lo1)
-        x = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-        return 2 * R * math.asin(math.sqrt(x))
-
-    best = None
-    for p in pages.values():
-        title = p.get("title", "")
-        co = (p.get("coordinates") or [{}])[0]
-        clat, clon = co.get("lat"), co.get("lon")
-        if clat is None or clon is None:
-            continue
-        desc = ((p.get("pageprops") or {}).get("wikibase-shortdesc") or "").lower()
-        if not desc:
-            continue
-        if any(has(x, desc) for x in EXCLUDE):
-            continue
-        dist = hav(lat, lon, clat, clon)
-        for kws, prio, maxkm in CATS:
-            if any(has(k, desc) for k in kws):
-                if dist <= maxkm:
-                    score = (prio, -dist)
-                    if best is None or score > best[0]:
-                        best = (score, title)
-                break
-    if not best:
-        return ""
-    return re.sub(r"\s*\([^()]*\)\s*$", "", best[1]).strip()
+def hav(la1, lo1, la2, lo2):
+    R = 6371.0
+    p1, p2 = math.radians(la1), math.radians(la2)
+    dphi = math.radians(la2 - la1); dl = math.radians(lo2 - lo1)
+    x = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2 * R * math.asin(math.sqrt(x))
 
 def main():
-    import urllib.request, urllib.parse
     try:
         lat, lon = float(sys.argv[1]), float(sys.argv[2])
     except Exception:
         sys.exit(0)
-    params = {
-        "action":"query","format":"json","generator":"geosearch",
-        "ggscoord":f"{lat}|{lon}","ggsradius":"10000","ggslimit":"500",
-        "prop":"coordinates|description|pageprops","ppprop":"wikibase-shortdesc",
-    }
-    }
-    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent":"Screensaver-App/1.0 (personal photo screensaver)"})
+
+    # Overpass QL: Fetch nodes, ways, and relations for specific features
+    # 'out center' ensures polygons (like parks or zoos) return a center lat/lon.
+    query = f"""
+    [out:json][timeout:6];
+    (
+      nwr["natural"~"peak|volcano|crater"](around:20000,{lat},{lon});
+      nwr["waterway"="waterfall"](around:15000,{lat},{lon});
+      nwr["boundary"~"national_park|protected_area"](around:25000,{lat},{lon});
+      nwr["leisure"~"nature_reserve|park"](around:10000,{lat},{lon});
+      nwr["tourism"~"zoo|aquarium|viewpoint"](around:10000,{lat},{lon});
+      nwr["historic"~"castle|ruins|monument"](around:8000,{lat},{lon});
+      nwr["man_made"~"tower|lighthouse|observatory"](around:8000,{lat},{lon});
+      nwr["natural"~"bay|beach|glacier"](around:15000,{lat},{lon});
+    );
+    out center;
+    """
+
+    url = "https://overpass-api.de/api/interpreter"
+    req = urllib.request.Request(
+        url, 
+        data=query.encode('utf-8'), 
+        headers={"User-Agent": "Screensaver-App/2.0 (Local GeoSearch)"}
+    )
+
     try:
-        with urllib.request.urlopen(req, timeout=6) as r:
+        with urllib.request.urlopen(req, timeout=8) as r:
             data = json.load(r)
     except Exception:
+        # Exit 3 signals to photo.lua that it was a network failure,
+        # so it won't cache a "nothing here" result and will retry later.
         sys.exit(3)
-    pages = (data.get("query") or {}).get("pages") or {}
-    name = pick(lat, lon, pages)
-    if name:
-        print(name)
+
+    elements = data.get("elements", [])
+    if not elements:
+        sys.exit(0)
+
+    # Base weights and maximum search distances (in km). 
+    # Higher base weight = prioritized over closer, lower-weight items.
+    TAG_WEIGHTS = {
+        "national_park": (10, 25),
+        "volcano": (9, 20),
+        "crater": (9, 15),
+        "peak": (8, 20),
+        "waterfall": (8, 15),
+        "zoo": (8, 10),
+        "aquarium": (8, 10),
+        "glacier": (8, 15),
+        "nature_reserve": (7, 10),
+        "castle": (7, 8),
+        "ruins": (6, 8),
+        "bay": (6, 15),
+        "lighthouse": (6, 8),
+        "tower": (5, 8),
+        "viewpoint": (5, 5),
+        "beach": (5, 10),
+        "park": (4, 10),
+        "monument": (4, 5),
+    }
+
+    best = None
+
+    for el in elements:
+        tags = el.get("tags", {})
+        name = tags.get("name") or tags.get("name:en")
+        if not name:
+            continue
+
+        # Extract coordinates (node uses lat/lon, way/rel uses center)
+        clat = el.get("lat") or (el.get("center") or {}).get("lat")
+        clon = el.get("lon") or (el.get("center") or {}).get("lon")
+        if clat is None or clon is None:
+            continue
+
+        dist = hav(lat, lon, clat, clon)
+
+        # Categorize the feature
+        cat = None
+        for k, v in tags.items():
+            if v in TAG_WEIGHTS:
+                cat = v
+                break
+        if not cat and tags.get("boundary") in ("national_park", "protected_area"):
+            cat = "national_park"
+        if not cat:
+            cat = "viewpoint" # fallback
+
+        base_weight, max_dist = TAG_WEIGHTS.get(cat, (3, 5))
+
+        if dist > max_dist:
+            continue
+
+        weight = base_weight
+
+        # -- Prominence Boosters --
+        # 1. If it also has a Wikipedia page, it's a massive, notable landmark.
+        if "wikipedia" in tags:
+            weight += 4
+            
+        # 2. Boost mountains based on altitude to prioritize massive peaks
+        if cat in ("peak", "volcano") and "ele" in tags:
+            try:
+                ele = float(tags["ele"])
+                if ele > 2000: weight += 2
+                elif ele > 1000: weight += 1
+            except ValueError:
+                pass
+
+        # Score = Weight minus a distance penalty.
+        # This allows a 15km massive volcano to outscore a 1km minor park.
+        dist_penalty = (dist / max_dist) * 3.0
+        score = weight - dist_penalty
+
+        if best is None or score > best[0]:
+            best = (score, name)
+
+    if best:
+        print(best[1])
 
 if __name__ == "__main__":
     main()
 PY
-EOF
-chmod +x "$CFG/nearby-landmark.sh"
-
-
-
-# =============================================================================
-# 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
-#    Supersedes the old exif-daemon.sh and apply-overrides.sh.
-# =============================================================================
-echo "▶ Writing xmp-police.sh..."
-cat > "$APP_DIR/xmp-police.sh" << 'EOF'
-#!/bin/bash
-# Walks Media/ and writes one Immich-style "<media>.<ext>.xmp" sidecar per file,
-# carrying the resolved capture date (+ GPS / city-state-country when known).
-# Incremental, non-destructive. Precedence: .txt override > embedded EXIF >
-# filename timestamp. Usage: xmp-police.sh [--once]
-set -u
-
-SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-. "$SS_CONF" 2>/dev/null || { echo "xmp-police: missing config $SS_CONF — run the installer." >&2; exit 1; }
-
-ONCE=0
-[ "${1:-}" = "--once" ] && ONCE=1
-
-if ! command -v exiftool >/dev/null 2>&1; then
-    if [ "$ONCE" = 1 ]; then
-        echo "xmp-police: exiftool not found - skipping sidecar refresh." >&2
-        exit 0
-    fi
-    while ! command -v exiftool >/dev/null 2>&1; do sleep 10; done
-fi
-
-MEDIA_EXTS=( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp'
-             -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif'
-             -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v'
-             -o -iname '*.webm' )
-
-run_pass() {
-    local STALE JSON
-    STALE="$(mktemp)"; JSON="$(mktemp)"
-
-    find "$MEDIA_DIR" -maxdepth 1 -type f \( "${MEDIA_EXTS[@]}" \) -print0 |
-    while IFS= read -r -d '' m; do
-        xmp="${m}.xmp"
-        base="${m%.*}"
-        txt=""
-        [ -s "${base}.txt" ] && txt="${base}.txt"
-        [ -s "${m}.txt" ]    && txt="${m}.txt"
-
-        stale=0
-        if   [ ! -s "$xmp" ];                        then stale=1
-        elif [ "$m" -nt "$xmp" ];                    then stale=1
-        elif [ -n "$txt" ] && [ "$txt" -nt "$xmp" ]; then stale=1
-        fi
-        [ "$stale" = 1 ] && printf '%s\n' "$m"
-    done > "$STALE"
-
-    if [ -s "$STALE" ]; then
-        exiftool -q -m -j -d "%Y-%m-%dT%H:%M:%S" \
-            -DateTimeOriginal -CreateDate -CreationDate -MediaCreateDate -DateTimeCreated \
-            -GPSLatitude# -GPSLongitude# \
-            -City -State -Province-State -Country \
-            -api Geolocation -GeolocationCity -GeolocationRegion -GeolocationCountry \
-            -@ "$STALE" > "$JSON" 2>/dev/null
-
-        if [ -s "$JSON" ]; then
-            python3 - "$JSON" <<'PY'
-import sys, json, os, re
-from xml.sax.saxutils import escape
-
-def parse_coord(s):
-    s = re.sub(r'\(.*?\)', '', str(s)).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
-    d = re.search(r'[NSEW]', s)
-    v = None
-    if   len(nums) == 1: v = nums[0]
-    elif len(nums) == 2: v = nums[0] + nums[1]/60.0
-    elif len(nums) >= 3: v = nums[0] + nums[1]/60.0 + nums[2]/3600.0
-    if v is not None and d and d.group(0) in ('S', 'W'): v = -abs(v)
-    return v
-
-def parse_gps(value):
-    s = re.sub(r'\(.*?\)', '', str(value)).upper()
-    nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
-    dirs = re.findall(r'[NSEW]', s)
-    def sign(la, lo):
-        if len(dirs) >= 1 and dirs[0] == 'S': la = -abs(la)
-        if   len(dirs) >= 2 and dirs[1] == 'W': lo = -abs(lo)
-        elif len(dirs) == 1 and dirs[0] == 'W': lo = -abs(lo)
-        return la, lo
-    if len(nums) == 2: return sign(nums[0], nums[1])
-    if len(nums) == 6: return sign(nums[0]+nums[1]/60+nums[2]/3600, nums[3]+nums[4]/60+nums[5]/3600)
-    if len(nums) == 4: return sign(nums[0]+nums[1]/60, nums[2]+nums[3]/60)
-    return None, None
-
-def find_txt(media):
-    base = os.path.splitext(media)[0]
-    for c in (base + ".txt", media + ".txt"):
-        if os.path.isfile(c) and os.path.getsize(c) > 0:
-            return c
-    return None
-
-def parse_txt(path):
-    date, lat, lon, loc = "", None, None, ""
-    try:
-        lines = open(path, encoding="utf-8", errors="ignore").read().splitlines()
-    except Exception:
-        return date, lat, lon, loc
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r'^\s*([A-Za-z ]+?)\s*[:=]\s*(.+?)\s*$', line)
-        if m:
-            k = m.group(1).lower().replace(' ', ''); val = m.group(2).strip()
-            if k in ('date', 'datetime', 'datetimeoriginal', 'createdate'):
-                date = val
-            elif k in ('gps', 'coords', 'coordinates', 'latlon', 'latlng'):
-                a, b = parse_gps(val)
-                if a is not None and b is not None: lat, lon = a, b
-            elif k in ('lat', 'latitude'):
-                a = parse_coord(val); lat = a if a is not None else lat
-            elif k in ('lon', 'lng', 'long', 'longitude'):
-                a = parse_coord(val); lon = a if a is not None else lon
-            elif k in ('location', 'place', 'city'):
-                a, b = parse_gps(val)
-                if a is not None and b is not None and -90 <= a <= 90 and -180 <= b <= 180:
-                    lat, lon = a, b
-                else:
-                    loc = val
-        else:
-            a, b = parse_gps(line)
-            if a is not None and b is not None and -90 <= a <= 90 and -180 <= b <= 180:
-                lat, lon = a, b
-    return date, lat, lon, loc
-
-def to_iso(raw):
-    raw = str(raw).strip()
-    m = re.match(r'(\d{4})[-:./](\d{1,2})[-:./](\d{1,2})[ T]?(\d{1,2})?:?(\d{1,2})?:?(\d{1,2})?', raw)
-    if not m:
-        m = re.match(r'(\d{4})(\d{2})(\d{2})(?:[_ ]?(\d{2})(\d{2})(\d{2}))?$', raw)
-    if not m:
-        return None
-    y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
-    hh = (m.group(4) or "12").zfill(2)
-    mm = (m.group(5) or "00").zfill(2)
-    ss = (m.group(6) or "00").zfill(2)
-    if not (1 <= int(mo) <= 12 and 1 <= int(d) <= 31):
-        return None
-    return f"{y}-{mo}-{d}T{hh}:{mm}:{ss}"
-
-def filename_date(media):
-    name = os.path.basename(media)
-    m = re.search(r'(\d{8})[_-]?(\d{6})', name)
-    if m: return to_iso(m.group(1) + m.group(2))
-    m = re.search(r'(?<!\d)(\d{8})(?!\d)', name)
-    if m: return to_iso(m.group(1))
-    return None
-
-def write_xmp(media, date_iso, lat, lon, city, state, country):
-    fields = []
-    if date_iso:
-        fields.append("   <exif:DateTimeOriginal>%s</exif:DateTimeOriginal>" % escape(date_iso))
-        fields.append("   <xmp:CreateDate>%s</xmp:CreateDate>" % escape(date_iso))
-        fields.append("   <photoshop:DateCreated>%s</photoshop:DateCreated>" % escape(date_iso))
-    if lat is not None and lon is not None:
-        fields.append("   <exif:GPSLatitude>%.7f</exif:GPSLatitude>" % lat)
-        fields.append("   <exif:GPSLongitude>%.7f</exif:GPSLongitude>" % lon)
-    if city:    fields.append("   <photoshop:City>%s</photoshop:City>" % escape(str(city)))
-    if state:   fields.append("   <photoshop:State>%s</photoshop:State>" % escape(str(state)))
-    if country: fields.append("   <photoshop:Country>%s</photoshop:Country>" % escape(str(country)))
-
-    doc = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-           '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Screensaver-Police 1.0">\n'
-           ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
-           '  <rdf:Description rdf:about=""\n'
-           '   xmlns:exif="http://ns.adobe.com/exif/1.0/"\n'
-           '   xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
-           '   xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">\n'
-           + "\n".join(fields) + ("\n" if fields else "") +
-           '  </rdf:Description>\n'
-           ' </rdf:RDF>\n'
-           '</x:xmpmeta>\n')
-
-    xmp = media + ".xmp"
-    tmp = xmp + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(doc)
-    os.replace(tmp, xmp)
-
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    data = []
-
-for e in data:
-    media = e.get("SourceFile")
-    if not media or not os.path.exists(media):
-        continue
-
-    date_raw = (e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate")
-                or e.get("MediaCreateDate") or e.get("DateTimeCreated") or "")
-
-    def _f(v):
-        try:    return float(v) if v not in (None, "") else None
-        except Exception: return None
-    lat = _f(e.get("GPSLatitude"))
-    lon = _f(e.get("GPSLongitude"))
-
-    city    = e.get("GeolocationCity")    or e.get("City") or ""
-    state   = e.get("GeolocationRegion")  or e.get("State") or e.get("Province-State") or ""
-    country = e.get("GeolocationCountry") or e.get("Country") or ""
-
-    txt = find_txt(media)
-    if txt:
-        td, tla, tlo, tloc = parse_txt(txt)
-        if td:
-            date_raw = td
-        if tla is not None and tlo is not None:
-            lat, lon = tla, tlo
-        if tloc:
-            parts = [p.strip() for p in tloc.split(",")]
-            if len(parts) >= 1 and parts[0]: city    = parts[0]
-            if len(parts) >= 2 and parts[1]: state   = parts[1]
-            if len(parts) >= 3 and parts[2]: country = parts[2]
-
-    date_iso = to_iso(date_raw) if date_raw else None
-    if not date_iso:
-        date_iso = filename_date(media)
-
-    if lat is not None and not (-90  <= lat <= 90 ): lat = None
-    if lon is not None and not (-180 <= lon <= 180): lon = None
-    if lat is None or lon is None:
-        lat = lon = None
-
-    try:
-        write_xmp(media, date_iso, lat, lon, city, state, country)
-    except Exception as ex:
-        sys.stderr.write("xmp-police: failed on %s: %s\n" % (media, ex))
-PY
-        fi
-    fi
-
-    find "$MEDIA_DIR" -maxdepth 1 -type f -name '*.xmp' -print0 |
-    while IFS= read -r -d '' x; do
-        media="${x%.xmp}"
-        [ -e "$media" ] || rm -f "$x"
-    done
-
-    rm -f "$STALE" "$JSON"
-}
-
-if [ "$ONCE" = 1 ]; then
-    run_pass
-    exit 0
-fi
-
-trap 'exit 0' INT TERM HUP
-while command -v exiftool >/dev/null 2>&1; do
-    run_pass
-    sleep 60
-done
 EOF
 chmod +x "$APP_DIR/xmp-police.sh"
 
