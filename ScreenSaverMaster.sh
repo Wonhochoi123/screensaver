@@ -1684,8 +1684,9 @@ def main():
         sys.exit(0)
     params = {
         "action":"query","format":"json","generator":"geosearch",
-        "ggscoord":f"{lat}|{lon}","ggsradius":"20000","ggslimit":"30",
-        "prop":"coordinates|pageprops","ppprop":"wikibase-shortdesc","coprop":"",
+        "ggscoord":f"{lat}|{lon}","ggsradius":"10000","ggslimit":"500",
+        "prop":"coordinates|description|pageprops","ppprop":"wikibase-shortdesc",
+    }
     }
     url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent":"Screensaver-App/1.0 (personal photo screensaver)"})
