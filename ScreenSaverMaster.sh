@@ -926,7 +926,10 @@ mp.register_script_message("handle-left-click", function()
         if w > 0 and mouse.y >= h - math.floor(h * 0.03) then
             local frac = mouse.x / w
             if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
-            mp.commandv("seek", frac * 100, "absolute-percent")
+            -- "exact" forces a frame-accurate seek. Without it mpv snaps to the
+            -- nearest preceding keyframe, which on these veryfast-encoded clips
+            -- (sparse keyframes) jumps the playhead back to ~0.
+            mp.commandv("seek", frac * 100, "absolute-percent+exact")
             return
         end
     end
@@ -1397,27 +1400,30 @@ mp.register_script_message("year-prev", function() jump_year(-1) end)
 -- ----------------------------------------------------------------------------
 -- Now-playing progress bar (razor-thin strip across the very bottom)
 --   * thickness scales with screen height (a few pixels)
---   * already-played portion: semi-transparent white
---   * remaining portion:      semi-transparent black
+--   * already-played portion: opaque white
+--   * remaining portion:      opaque black
 --   * click anywhere along the bottom strip to seek (handled in
 --     handle-left-click above)
 -- ----------------------------------------------------------------------------
-local prog_last = -1
+local prog_fill = -1
 local function draw_progress()
     local pct = mp.get_property_number("percent-pos")
     if not pct then
-        if prog_last ~= -1 then
-            progress_ov:remove(); progress_bg_ov:remove(); prog_last = -1
+        if prog_fill ~= -1 then
+            progress_ov:remove(); progress_bg_ov:remove(); prog_fill = -1
         end
         return
     end
-    if math.abs(pct - prog_last) < 0.15 then return end
-    prog_last = pct
 
     local w, h = refresh_display_size()
+    local fillw = math.floor(w * pct / 100 + 0.5)
+    -- Redraw only when the bar actually moves a pixel. Polled fast (~33 Hz) so
+    -- the motion is buttery; the pixel guard keeps it from redrawing pointlessly.
+    if fillw == prog_fill then return end
+    prog_fill = fillw
+
     local th = math.max(2, math.floor(h * 0.003 + 0.5))   -- razor thin, scales with height
     local y0 = h - th
-    local fillw = math.floor(w * pct / 100 + 0.5)
     local function rect(x0, x1)
         return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y0, x1, y0, x1, h, x0, h)
     end
@@ -1444,8 +1450,8 @@ local function draw_progress()
         progress_ov:remove()
     end
 end
-mp.add_periodic_timer(0.1, draw_progress)
-mp.register_event("file-loaded", function() prog_last = -1; draw_progress() end)
+mp.add_periodic_timer(0.03, draw_progress)
+mp.register_event("file-loaded", function() prog_fill = -1; draw_progress() end)
 
 -- ----------------------------------------------------------------------------
 -- Delete the current media (DEL key)
