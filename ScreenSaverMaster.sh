@@ -1414,20 +1414,25 @@ local function draw_progress()
     local th = math.max(2, math.floor(h * 0.003 + 0.5))   -- razor thin, scales with height
     local y0 = h - th
     local fillw = math.floor(w * pct / 100 + 0.5)
-    local function rect(x1)
-        return string.format("m %d %d l %d %d l %d %d l %d %d", 0, y0, x1, y0, x1, h, 0, h)
+    local function rect(x0, x1)
+        return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y0, x1, y0, x1, h, x0, h)
     end
 
     progress_ov.res_x = w
     progress_ov.res_y = h
-    -- One event: full-width black (remaining) first, then white over the played
-    -- portion. alpha &H80& keeps both halves semi-transparent.
-    local data = string.format(
-        "{\\an7\\pos(0,0)\\bord0\\shad0\\alpha&H80&\\1c&H000000&\\p1}%s{\\p0}", rect(w))
+    -- Two separate, NON-overlapping events: libass does not reliably render two
+    -- {\p1}..{\p0} drawing scopes inside one event, so the played (white) and
+    -- remaining (black) halves are emitted as their own events. Opaque.
+    local parts = {}
     if fillw > 0 then
-        data = data .. string.format("{\\1c&HFFFFFF&\\p1}%s{\\p0}", rect(fillw))
+        parts[#parts + 1] = string.format(
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}", rect(0, fillw))
     end
-    progress_ov.data = data
+    if fillw < w then
+        parts[#parts + 1] = string.format(
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\alpha&H00&\\p1}%s{\\p0}", rect(fillw, w))
+    end
+    progress_ov.data = table.concat(parts, "\n")
     progress_ov:update()
 end
 mp.add_periodic_timer(0.1, draw_progress)
