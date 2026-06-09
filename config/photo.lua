@@ -20,6 +20,19 @@ local MAP_DIR    = env("MAP_DIR",    DATA_DIR .. "/Maps")
 local builder    = CFG_DIR .. "/build-minimap.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
 
+-- Tunable HUD sizes, all read from screensaver.conf (via the environment).
+-- Text sizes are a fraction of screen HEIGHT; layout fracs are noted inline.
+local function envn(name, default)
+    return tonumber(os.getenv(name) or "") or default
+end
+local HUD_MUSIC_FS  = envn("HUD_MUSIC_FS",  0.030)  -- music info marquee
+local HUD_DATE_FS   = envn("HUD_DATE_FS",   0.030)  -- date (top-right line 1)
+local HUD_REGION_FS = envn("HUD_REGION_FS", 0.030)  -- region (top-right line 2)
+local HUD_CITY_FS   = envn("HUD_CITY_FS",   0.066)  -- city headline
+local HUD_COORD_FS  = envn("HUD_COORD_FS",  0.025)  -- GPS coordinates
+local HUD_MAP_FRAC  = envn("HUD_MAP_FRAC",  0.27)   -- minimap/QR size (frac of height)
+local MUSIC_WIN_FRAC = envn("MUSIC_WIN_FRAC", 0.30) -- marquee width (frac of width)
+
 local ZOOMS        = {11, 14, 16}
 local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
 local DEFAULT_ZIDX = 1
@@ -409,9 +422,9 @@ end
 
 local function hud_geom()
     local win_w, win_h = refresh_display_size()
-    local S   = math.floor(win_h * 0.27); S = S - (S % 4)
+    local S   = math.floor(win_h * HUD_MAP_FRAC); S = S - (S % 4)
     local pad = math.floor(win_h * 0.02)
-    local fs  = math.floor(win_h * 0.025 + 0.5)
+    local fs  = math.floor(win_h * HUD_COORD_FS + 0.5)
     local gap = math.floor(win_h * 0.006)
     local text_cy = win_h - pad - math.floor(fs * 0.7)
     local img_top = (text_cy - math.floor(fs * 0.7) - gap) - S
@@ -864,24 +877,29 @@ mp.register_event("file-loaded", function()
             local m_right  = math.floor(L.win_w * 0.025)   -- right inset
             local m_bottom = math.floor(L.win_h * 0.07)    -- bottom inset
 
-            -- Top-right: date over the broader region (state / country).
-            local d = clean_text(compact_date(date))
-            local g = clean_text(general)
+            -- Top-right: date over the broader region (state / country). Each
+            -- line carries its own \fs so HUD_DATE_FS and HUD_REGION_FS tune
+            -- independently.
+            local d   = clean_text(compact_date(date))
+            local g   = clean_text(general)
+            local fsd = math.floor(L.win_h * HUD_DATE_FS)
+            local fsr = math.floor(L.win_h * HUD_REGION_FS)
             local stack = ""
-            if d and d ~= "" and g and g ~= "" then stack = d .. "\\N" .. g
-            elseif d and d ~= "" then stack = d
-            elseif g and g ~= "" then stack = g end
+            if d and d ~= "" and g and g ~= "" then
+                stack = string.format("{\\fs%d}%s\\N{\\fs%d}%s", fsd, d, fsr, g)
+            elseif d and d ~= "" then stack = string.format("{\\fs%d}%s", fsd, d)
+            elseif g and g ~= "" then stack = string.format("{\\fs%d}%s", fsr, g) end
 
             ov.res_x = L.win_w
             ov.res_y = L.win_h
             if stack == "" then
                 ov:remove()
             else
-                local fs  = math.floor(L.win_h * 0.030)
+                local fs  = math.max(fsd, fsr)   -- glow sized to the larger line
                 local fsp = math.floor(L.win_h * 0.003 + 0.5)
                 ov.data = string.format(
-                    "{\\an9\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&}%s",
-                    L.win_w - m_right, m_top, fs, fsp, glow(fs), stack)
+                    "{\\an9\\pos(%d,%d)\\fnMontserrat ExtraBold\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&}%s",
+                    L.win_w - m_right, m_top, fsp, glow(fs), stack)
                 ov:update()
             end
 
@@ -889,8 +907,8 @@ mp.register_event("file-loaded", function()
             -- The glyph-by-glyph reveal only plays when the city actually CHANGES
             -- — repeated same-city photos just show it (no rebuild animation).
             local city = clean_text(m.city or ""):upper()
-            local fs   = math.floor(L.win_h * 0.066)         -- bigger headline
-            local fsp  = math.floor(L.win_h * 0.024 + 0.5)   -- doubled spacing
+            local fs   = math.floor(L.win_h * HUD_CITY_FS)   -- bigger headline
+            local fsp  = math.floor(fs * 0.3636 + 0.5)       -- spacing scales with size
             local cx   = math.floor(L.win_w / 2)
             local by   = L.win_h - m_bottom
             if city == "" then
@@ -958,9 +976,8 @@ end)
 -- whole string is revealed and then it returns, never scrolling past the end to
 -- hide content. A \clip masks overflow. A progress bar sits just beneath it.
 -- Click it to skip to the next track.
--- The marquee window is a fraction of the screen width (so it's "way longer"
--- on bigger displays) rather than a fixed glyph count.
-local MUSIC_WIN_FRAC = tonumber(env("MUSIC_WIN_FRAC", "0.30")) or 0.30
+-- The marquee window width (MUSIC_WIN_FRAC, read at the top) is a fraction of
+-- the screen width, so it's "way longer" on bigger displays.
 local music_scroll_gen = 0  -- bumped on each new track; cancels the old scroller
 
 local function set_music(text)
@@ -974,7 +991,7 @@ local function set_music(text)
     local gen = music_scroll_gen
 
     local w, h = refresh_display_size()
-    local fs   = math.floor(h * 0.030)
+    local fs   = math.floor(h * HUD_MUSIC_FS)
     local fsp  = math.floor(h * 0.003 + 0.5)
     local px   = math.floor(w * 0.025)
     local py   = math.floor(h * 0.04)
