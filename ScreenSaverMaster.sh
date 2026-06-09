@@ -253,6 +253,8 @@ PREV run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UN
 ]    run bash -c "printf '%s\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:@@AUDIO_SOCK@@ 2>/dev/null"
 [    run bash -c "printf '%s\n' '{\"command\":[\"playlist-prev\"]}' | socat - UNIX-CONNECT:@@AUDIO_SOCK@@ 2>/dev/null"
 
+DEL   script-message ss-delete-current
+
 = add volume 5
 - add volume -5
 EOF
@@ -297,6 +299,7 @@ local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
 local landmark_ov  = mp.create_osd_overlay("ass-events")
+local progress_ov  = mp.create_osd_overlay("ass-events")
 
 -- Now-playing marquee state (forward-declared so the click handler, defined
 -- earlier in the file, can reference them as upvalues).
@@ -425,9 +428,12 @@ mp.add_hook("on_load", 10, function()
 
     if is_video[ext] then
         local dir, file = path:match("^(.-)/([^/]+)$")
-        if dir and file and not dir:match("/Optimized_Vids$") then
+        if dir and file and not dir:match("/Optimized_Vids") then
             local base_name = file:match("(.+)%.[^%.]+$") or file
-            local opt_path = OPT_DIR .. "/" .. base_name .. ".mp4"
+            local w, h = refresh_display_size()
+            -- Optimized clips are encoded per screen resolution, so switching
+            -- monitors/TVs reuses an existing folder instead of re-encoding.
+            local opt_path = OPT_DIR .. string.format("/%dx%d/", w, h) .. base_name .. ".mp4"
             local fi = utils.file_info(opt_path)
             if fi and fi.size and fi.size > 0 then
                 mp.set_property("stream-open-filename", opt_path)
@@ -806,7 +812,12 @@ local function resolve_meta(orig_path, cb)
     if lat and (lat < -90  or lat > 90 ) then lat = nil end
     if lon and (lon < -180 or lon > 180) then lon = nil end
 
-    cb({ date = date, city = city, general = general, lat = lat, lon = lon, mdir = MAP_DIR })
+    -- HUD map/QR images are sized from the screen HEIGHT, so they are kept in a
+    -- per-height folder (…/Maps/h_<height>). Switching to a screen of a height
+    -- already seen reuses its folder instead of rebuilding every tile.
+    local _, disp_h = refresh_display_size()
+    cb({ date = date, city = city, general = general, lat = lat, lon = lon,
+         mdir = MAP_DIR .. "/h_" .. tostring(disp_h) })
 end
 
 local pq        = {}
@@ -901,6 +912,20 @@ mp.register_script_message("handle-left-click", function()
             mp.commandv("run", "/bin/sh", "-c",
                 "printf '%s\\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
             if poll_music then mp.add_timeout(0.35, poll_music) end
+            return
+        end
+    end
+
+    -- Click the razor-thin progress bar along the very bottom to seek. The
+    -- visible bar is only a few pixels tall, so the clickable strip is a little
+    -- taller (bottom 3% of the screen) to stay easy to hit. Checked before the
+    -- GPS gate so seeking works on photos/videos without coordinates too.
+    if mouse then
+        local w, h = refresh_display_size()
+        if w > 0 and mouse.y >= h - math.floor(h * 0.03) then
+            local frac = mouse.x / w
+            if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+            mp.commandv("seek", frac * 100, "absolute-percent")
             return
         end
     end
@@ -1249,6 +1274,7 @@ mp.register_event("shutdown", function()
     pause_ov:remove()
     music_ov:remove()
     landmark_ov:remove()
+    progress_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1366,6 +1392,89 @@ end
 mp.register_script_message("year-next", function() jump_year(1) end)
 mp.register_script_message("year-prev", function() jump_year(-1) end)
 
+-- ----------------------------------------------------------------------------
+-- Now-playing progress bar (razor-thin strip across the very bottom)
+--   * thickness scales with screen height (a few pixels)
+--   * already-played portion: semi-transparent white
+--   * remaining portion:      semi-transparent black
+--   * click anywhere along the bottom strip to seek (handled in
+--     handle-left-click above)
+-- ----------------------------------------------------------------------------
+local prog_last = -1
+local function draw_progress()
+    local pct = mp.get_property_number("percent-pos")
+    if not pct then
+        if prog_last ~= -1 then progress_ov:remove(); prog_last = -1 end
+        return
+    end
+    if math.abs(pct - prog_last) < 0.15 then return end
+    prog_last = pct
+
+    local w, h = refresh_display_size()
+    local th = math.max(2, math.floor(h * 0.003 + 0.5))   -- razor thin, scales with height
+    local y0 = h - th
+    local fillw = math.floor(w * pct / 100 + 0.5)
+    local function rect(x1)
+        return string.format("m %d %d l %d %d l %d %d l %d %d", 0, y0, x1, y0, x1, h, 0, h)
+    end
+
+    progress_ov.res_x = w
+    progress_ov.res_y = h
+    -- One event: full-width black (remaining) first, then white over the played
+    -- portion. alpha &H80& keeps both halves semi-transparent.
+    local data = string.format(
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\alpha&H80&\\1c&H000000&\\p1}%s{\\p0}", rect(w))
+    if fillw > 0 then
+        data = data .. string.format("{\\1c&HFFFFFF&\\p1}%s{\\p0}", rect(fillw))
+    end
+    progress_ov.data = data
+    progress_ov:update()
+end
+mp.add_periodic_timer(0.1, draw_progress)
+mp.register_event("file-loaded", function() prog_last = -1; draw_progress() end)
+
+-- ----------------------------------------------------------------------------
+-- Delete the current media (DEL key)
+--   Moves the photo/video and everything derived from it to the system trash —
+--   the .xmp / .txt sidecars and every per-resolution optimized clip — drops it
+--   from the playlist, and immediately advances to the next item.
+-- ----------------------------------------------------------------------------
+mp.register_script_message("ss-delete-current", function()
+    local pos = mp.get_property_number("playlist-pos")
+    if not pos then return end
+    local path = mp.get_property("playlist/" .. pos .. "/filename")
+    if not path or path == "" then return end
+
+    -- Never delete generated title cards.
+    if path:find("/TitleCards/") then
+        mp.osd_message("Title card — not deleting", 1.5)
+        return
+    end
+
+    -- Resolve an optimized-clip path back to the original media file.
+    local orig = path
+    if path:find("/Optimized_Vids/") then
+        local f = path:match("([^/]+)%.mp4$")
+        if f then orig = MEDIA_DIR .. "/" .. f end
+    end
+
+    mp.command_native_async({
+        name = "subprocess", playback_only = false,
+        args = { CFG_DIR .. "/trash-media.sh", orig },
+    }, function() end)
+
+    mp.osd_message("🗑 Deleted", 1.0)
+
+    -- Advance right away. Removing the current entry plays the next one; if it
+    -- was the only item left, quit cleanly.
+    local count = mp.get_property_number("playlist-count") or 1
+    if count <= 1 then
+        mp.command("quit")
+    else
+        mp.commandv("playlist-remove", "current")
+    end
+end)
+
 EOF
 
 # =============================================================================
@@ -1376,12 +1485,17 @@ cat > "$CFG/build-minimap.sh" << 'EOF'
 #!/bin/bash
 set -u
 
-LAT="$1"; LON="$2"; Z="$3"; OUT_MAP="$4"; OUT_QR="$5"; CACHE="$6"
+LAT="$1"; LON="$2"; Z="$3"; OUT_MAP="$4"; OUT_QR="$5"; OUTDIR="$6"
 HUD_W="${7:-552}"; HUD_H="${8:-616}"; MAP_RING_COLOR="${9:-#FFFFFF}"
 
 UA="Screensaver-App/1.0"
+# OUTDIR is the screen-height-specific folder (…/Maps/h_<height>) that holds the
+# composited HUD images. Raw map tiles look identical at every screen size, so
+# they are cached once in a shared sibling folder (…/Maps/tiles) and reused
+# across every resolution instead of being re-downloaded per height.
+CACHE="$(dirname "$OUTDIR")/tiles"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$CACHE"
+mkdir -p "$OUTDIR" "$CACHE"
 
 if [ -s "$OUT_MAP" ] && [ -s "$OUT_QR" ]; then exit 0; fi
 
@@ -1600,6 +1714,71 @@ fi
 exit 0
 EOF
 chmod +x "$CFG/build-minimap.sh"
+
+# =============================================================================
+# 3a2. trash-media.sh  (DEL key: move a media file + everything derived from it
+#      to the system trash, and drop it from the playlist)
+# =============================================================================
+echo "▶ Writing trash-media.sh..."
+cat > "$CFG/trash-media.sh" << 'EOF'
+#!/bin/bash
+set -u
+
+# Central config gives us MEDIA_DIR / OPT_DIR / PLAYLIST / DATA_DIR.
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+. "$SS_CONF" 2>/dev/null || { echo "trash-media: missing config $SS_CONF" >&2; exit 1; }
+
+MEDIA="${1:-}"
+[ -n "$MEDIA" ] || { echo "trash-media: no path given" >&2; exit 1; }
+
+# Move one path to the system trash. Prefers gio (GNOME/glib), then trash-cli;
+# falls back to an in-app Trash folder so nothing is ever hard-deleted.
+trash_one() {
+    f="$1"
+    [ -e "$f" ] || return 0
+    if command -v gio >/dev/null 2>&1 && gio trash -- "$f" 2>/dev/null; then return 0; fi
+    if command -v trash-put >/dev/null 2>&1 && trash-put -- "$f" 2>/dev/null; then return 0; fi
+    mkdir -p "$DATA_DIR/Trash"
+    mv -f "$f" "$DATA_DIR/Trash/" 2>/dev/null || true
+}
+
+name="$(basename "$MEDIA")"
+base="${name%.*}"
+dir="$(dirname "$MEDIA")"
+
+# 1) Drop the exact line from the playlist so it will not replay this session.
+if [ -f "$PLAYLIST" ]; then
+    tmp="$(mktemp)"
+    if grep -vxF -- "$MEDIA" "$PLAYLIST" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$PLAYLIST"
+    else
+        rm -f "$tmp"
+    fi
+fi
+
+# 2) The media itself.
+trash_one "$MEDIA"
+
+# 3) Sidecars (both "<media>.<ext>.xmp/.txt" and "<base>.xmp/.txt" layouts).
+trash_one "$MEDIA.xmp"
+trash_one "$dir/$base.xmp"
+trash_one "$MEDIA.txt"
+trash_one "$dir/$base.txt"
+
+# 4) Every per-resolution optimized clip + its internal markers.
+if [ -d "$OPT_DIR" ]; then
+    for f in "$OPT_DIR"/*/"$base.mp4" "$OPT_DIR/$base.mp4"; do
+        [ -e "$f" ] && trash_one "$f"
+    done
+    for m in "$OPT_DIR"/*/.skip_"$base" "$OPT_DIR"/*/.res_"$base" "$OPT_DIR"/*/.tmp_"$base.mp4" \
+             "$OPT_DIR/.skip_$base" "$OPT_DIR/.res_$base" "$OPT_DIR/.tmp_$base.mp4"; do
+        [ -e "$m" ] && rm -f "$m"
+    done
+fi
+
+exit 0
+EOF
+chmod +x "$CFG/trash-media.sh"
 
 # =============================================================================
 # 3b. build-title.sh (Animated Cinematic Title Generator)
@@ -2331,10 +2510,14 @@ while command -v ffmpeg >/dev/null 2>&1; do
         fi
         TARGET="fp1-${TARGET_W}x${TARGET_H}"
 
-        out_file="$OPT_DIR/${base}.mp4"
-        skip_marker="$OPT_DIR/.skip_${base}"
-        res_marker="$OPT_DIR/.res_${base}"
-        tmp_file="$OPT_DIR/.tmp_${base}.mp4"
+        # Encode into a per-resolution folder so switching monitors/TVs reuses an
+        # existing folder instead of re-encoding every clip each time.
+        OUT_SUBDIR="$OPT_DIR/${TARGET_W}x${TARGET_H}"
+        mkdir -p "$OUT_SUBDIR"
+        out_file="$OUT_SUBDIR/${base}.mp4"
+        skip_marker="$OUT_SUBDIR/.skip_${base}"
+        res_marker="$OUT_SUBDIR/.res_${base}"
+        tmp_file="$OUT_SUBDIR/.tmp_${base}.mp4"
         prev_res="$(cat "$res_marker" 2>/dev/null || true)"
 
         if [ -f "$out_file" ]; then
