@@ -1275,7 +1275,9 @@ end
 mp.add_periodic_timer(3, poll_music)
 poll_music()
 
-mp.register_script_message("ss-show-loading", function()
+mp.register_script_message("ss-show-loading", function(title, subtitle)
+    title    = (title    and title    ~= "") and title    or "LOADING"
+    subtitle = (subtitle and subtitle ~= "") and subtitle or "Please wait..."
     local w, h = refresh_display_size()
     local fs   = math.floor(h * 0.066)
     local fsp  = math.floor(h * 0.024 + 0.5)
@@ -1283,10 +1285,10 @@ mp.register_script_message("ss-show-loading", function()
     local fsp2 = math.floor(h * 0.016 + 0.5)
     loading_ov.res_x = w; loading_ov.res_y = h
     loading_ov.data = string.format(
-        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H00&}UPDATING PLAYLIST"
-        .. "\\N\\N{\\fnMontserrat SemiBold\\fs%d\\fsp%d\\alpha&H80&}PLEASE  WAIT",
+        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H00&}%s"
+        .. "\\N\\N{\\fnMontserrat SemiBold\\fs%d\\fsp%d\\alpha&H80&}%s",
         math.floor(w / 2), math.floor(h / 2) - math.floor(fs * 0.5),
-        fs, fsp, glow(fs), fs2, fsp2)
+        fs, fsp, glow(fs), title, fs2, fsp2, subtitle)
     loading_ov:update()
 end)
 
@@ -2781,30 +2783,30 @@ _SS_MC="$(find "$MEDIA_DIR" -maxdepth 1 -type f \
        -o -iname '*.webm' \) -print 2>/dev/null | wc -l)"
 
 HEAVY=0
+HEAVY_REASON="startup"
 if [ ! -f "$PLAYLIST" ]; then
-    HEAVY=1
+    HEAVY=1; HEAVY_REASON="first-run"
 elif [ -z "$(ls -A "$TITLE_DIR" 2>/dev/null)" ]; then
-    HEAVY=1
+    HEAVY=1; HEAVY_REASON="first-run"
 elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
         \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
            -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
            -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
            -o -iname '*.webm' -o -iname '*.txt' \) \
         -newer "$PLAYLIST" -print -quit 2>/dev/null)" ]; then
-    HEAVY=1
+    HEAVY=1; HEAVY_REASON="new-media"
 fi
 
 # A resolution change re-renders every title card (their cached fingerprint
-# embeds the display resolution), which is slow — so show the loading screen for
-# that too, not only for new/changed media. The fingerprint is "<WxH>|<hero>";
-# compare its resolution half against the current display.
+# embeds the display resolution), which is slow — show the loading screen for
+# that too. The fingerprint is "<WxH>|<hero>"; compare its resolution half.
 if [ "$HEAVY" = 0 ]; then
     CUR_RES="$(tr -dc '0-9x' < "$APP_DIR/display.conf" 2>/dev/null || true)"
     if [ -n "$CUR_RES" ]; then
         for f in "$TITLE_DIR"/.src_*; do
             [ -f "$f" ] || continue
             fp="$(cat "$f" 2>/dev/null)"
-            [ "${fp%%|*}" != "$CUR_RES" ] && { HEAVY=1; break; }
+            [ "${fp%%|*}" != "$CUR_RES" ] && { HEAVY=1; HEAVY_REASON="resolution"; break; }
         done
     fi
 fi
@@ -2813,8 +2815,16 @@ fi
 # (e.g. photos from a camera whose mtime is older than the playlist).
 if [ "$HEAVY" = 0 ] && \
    [ "$_SS_MC" != "$(cat "$APP_DIR/media.count" 2>/dev/null)" ]; then
-    HEAVY=1
+    HEAVY=1; HEAVY_REASON="new-media"
 fi
+
+# Map reason to on-screen title + subtitle.
+case "$HEAVY_REASON" in
+    first-run)  _SS_TITLE="BUILDING LIBRARY";  _SS_SUB="Setting up your screensaver..." ;;
+    new-media)  _SS_TITLE="UPDATING LIBRARY";  _SS_SUB="New media detected..." ;;
+    resolution) _SS_TITLE="UPDATING LIBRARY";  _SS_SUB="Display resolution changed..." ;;
+    *)          _SS_TITLE="LOADING";            _SS_SUB="Starting up..." ;;
+esac
 
 # Detect actual screen resolution so the loading screen fills the display.
 _SS_W=1920; _SS_H=1080
@@ -2825,26 +2835,28 @@ if [ -f "$APP_DIR/display.conf" ]; then
     esac
 fi
 
-if [ "$HEAVY" = 1 ]; then
-    LOAD_SOCK="/tmp/ss_load_$$.sock"
-    rm -f "$LOAD_SOCK"
-    mpv --config-dir="$CFG_DIR" \
-        --sub-fonts-dir="$FONT_DIR" \
-        --image-display-duration="$PHOTO_DURATION" \
-        --volume=0 \
-        --input-ipc-server="$LOAD_SOCK" \
-        "av://lavfi:color=c=black:s=${_SS_W}x${_SS_H}" \
-        >/dev/null 2>&1 &
-    MPV_LOAD_PID=$!
-    # Wait for IPC socket (up to 5s)
-    _w=0
-    while [ ! -S "$LOAD_SOCK" ] && [ $_w -lt 50 ]; do
-        sleep 0.1; _w=$((_w+1))
-    done
-    # Ask photo.lua to show the loading overlay
-    printf '{"command":["script-message","ss-show-loading"]}\n' | \
-        socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
-fi
+# Always start with the black loading screen so the user sees something
+# immediately. photo.lua shows a context-specific message; when the playlist
+# is ready loadlist-replace hands off to real content in the same process.
+LOAD_SOCK="/tmp/ss_load_$$.sock"
+rm -f "$LOAD_SOCK"
+mpv --config-dir="$CFG_DIR" \
+    --sub-fonts-dir="$FONT_DIR" \
+    --image-display-duration="$PHOTO_DURATION" \
+    --volume=0 \
+    --input-ipc-server="$LOAD_SOCK" \
+    "av://lavfi:color=c=black:s=${_SS_W}x${_SS_H}" \
+    >/dev/null 2>&1 &
+MPV_LOAD_PID=$!
+# Wait for IPC socket (up to 5s)
+_w=0
+while [ ! -S "$LOAD_SOCK" ] && [ $_w -lt 50 ]; do
+    sleep 0.1; _w=$((_w+1))
+done
+# Ask photo.lua to show the loading overlay with a context-specific message.
+printf '{"command":["script-message","ss-show-loading","%s","%s"]}\n' \
+    "$_SS_TITLE" "$_SS_SUB" | \
+    socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
 
 "$POLICE" --once
 
@@ -2946,7 +2958,7 @@ mv "$PLAYLIST.tmp" "$PLAYLIST"
 rm -f "$PLAYLIST.raw"
 echo "$_SS_MC" > "$APP_DIR/media.count"
 
-if [ -n "$LOAD_SOCK" ] && [ -S "$LOAD_SOCK" ]; then
+if [ -S "$LOAD_SOCK" ]; then
     # Playlist is ready — restore volume and hand off to the real content.
     # photo.lua clears the loading overlay automatically on the first file-loaded.
     printf '{"command":["set_property","volume",%s]}\n' "$VOLUME" | \
@@ -2956,10 +2968,7 @@ if [ -n "$LOAD_SOCK" ] && [ -S "$LOAD_SOCK" ]; then
     rm -f "$LOAD_SOCK"; LOAD_SOCK=""
     wait "$MPV_LOAD_PID"
 else
-    # HEAVY=0: playlist was ready before mpv started, launch directly.
-    # --sub-fonts-dir makes the HUD find Montserrat in Media/Fonts (a
-    # non-default font path) and keeps the app self-contained when copied
-    # between machines.
+    # Fallback: IPC socket never appeared (mpv failed to start).
     mpv --config-dir="$CFG_DIR" \
         --sub-fonts-dir="$FONT_DIR" \
         --image-display-duration="$PHOTO_DURATION" \
