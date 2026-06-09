@@ -303,6 +303,37 @@ local progress_ov    = mp.create_osd_overlay("ass-events")  -- played (white)
 local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (black)
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
+-- ----------------------------------------------------------------------------
+-- Loading-screen input lock
+--   The screensaver always opens on a black "please wait" screen while the
+--   playlist is (re)built. That phase must be non-interactive: no pausing, no
+--   skipping, no quitting. We grab every interactive key with forced bindings
+--   that do nothing, and release them the instant real content loads. The lock
+--   is engaged immediately (script load == the black screen appearing) so even
+--   the very first keypress is swallowed.
+-- ----------------------------------------------------------------------------
+local LOADING_KEYS = {
+    "SPACE","PLAY","PAUSE","PLAYPAUSE","p","RIGHT","LEFT","UP","DOWN",
+    "PGDWN","PGUP","END","HOME","NEXT","PREV","[","]","DEL","=","-",
+    "MBTN_LEFT","MBTN_RIGHT","WHEEL_UP","WHEEL_DOWN","ESC","q",
+}
+local ss_input_locked = false
+local function lock_loading_input()
+    if ss_input_locked then return end
+    ss_input_locked = true
+    for i, k in ipairs(LOADING_KEYS) do
+        mp.add_forced_key_binding(k, "ssload_" .. i, function() end)
+    end
+end
+local function unlock_loading_input()
+    if not ss_input_locked then return end
+    ss_input_locked = false
+    for i = 1, #LOADING_KEYS do
+        mp.remove_key_binding("ssload_" .. i)
+    end
+end
+lock_loading_input()
+
 -- Now-playing marquee state (forward-declared so the click handler, defined
 -- earlier in the file, can reference them as upvalues).
 local music_shown  = nil       -- full track string currently displayed
@@ -1030,6 +1061,12 @@ mp.register_event("file-loaded", function()
     local path = mp.get_property("path")
     if not path then return end
 
+    -- First real (non-loading) file: the playlist handoff is done — let input
+    -- through again and drop the "please wait" overlay.
+    if ss_input_locked and not path:find("lavfi", 1, true) then
+        unlock_loading_input()
+    end
+
     local orig_path = path
     if path:find("/Optimized_Vids/") then
         local orig_file = path:match("([^/]+)%.mp4$")
@@ -1276,6 +1313,7 @@ mp.add_periodic_timer(3, poll_music)
 poll_music()
 
 mp.register_script_message("ss-show-loading", function(title, subtitle)
+    lock_loading_input()   -- defensive: stay non-interactive while loading
     title    = (title    and title    ~= "") and title    or "LOADING"
     subtitle = (subtitle and subtitle ~= "") and subtitle or "Please wait..."
     local w, h = refresh_display_size()
@@ -1420,40 +1458,61 @@ mp.register_script_message("year-prev", function() jump_year(-1) end)
 -- ----------------------------------------------------------------------------
 -- ----------------------------------------------------------------------------
 -- Now-playing progress bar (razor-thin strip across the very bottom)
---   Driven by wall-clock time rather than polling percent-pos, so motion is
---   perfectly smooth. A 3-second drift check resyncs if the clock drifts
---   from actual playback position by more than 150 ms.
+--   Driven by wall-clock time so motion is perfectly smooth, and so it works
+--   for stills too (an image's playback-time never advances — only its
+--   image-display-duration "duration" does). Pausing freezes the bar.
+--   Videos additionally realign to the real playback position on seek and via
+--   a gentle drift check; the (pt > 0.05) guard leaves stills untouched.
 --   Click anywhere along the bottom strip to seek (handled in
 --   handle-left-click above).
 -- ----------------------------------------------------------------------------
-local prog_fill     = -1
-local prog_duration = 0   -- current media duration (seconds)
-local prog_start_rt = 0   -- mp.get_time() when playback position was 0
-
-local function prog_resync()
-    local pos = mp.get_property_number("playback-time") or 0
-    prog_start_rt = mp.get_time() - pos
-end
+local prog_fill          = -1
+local prog_duration      = 0    -- length of current media (s); 0 hides the bar
+local prog_anchor_rt     = 0    -- mp.get_time() corresponding to elapsed = 0
+local prog_pause_started = nil  -- mp.get_time() captured at pause; nil = playing
+local prog_last_pt       = -1
 
 mp.register_event("file-loaded", function()
-    prog_duration = mp.get_property_number("duration") or 0
-    prog_resync()
-    prog_fill = -1
+    local d = mp.get_property_number("duration") or 0
+    prog_duration      = (d > 0 and d < 1e7) and d or 0
+    prog_anchor_rt     = mp.get_time()
+    prog_pause_started = mp.get_property_bool("pause") and mp.get_time() or nil
+    prog_last_pt       = -1
+    prog_fill          = -1
 end)
 
-mp.register_event("seek", prog_resync)
-
+-- Freeze while paused: stop the wall clock at the pause instant, then shift the
+-- anchor forward by however long we stayed paused when playback resumes.
 mp.observe_property("pause", "bool", function(_, paused)
-    if not paused then prog_resync() end
+    if paused == nil then return end
+    if paused then
+        if not prog_pause_started then prog_pause_started = mp.get_time() end
+    elseif prog_pause_started then
+        prog_anchor_rt = prog_anchor_rt + (mp.get_time() - prog_pause_started)
+        prog_pause_started = nil
+    end
 end)
 
-mp.add_periodic_timer(3.0, function()
-    if prog_duration <= 0 then return end
-    local pos = mp.get_property_number("playback-time")
-    if not pos then return end
-    if math.abs((mp.get_time() - prog_start_rt) - pos) > 0.15 then
-        prog_start_rt = mp.get_time() - pos
+-- Videos only: snap to the real position after a seek.
+mp.register_event("seek", function()
+    local pt = mp.get_property_number("playback-time")
+    if pt and pt > 0.05 then
+        prog_anchor_rt = mp.get_time() - pt
+        if prog_pause_started then prog_pause_started = mp.get_time() end
     end
+end)
+
+-- Videos only: gentle drift correction. A still's playback-time stays ~0, so
+-- the guard skips it and the wall-clock bar is left alone.
+mp.add_periodic_timer(2.0, function()
+    if prog_duration <= 0 or prog_pause_started then return end
+    local pt = mp.get_property_number("playback-time")
+    if pt and pt > 0.05 and pt ~= prog_last_pt then
+        if math.abs((mp.get_time() - prog_anchor_rt) - pt) > 0.3 then
+            prog_anchor_rt = mp.get_time() - pt
+        end
+    end
+    prog_last_pt = pt or prog_last_pt
 end)
 
 local function draw_progress()
@@ -1465,7 +1524,8 @@ local function draw_progress()
     end
 
     local w, h    = refresh_display_size()
-    local elapsed = math.max(0, math.min(mp.get_time() - prog_start_rt, prog_duration))
+    local ref     = prog_pause_started or mp.get_time()
+    local elapsed = math.max(0, math.min(ref - prog_anchor_rt, prog_duration))
     local fillw   = math.floor(w * elapsed / prog_duration + 0.5)
     if fillw == prog_fill then return end
     prog_fill = fillw
@@ -2876,11 +2936,17 @@ _w=0
 while [ ! -S "$LOAD_SOCK" ] && [ $_w -lt 50 ]; do
     sleep 0.1; _w=$((_w+1))
 done
-# Ask photo.lua to show the loading overlay with a context-specific message.
-printf '{"command":["script-message","ss-show-loading","%s","%s"]}\n' \
-    "$_SS_TITLE" "$_SS_SUB" | \
-    socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
+# Push a live status line to the loading overlay (no-op once handed off).
+_ss_load_msg() {
+    [ -S "$LOAD_SOCK" ] || return 0
+    printf '{"command":["script-message","ss-show-loading","%s","%s"]}\n' "$1" "$2" | \
+        socat -t 1 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
+}
 
+# Ask photo.lua to show the loading overlay with a context-specific message.
+_ss_load_msg "$_SS_TITLE" "$_SS_SUB"
+
+_ss_load_msg "$_SS_TITLE" "Reading photo metadata..."
 "$POLICE" --once
 
 exiftool -q -m -j -d "%Y%m%d%H%M%S" \
@@ -2965,6 +3031,7 @@ while IFS='|' read -r D PATH_STR; do
                 fi
                 if [ "$need_card" = 1 ]; then
                     echo "  Generating Animated Title Card: $M_NAME $Y..."
+                    _ss_load_msg "$_SS_TITLE" "Creating title card — $M_NAME $Y"
                     if "$CFG_DIR/build-title.sh" "$Y" "$M_NAME" "$CARD_PATH" "$HERO"; then
                         printf '%s' "$FP_NOW" > "$FP_FILE"
                     fi
