@@ -226,6 +226,7 @@ fi
 echo "▶ Writing input.conf..."
 cat > "$CFG/input.conf" << 'EOF'
 MBTN_LEFT   script-message handle-left-click
+MBTN_LEFT_DBL ignore
 MBTN_RIGHT  quit
 WHEEL_UP    quit
 WHEEL_DOWN  quit
