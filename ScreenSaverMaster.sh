@@ -299,8 +299,10 @@ local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
 local landmark_ov  = mp.create_osd_overlay("ass-events")
-local progress_ov  = mp.create_osd_overlay("ass-events")   -- played (white)
-local progress_bg_ov = mp.create_osd_overlay("ass-events") -- remaining (black)
+local progress_ov     = mp.create_osd_overlay("ass-events")  -- played core
+local progress_bg_ov  = mp.create_osd_overlay("ass-events")  -- track background
+local progress_flare_ov = mp.create_osd_overlay("ass-events") -- flare outer glow
+local progress_core_ov  = mp.create_osd_overlay("ass-events") -- flare bright center
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Now-playing marquee state (forward-declared so the click handler, defined
@@ -1300,6 +1302,8 @@ mp.register_event("shutdown", function()
     loading_ov:remove()
     progress_ov:remove()
     progress_bg_ov:remove()
+    progress_flare_ov:remove()
+    progress_core_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1418,11 +1422,11 @@ mp.register_script_message("year-next", function() jump_year(1) end)
 mp.register_script_message("year-prev", function() jump_year(-1) end)
 
 -- ----------------------------------------------------------------------------
--- Now-playing progress bar (razor-thin strip across the very bottom)
---   * thickness scales with screen height (a few pixels)
---   * already-played portion: opaque white
---   * remaining portion:      opaque black
---   * click anywhere along the bottom strip to seek (handled in
+-- Now-playing progress bar — flare style
+--   * Full-width dim track shows total duration range
+--   * Bright played core + subtle glow forms the trail behind the head
+--   * A glowing flare head sits at the leading edge and flickers each frame
+--   * Click anywhere along the bottom strip to seek (handled in
 --     handle-left-click above)
 -- ----------------------------------------------------------------------------
 local prog_fill = -1
@@ -1430,45 +1434,76 @@ local function draw_progress()
     local pct = mp.get_property_number("percent-pos")
     if not pct then
         if prog_fill ~= -1 then
-            progress_ov:remove(); progress_bg_ov:remove(); prog_fill = -1
+            progress_ov:remove(); progress_bg_ov:remove()
+            progress_flare_ov:remove(); progress_core_ov:remove()
+            prog_fill = -1
         end
         return
     end
 
-    local w, h = refresh_display_size()
-    local fillw = math.floor(w * pct / 100 + 0.5)
-    -- Redraw only when the bar actually moves a pixel. Polled fast (~33 Hz) so
-    -- the motion is buttery; the pixel guard keeps it from redrawing pointlessly.
-    if fillw == prog_fill then return end
-    prog_fill = fillw
+    local w, h   = refresh_display_size()
+    local fillw  = math.floor(w * pct / 100 + 0.5)
+    local th     = math.max(2, math.floor(h * 0.003 + 0.5))
+    local y0     = h - th
+    local bar_cy = h - math.floor(th / 2 + 0.5)
+    local flicker = 0.7 + math.random() * 0.6   -- 0.7 – 1.3 per frame
 
-    local th = math.max(2, math.floor(h * 0.003 + 0.5))   -- razor thin, scales with height
-    local y0 = h - th
-    local function rect(x0, x1)
+    local function rect(x0, x1)   -- bar-height rectangle (y0 → h)
         return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y0, x1, y0, x1, h, x0, h)
     end
+    local function frect(x0, x1, t, b)  -- arbitrary-height rectangle
+        return string.format("m %d %d l %d %d l %d %d l %d %d", x0, t, x1, t, x1, b, x0, b)
+    end
 
-    -- One single-event overlay per colour (the pattern every other overlay in
-    -- this script uses). A single osd-overlay carrying two newline-separated
-    -- events does NOT render reliably, which is why nothing showed before.
-    -- Remaining (black) first so the played (white) sits cleanly beside it.
-    progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
-    if fillw < w then
+    -- Static elements: only redraw when the pixel position changes.
+    if fillw ~= prog_fill then
+        prog_fill = fillw
+
+        progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
         progress_bg_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\alpha&H00&\\p1}%s{\\p0}", rect(fillw, w))
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\blur0\\1c&HFFFFFF&\\1a&HCC&\\p1}%s{\\p0}",
+            rect(0, w))
         progress_bg_ov:update()
-    else
-        progress_bg_ov:remove()
+
+        if fillw > 0 then
+            progress_ov.res_x = w; progress_ov.res_y = h
+            progress_ov.data = string.format(
+                "{\\an7\\pos(0,0)\\bord0\\shad0\\blur1\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}",
+                rect(0, fillw))
+            progress_ov:update()
+        else
+            progress_ov:remove()
+        end
     end
 
-    progress_ov.res_x = w; progress_ov.res_y = h
-    if fillw > 0 then
-        progress_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}", rect(0, fillw))
-        progress_ov:update()
-    else
-        progress_ov:remove()
+    -- Flare elements: always redraw for per-frame flicker.
+    if fillw <= 0 then
+        progress_flare_ov:remove(); progress_core_ov:remove()
+        return
     end
+
+    -- Outer glow: wide horizontal oval, heavily blurred, opacity flickers.
+    local fow   = math.floor(14 * th)
+    local foh   = math.floor(5  * th)
+    local fblur = math.max(2, math.floor(3 * th))
+    local falpha = math.max(0x50, math.min(0xB0,
+        math.floor(0x80 - (flicker - 1.0) * 0x38 + 0.5)))
+    progress_flare_ov.res_x = w; progress_flare_ov.res_y = h
+    progress_flare_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&H%02X&\\p1}%s{\\p0}",
+        fblur, falpha,
+        frect(fillw - fow, fillw + fow, bar_cy - foh, bar_cy + foh))
+    progress_flare_ov:update()
+
+    -- Core: tight bright oval, width flickers.
+    local cow   = math.max(th, math.floor(2 * th * flicker + 0.5))
+    local coh   = math.floor(2 * th)
+    local cblur = math.max(1, math.floor(th * 0.75 + 0.5))
+    progress_core_ov.res_x = w; progress_core_ov.res_y = h
+    progress_core_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}",
+        cblur, frect(fillw - cow, fillw + cow, bar_cy - coh, bar_cy + coh))
+    progress_core_ov:update()
 end
 mp.add_periodic_timer(0.03, draw_progress)
 mp.register_event("file-loaded", function() prog_fill = -1; draw_progress() end)
