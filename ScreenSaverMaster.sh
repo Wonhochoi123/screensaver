@@ -2699,6 +2699,10 @@ SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 # --- Self-healing: recreate any folder that was deleted ----------------------
 mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$MAP_DIR/geo" "$OPT_DIR" "$FONT_DIR"
 
+# Sweep away half-written title cards left behind by an interrupted build
+# (build-title.sh renames a "<card>.part.<pid>.mp4" into place; a kill leaves it).
+rm -f "$TITLE_DIR"/*.part.*.mp4 2>/dev/null || true
+
 command -v exiftool >/dev/null 2>&1 || \
     echo "WARN: exiftool not found - date/location HUD will be disabled. Run setup-screensaver.sh to install deps." >&2
 
@@ -2765,6 +2769,21 @@ elif [ -n "$(find "$MEDIA_DIR" -maxdepth 1 -type f \
     HEAVY=1
 fi
 
+# A resolution change re-renders every title card (their cached fingerprint
+# embeds the display resolution), which is slow — so show the loading screen for
+# that too, not only for new/changed media. The fingerprint is "<WxH>|<hero>";
+# compare its resolution half against the current display.
+if [ "$HEAVY" = 0 ]; then
+    CUR_RES="$(tr -dc '0-9x' < "$APP_DIR/display.conf" 2>/dev/null || true)"
+    if [ -n "$CUR_RES" ]; then
+        for f in "$TITLE_DIR"/.src_*; do
+            [ -f "$f" ] || continue
+            fp="$(cat "$f" 2>/dev/null)"
+            [ "${fp%%|*}" != "$CUR_RES" ] && { HEAVY=1; break; }
+        done
+    fi
+fi
+
 if [ "$HEAVY" = 1 ]; then
     echo "Building playlist..."
     LOADING_ASS="/tmp/loading_$$.ass"
@@ -2787,6 +2806,7 @@ with open(sys.argv[1], "w") as f:
 PY
     mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar \
         --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
+        --force-window=immediate --loop-file=inf --no-terminal \
         --sub-file="$LOADING_ASS" --sub-fonts-dir="$FONT_DIR" >/dev/null 2>&1 &
     LOADING_PID=$!
     SECONDS=0
