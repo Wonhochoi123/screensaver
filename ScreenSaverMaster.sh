@@ -1458,75 +1458,34 @@ mp.register_script_message("year-prev", function() jump_year(-1) end)
 -- ----------------------------------------------------------------------------
 -- ----------------------------------------------------------------------------
 -- Now-playing progress bar (razor-thin strip across the very bottom)
---   Driven by wall-clock time so motion is perfectly smooth, and so it works
---   for stills too (an image's playback-time never advances — only its
---   image-display-duration "duration" does). Pausing freezes the bar.
---   Videos additionally realign to the real playback position on seek and via
---   a gentle drift check; the (pt > 0.05) guard leaves stills untouched.
+--   Driven by mpv's NATIVE percent-pos — the same position data behind mpv's
+--   built-in OSD bar — so pausing, seeking and looping are all handled by the
+--   player itself; no wall-clock bookkeeping, no drift.
+--   Shown for real videos only. Stills are skipped because mpv keeps
+--   time-pos/duration at 0 for images (there is no position to show), and
+--   month title cards are skipped by request. percent-pos updates per frame
+--   while a video plays, which is plenty smooth.
 --   Click anywhere along the bottom strip to seek (handled in
 --   handle-left-click above).
 -- ----------------------------------------------------------------------------
-local prog_fill          = -1
-local prog_duration      = 0    -- length of current media (s); 0 hides the bar
-local prog_anchor_rt     = 0    -- mp.get_time() corresponding to elapsed = 0
-local prog_pause_started = nil  -- mp.get_time() captured at pause; nil = playing
-local prog_last_pt       = -1
+local prog_fill = -1
 
-mp.register_event("file-loaded", function()
-    local d = mp.get_property_number("duration") or 0
-    prog_duration      = (d > 0 and d < 1e7) and d or 0
-    prog_anchor_rt     = mp.get_time()
-    prog_pause_started = mp.get_property_bool("pause") and mp.get_time() or nil
-    prog_last_pt       = -1
-    prog_fill          = -1
-end)
+local function draw_progress(_, pp)
+    local path   = mp.get_property("path") or ""
+    local active = pp ~= nil
+        and (mp.get_property_number("duration") or 0) > 0
+        and not path:find("/TitleCards/", 1, true)
+        and not path:find("lavfi", 1, true)
 
--- Freeze while paused: stop the wall clock at the pause instant, then shift the
--- anchor forward by however long we stayed paused when playback resumes.
-mp.observe_property("pause", "bool", function(_, paused)
-    if paused == nil then return end
-    if paused then
-        if not prog_pause_started then prog_pause_started = mp.get_time() end
-    elseif prog_pause_started then
-        prog_anchor_rt = prog_anchor_rt + (mp.get_time() - prog_pause_started)
-        prog_pause_started = nil
-    end
-end)
-
--- Videos only: snap to the real position after a seek.
-mp.register_event("seek", function()
-    local pt = mp.get_property_number("playback-time")
-    if pt and pt > 0.05 then
-        prog_anchor_rt = mp.get_time() - pt
-        if prog_pause_started then prog_pause_started = mp.get_time() end
-    end
-end)
-
--- Videos only: gentle drift correction. A still's playback-time stays ~0, so
--- the guard skips it and the wall-clock bar is left alone.
-mp.add_periodic_timer(2.0, function()
-    if prog_duration <= 0 or prog_pause_started then return end
-    local pt = mp.get_property_number("playback-time")
-    if pt and pt > 0.05 and pt ~= prog_last_pt then
-        if math.abs((mp.get_time() - prog_anchor_rt) - pt) > 0.3 then
-            prog_anchor_rt = mp.get_time() - pt
-        end
-    end
-    prog_last_pt = pt or prog_last_pt
-end)
-
-local function draw_progress()
-    if prog_duration <= 0 then
+    if not active then
         if prog_fill ~= -1 then
             progress_ov:remove(); progress_bg_ov:remove(); prog_fill = -1
         end
         return
     end
 
-    local w, h    = refresh_display_size()
-    local ref     = prog_pause_started or mp.get_time()
-    local elapsed = math.max(0, math.min(ref - prog_anchor_rt, prog_duration))
-    local fillw   = math.floor(w * elapsed / prog_duration + 0.5)
+    local w, h  = refresh_display_size()
+    local fillw = math.floor(w * math.max(0, math.min(pp, 100)) / 100 + 0.5)
     if fillw == prog_fill then return end
     prog_fill = fillw
 
@@ -1554,7 +1513,9 @@ local function draw_progress()
         progress_ov:remove()
     end
 end
-mp.add_periodic_timer(0.03, draw_progress)
+
+mp.observe_property("percent-pos", "number", draw_progress)
+mp.register_event("file-loaded", function() prog_fill = -1 end)
 
 -- ----------------------------------------------------------------------------
 -- Delete the current media (DEL key)
@@ -2777,6 +2738,7 @@ chmod +x "$APP_DIR/vid-daemon.sh"
 echo "▶ Writing mpv.conf..."
 cat > "$CFG/mpv.conf" << 'EOF'
 fullscreen=yes
+auto-window-resize=no
 loop-playlist=inf
 shuffle=no
 osc=no
