@@ -960,7 +960,7 @@ end)
 -- Click it to skip to the next track.
 -- The marquee window is a fraction of the screen width (so it's "way longer"
 -- on bigger displays) rather than a fixed glyph count.
-local MUSIC_WIN_FRAC = 0.30
+local MUSIC_WIN_FRAC = tonumber(env("MUSIC_WIN_FRAC", "0.30")) or 0.30
 local music_scroll_gen = 0  -- bumped on each new track; cancels the old scroller
 
 local function set_music(text)

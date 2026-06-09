@@ -10,53 +10,13 @@
 #  the repo tarball and installs the real files (config/*, app/*) from it. When
 #  run from a checkout it uses the files sitting next to it.
 #
-#  Single source of truth: the export block below. Each value is declared ONCE
-#  in reference-preserving form — SINGLE-quoted, so $HOME / $APP_DIR stay
-#  literal here (templates, not yet resolved). It is written to
-#  config/screensaver.conf through an UNQUOTED heredoc: one round of expansion
-#  turns $APP_DIR into "$HOME/Screensaver-App", which still carries the $HOME
-#  reference, so the written file stays portable (no machine-specific absolute
-#  paths). The installer then SOURCES that file, resolving every level top-down,
-#  and every runtime script sources it too. Nothing downstream hardcodes a path.
+#  All settings live in config/screensaver.conf — the single source of truth.
+#  This installer SOURCES that file (so it runs on the exact same values every
+#  runtime script will) and copies it into ~/Screensaver-App/config/. To change
+#  a setting, edit config/screensaver.conf (in the repo, or the installed copy
+#  at ~/Screensaver-App/config/screensaver.conf).
 # =============================================================================
 set -u
-
-# -----------------------------------------------------------------------------
-#  DEFINE ONCE: portable templates (single-quoted) + tunables.
-# -----------------------------------------------------------------------------
-export APP_DIR='$HOME/Screensaver-App'
-export DATA_DIR='$APP_DIR/Data'
-export CFG='$APP_DIR/config'
-export BASE_DIR='$HOME/Pictures/Screensavers'
-export MEDIA_DIR='$DATA_DIR/Media'
-export MUSIC_DIR='$DATA_DIR/Music'
-export MAP_DIR='$DATA_DIR/Maps'
-export OPT_DIR='$DATA_DIR/Optimized_Vids'
-export TITLE_DIR='$DATA_DIR/TitleCards'
-export PLAYLIST_DIR='$DATA_DIR/Playlist'
-export PLAYLIST='$PLAYLIST_DIR/playlist.m3u'
-export POLICE='$APP_DIR/xmp-police.sh'
-export FONT_DIR='$MEDIA_DIR/Fonts'
-export AUDIO_SOCK='/tmp/ss_audio.sock'
-
-export PHOTO_DURATION=7        # seconds each still photo is shown (videos play in full)
-export VOLUME=70               # mpv startup volume (0-100)
-export IDLE_TIMEOUT_MS=300000  # idle ms before the screensaver auto-launches (= 5 min)
-export MIN_LOAD_SECS=2         # minimum seconds the "please wait" screen stays visible
-export VID_RESCAN_SECS=300     # how often vid-daemon rescans Media/ for new videos
-
-# Offline place-name resolution (GeoNames). The screensaver resolves the nearby
-# prominent landmark + city/state/country ENTIRELY OFFLINE from a local SQLite
-# built once by config/build-geodb.sh. No API key, no rate limit, no runtime
-# network. GEONAMES_COUNTRIES is a space-separated list of ISO country codes to
-# index (small, fast); leave it EMPTY to index the whole planet (~390MB
-# download, larger DB). Data © GeoNames, licensed CC-BY 4.0.
-export GEONAMES_COUNTRIES=''
-export GEODB='$MAP_DIR/geo/geonames.sqlite'
-# Bump GEODB_VERSION whenever the DB's contents change (country set or the
-# landmark feature-code table). On the next launch a version mismatch forces a
-# one-time rebuild so the change actually takes effect.
-export GEODB_VERSION='6'
 
 # -----------------------------------------------------------------------------
 #  Locate the source tree (config/* and app/*). Use the local checkout when this
@@ -67,7 +27,7 @@ SRC=""
 if [ -n "${BASH_SOURCE:-}" ] && [ -f "${BASH_SOURCE:-/nonexistent}" ]; then
     SRC="$(cd "$(dirname "${BASH_SOURCE}")" && pwd)"
 fi
-if [ -z "$SRC" ] || [ ! -f "$SRC/config/photo.lua" ]; then
+if [ -z "$SRC" ] || [ ! -f "$SRC/config/screensaver.conf" ]; then
     echo "▶ Fetching screensaver source..."
     command -v curl >/dev/null 2>&1 || { echo "✗ curl is required to bootstrap." >&2; exit 1; }
     command -v tar  >/dev/null 2>&1 || { echo "✗ tar is required to bootstrap."  >&2; exit 1; }
@@ -79,7 +39,7 @@ if [ -z "$SRC" ] || [ ! -f "$SRC/config/photo.lua" ]; then
     fi
     SRC="$(echo "$_SS_TMP"/*/)"; SRC="${SRC%/}"   # the extracted screensaver-main/
 fi
-if [ ! -f "$SRC/config/photo.lua" ]; then
+if [ ! -f "$SRC/config/screensaver.conf" ]; then
     echo "✗ Could not locate source files (looked in: $SRC)." >&2
     exit 1
 fi
@@ -87,48 +47,13 @@ fi
 # install <relsrc> <dest> <mode>  — copy a source file into place with a mode.
 copy_file() { install -m "$3" "$SRC/$1" "$2"; }
 
-# Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
-# config goes. Everything deeper is resolved by sourcing the file we write.
-eval "REAL_APP=\"$APP_DIR\""
-mkdir -p "$REAL_APP/config"
-
 # -----------------------------------------------------------------------------
-#  Compile the single source of truth. Unquoted heredoc + single-quoted sources
-#  => the file keeps $HOME / $VAR references (portable). Order = dependency order.
+#  Load the central config (single source of truth). Sourcing resolves every
+#  $VAR top-down, so from here the installer runs on the exact same values as
+#  every runtime script. The file itself is copied into place verbatim below.
 # -----------------------------------------------------------------------------
-echo "▶ Writing screensaver.conf (single source of truth)..."
-cat > "$REAL_APP/config/screensaver.conf" << CONF
-# =============================================================================
-#  Screensaver-App — central configuration  (AUTO-GENERATED, single source).
-#  Edit a value here and it applies everywhere; every script sources this file.
-#  Keep entries in dependency order so they resolve cleanly when sourced.
-# =============================================================================
-export APP_DIR="$APP_DIR"
-export DATA_DIR="$DATA_DIR"
-export CFG_DIR="$CFG"
-export BASE_DIR="$BASE_DIR"
-export MEDIA_DIR="$MEDIA_DIR"
-export MUSIC_DIR="$MUSIC_DIR"
-export MAP_DIR="$MAP_DIR"
-export OPT_DIR="$OPT_DIR"
-export TITLE_DIR="$TITLE_DIR"
-export PLAYLIST_DIR="$PLAYLIST_DIR"
-export PLAYLIST="$PLAYLIST"
-export POLICE="$POLICE"
-export FONT_DIR="$FONT_DIR"
-export AUDIO_SOCK="$AUDIO_SOCK"
-export PHOTO_DURATION="$PHOTO_DURATION"
-export VOLUME="$VOLUME"
-export IDLE_TIMEOUT_MS="$IDLE_TIMEOUT_MS"
-export MIN_LOAD_SECS="$MIN_LOAD_SECS"
-export VID_RESCAN_SECS="$VID_RESCAN_SECS"
-export GEONAMES_COUNTRIES="$GEONAMES_COUNTRIES"
-export GEODB="$GEODB"
-export GEODB_VERSION="$GEODB_VERSION"
-CONF
-
-# Run the installer on its own config — this resolves every level, top-down.
-. "$REAL_APP/config/screensaver.conf"
+echo "▶ Loading config (config/screensaver.conf)..."
+. "$SRC/config/screensaver.conf"
 CFG="$CFG_DIR"   # legacy alias used by a few install steps below
 
 echo "▶ Preparing strict folder architecture..."
@@ -251,11 +176,12 @@ FCEOF
 fi
 
 # =============================================================================
-#  Install the app files from the source tree.
+#  Install the config + app files from the source tree.
 # =============================================================================
 echo "▶ Installing config and app files..."
 
 # config/  → $CFG
+copy_file config/screensaver.conf "$CFG/screensaver.conf" 0644
 copy_file config/input.conf       "$CFG/input.conf"       0644
 sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket path
 copy_file config/photo.lua        "$CFG/photo.lua"        0644
