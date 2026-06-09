@@ -299,10 +299,8 @@ local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
 local landmark_ov  = mp.create_osd_overlay("ass-events")
-local progress_ov     = mp.create_osd_overlay("ass-events")  -- played core
-local progress_bg_ov  = mp.create_osd_overlay("ass-events")  -- track background
-local progress_flare_ov = mp.create_osd_overlay("ass-events") -- flare outer glow
-local progress_core_ov  = mp.create_osd_overlay("ass-events") -- flare bright center
+local progress_ov    = mp.create_osd_overlay("ass-events")  -- played (white)
+local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (black)
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Now-playing marquee state (forward-declared so the click handler, defined
@@ -1302,8 +1300,6 @@ mp.register_event("shutdown", function()
     loading_ov:remove()
     progress_ov:remove()
     progress_bg_ov:remove()
-    progress_flare_ov:remove()
-    progress_core_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1422,89 +1418,83 @@ mp.register_script_message("year-next", function() jump_year(1) end)
 mp.register_script_message("year-prev", function() jump_year(-1) end)
 
 -- ----------------------------------------------------------------------------
--- Now-playing progress bar — flare style
---   All source shapes are 1-pixel tall; blur then spreads them into smooth
---   soft ovals with zero visible straight edges ("not boxy").
---   The flare head extends left AND right from the current position.
---   Click anywhere along the bottom strip to seek.
 -- ----------------------------------------------------------------------------
-local prog_fill = -1
+-- Now-playing progress bar (razor-thin strip across the very bottom)
+--   Driven by wall-clock time rather than polling percent-pos, so motion is
+--   perfectly smooth. A 3-second drift check resyncs if the clock drifts
+--   from actual playback position by more than 150 ms.
+--   Click anywhere along the bottom strip to seek (handled in
+--   handle-left-click above).
+-- ----------------------------------------------------------------------------
+local prog_fill     = -1
+local prog_duration = 0   -- current media duration (seconds)
+local prog_start_rt = 0   -- mp.get_time() when playback position was 0
+
+local function prog_resync()
+    local pos = mp.get_property_number("playback-time") or 0
+    prog_start_rt = mp.get_time() - pos
+end
+
+mp.register_event("file-loaded", function()
+    prog_duration = mp.get_property_number("duration") or 0
+    prog_resync()
+    prog_fill = -1
+end)
+
+mp.register_event("seek", prog_resync)
+
+mp.observe_property("pause", "bool", function(_, paused)
+    if not paused then prog_resync() end
+end)
+
+mp.add_periodic_timer(3.0, function()
+    if prog_duration <= 0 then return end
+    local pos = mp.get_property_number("playback-time")
+    if not pos then return end
+    if math.abs((mp.get_time() - prog_start_rt) - pos) > 0.15 then
+        prog_start_rt = mp.get_time() - pos
+    end
+end)
+
 local function draw_progress()
-    local pct = mp.get_property_number("percent-pos")
-    if not pct then
+    if prog_duration <= 0 then
         if prog_fill ~= -1 then
-            progress_ov:remove(); progress_bg_ov:remove()
-            progress_flare_ov:remove(); progress_core_ov:remove()
-            prog_fill = -1
+            progress_ov:remove(); progress_bg_ov:remove(); prog_fill = -1
         end
         return
     end
 
     local w, h    = refresh_display_size()
-    local fillw   = math.floor(w * pct / 100 + 0.5)
-    local th      = math.max(2, math.floor(h * 0.003 + 0.5))
-    local ly      = h - 1   -- y of the 1-px source line (last row)
-    local flicker = 0.7 + math.random() * 0.6
+    local elapsed = math.max(0, math.min(mp.get_time() - prog_start_rt, prog_duration))
+    local fillw   = math.floor(w * elapsed / prog_duration + 0.5)
+    if fillw == prog_fill then return end
+    prog_fill = fillw
 
-    -- 1-pixel-tall horizontal line: source shape for all layers.
-    -- With blur B, the result looks like a smooth soft oval B*2 pixels tall.
-    local function hline(x0, x1)
-        return string.format("m %d %d l %d %d l %d %d l %d %d",
-            x0, ly, x1, ly, x1, ly + 1, x0, ly + 1)
+    local th = math.max(2, math.floor(h * 0.003 + 0.5))
+    local y0 = h - th
+    local function rect(x0, x1)
+        return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y0, x1, y0, x1, h, x0, h)
     end
 
-    -- Static elements: only redraw when pixel position changes.
-    if fillw ~= prog_fill then
-        prog_fill = fillw
-
-        -- Full-width track: 1-px source, barely-visible glow (≈8% opaque)
-        progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
+    progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
+    if fillw < w then
         progress_bg_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&HEE&\\p1}%s{\\p0}",
-            th, hline(0, w))
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\alpha&H00&\\p1}%s{\\p0}", rect(fillw, w))
         progress_bg_ov:update()
-
-        -- Played trail: slightly brighter than track (≈22% opaque)
-        if fillw > 0 then
-            progress_ov.res_x = w; progress_ov.res_y = h
-            progress_ov.data = string.format(
-                "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&HC8&\\p1}%s{\\p0}",
-                th, hline(0, fillw))
-            progress_ov:update()
-        else
-            progress_ov:remove()
-        end
+    else
+        progress_bg_ov:remove()
     end
 
-    -- Flare elements: always redraw for per-frame flicker.
-    if fillw <= 0 then
-        progress_flare_ov:remove(); progress_core_ov:remove()
-        return
+    progress_ov.res_x = w; progress_ov.res_y = h
+    if fillw > 0 then
+        progress_ov.data = string.format(
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}", rect(0, fillw))
+        progress_ov:update()
+    else
+        progress_ov:remove()
     end
-
-    -- Horizontal streak: 1-px source extends left AND right from head.
-    -- Large blur relative to 1-px height → smooth elongated soft oval.
-    local s_hw    = math.floor(12 * th)          -- half-width of source line
-    local s_blur  = math.max(2, math.floor(2.5 * th))
-    local s_alpha = math.max(0x90, math.min(0xD8,
-        math.floor(0xB4 - (flicker - 1.0) * 0x30 + 0.5)))
-    progress_flare_ov.res_x = w; progress_flare_ov.res_y = h
-    progress_flare_ov.data = string.format(
-        "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&H%02X&\\p1}%s{\\p0}",
-        s_blur, s_alpha, hline(fillw - s_hw, fillw + s_hw))
-    progress_flare_ov:update()
-
-    -- Core hot-spot: tiny 1-px source, tight blur → round soft dot, flickering.
-    local c_hw    = math.max(1, math.floor(th * 0.5 * flicker + 0.5))
-    local c_blur  = math.max(1, math.floor(th * 1.0 + 0.5))
-    progress_core_ov.res_x = w; progress_core_ov.res_y = h
-    progress_core_ov.data = string.format(
-        "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}",
-        c_blur, hline(fillw - c_hw, fillw + c_hw))
-    progress_core_ov:update()
 end
 mp.add_periodic_timer(0.03, draw_progress)
-mp.register_event("file-loaded", function() prog_fill = -1; draw_progress() end)
 
 -- ----------------------------------------------------------------------------
 -- Delete the current media (DEL key)
