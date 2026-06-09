@@ -301,6 +301,7 @@ local music_ov     = mp.create_osd_overlay("ass-events")
 local landmark_ov  = mp.create_osd_overlay("ass-events")
 local progress_ov  = mp.create_osd_overlay("ass-events")   -- played (white)
 local progress_bg_ov = mp.create_osd_overlay("ass-events") -- remaining (black)
+local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Now-playing marquee state (forward-declared so the click handler, defined
 -- earlier in the file, can reference them as upvalues).
@@ -1041,6 +1042,7 @@ mp.register_event("file-loaded", function()
     ov:remove()
     lm_gen = lm_gen + 1   -- cancel any in-flight landmark animation
     landmark_ov:remove()
+    loading_ov:remove()
     seq = seq + 1
     local my_seq = seq
     prewarmed[orig_path] = true
@@ -1273,11 +1275,27 @@ end
 mp.add_periodic_timer(3, poll_music)
 poll_music()
 
+mp.register_script_message("ss-show-loading", function()
+    local w, h = refresh_display_size()
+    local fs   = math.floor(h * 0.066)
+    local fsp  = math.floor(h * 0.024 + 0.5)
+    local fs2  = math.floor(h * 0.040)
+    local fsp2 = math.floor(h * 0.016 + 0.5)
+    loading_ov.res_x = w; loading_ov.res_y = h
+    loading_ov.data = string.format(
+        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H00&}UPDATING PLAYLIST"
+        .. "\\N\\N{\\fnMontserrat SemiBold\\fs%d\\fsp%d\\alpha&H80&}PLEASE  WAIT",
+        math.floor(w / 2), math.floor(h / 2) - math.floor(fs * 0.5),
+        fs, fsp, glow(fs), fs2, fsp2)
+    loading_ov:update()
+end)
+
 mp.register_event("shutdown", function()
     ov:remove()
     pause_ov:remove()
     music_ov:remove()
     landmark_ov:remove()
+    loading_ov:remove()
     progress_ov:remove()
     progress_bg_ov:remove()
 end)
@@ -2724,14 +2742,15 @@ fi
 MUSIC_PID=""
 POLICE_PID=""
 VID_PID=""
-LOADING_PID=""
+MPV_LOAD_PID=""
+LOAD_SOCK=""
 
 cleanup() {
-    [ -n "$MUSIC_PID" ]   && kill "$MUSIC_PID" 2>/dev/null
-    [ -n "$POLICE_PID" ]  && kill "$POLICE_PID" 2>/dev/null
-    [ -n "$VID_PID" ]     && kill "$VID_PID" 2>/dev/null
-    [ -n "$LOADING_PID" ] && kill "$LOADING_PID" 2>/dev/null
-    rm -f "$AUDIO_SOCK"
+    [ -n "$MUSIC_PID" ]    && kill "$MUSIC_PID" 2>/dev/null
+    [ -n "$POLICE_PID" ]   && kill "$POLICE_PID" 2>/dev/null
+    [ -n "$VID_PID" ]      && kill "$VID_PID" 2>/dev/null
+    [ -n "$MPV_LOAD_PID" ] && kill "$MPV_LOAD_PID" 2>/dev/null
+    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}"
 }
 trap cleanup EXIT INT TERM
 
@@ -2807,37 +2826,24 @@ if [ -f "$APP_DIR/display.conf" ]; then
 fi
 
 if [ "$HEAVY" = 1 ]; then
-    echo "Building playlist..."
-    LOADING_ASS="/tmp/loading_$$.ass"
-    python3 - "$LOADING_ASS" "$_SS_W" "$_SS_H" <<'PY'
-import sys
-w, h = sys.argv[2], sys.argv[3]
-fs, fs2 = str(int(h) // 15), str(int(h) // 25)
-ass = f"""[Script Info]
-ScriptType: v4.00+
-PlayResX: {w}
-PlayResY: {h}
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
-Style: Default,Montserrat ExtraBold,{fs},&H00FFFFFF,5
-
-[Events]
-Format: Layer, Start, End, Style, Text
-Dialogue: 0,0:00:00.00,9:59:00.00,Default,{{\\fsp4}}UPDATING PLAYLIST\\N\\N{{\\fs{fs2}\\fsp2\\alpha&H80&}}PLEASE WAIT
-"""
-with open(sys.argv[1], "w") as f:
-    f.write(ass)
-PY
-    mpv "av://lavfi:color=c=black:s=${_SS_W}x${_SS_H}" \
-        --no-config --fullscreen --no-osc --no-osd-bar \
-        --no-input-default-bindings --input-conf=/dev/null \
-        --cursor-autohide=always --force-window=immediate \
-        --loop-file=inf --no-terminal \
-        --sub-file="$LOADING_ASS" --sub-fonts-dir="$FONT_DIR" \
+    LOAD_SOCK="/tmp/ss_load_$$.sock"
+    rm -f "$LOAD_SOCK"
+    mpv --config-dir="$CFG_DIR" \
+        --sub-fonts-dir="$FONT_DIR" \
+        --image-display-duration="$PHOTO_DURATION" \
+        --volume=0 \
+        --input-ipc-server="$LOAD_SOCK" \
+        "av://lavfi:color=c=black:s=${_SS_W}x${_SS_H}" \
         >/dev/null 2>&1 &
-    LOADING_PID=$!
-    SECONDS=0
+    MPV_LOAD_PID=$!
+    # Wait for IPC socket (up to 5s)
+    _w=0
+    while [ ! -S "$LOAD_SOCK" ] && [ $_w -lt 50 ]; do
+        sleep 0.1; _w=$((_w+1))
+    done
+    # Ask photo.lua to show the loading overlay
+    printf '{"command":["script-message","ss-show-loading"]}\n' | \
+        socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
 fi
 
 "$POLICE" --once
@@ -2940,22 +2946,26 @@ mv "$PLAYLIST.tmp" "$PLAYLIST"
 rm -f "$PLAYLIST.raw"
 echo "$_SS_MC" > "$APP_DIR/media.count"
 
-if [ -n "$LOADING_PID" ]; then
-    [ "$SECONDS" -lt "$MIN_LOAD_SECS" ] && sleep "$((MIN_LOAD_SECS - SECONDS))"
-    kill "$LOADING_PID" 2>/dev/null
-    wait "$LOADING_PID" 2>/dev/null
-    LOADING_PID=""
-    rm -f "$LOADING_ASS"
+if [ -n "$LOAD_SOCK" ] && [ -S "$LOAD_SOCK" ]; then
+    # Playlist is ready — restore volume and hand off to the real content.
+    # photo.lua clears the loading overlay automatically on the first file-loaded.
+    printf '{"command":["set_property","volume",%s]}\n' "$VOLUME" | \
+        socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
+    printf '{"command":["loadlist","%s","replace"]}\n' "$PLAYLIST" | \
+        socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
+    rm -f "$LOAD_SOCK"; LOAD_SOCK=""
+    wait "$MPV_LOAD_PID"
+else
+    # HEAVY=0: playlist was ready before mpv started, launch directly.
+    # --sub-fonts-dir makes the HUD find Montserrat in Media/Fonts (a
+    # non-default font path) and keeps the app self-contained when copied
+    # between machines.
+    mpv --config-dir="$CFG_DIR" \
+        --sub-fonts-dir="$FONT_DIR" \
+        --image-display-duration="$PHOTO_DURATION" \
+        --volume="$VOLUME" \
+        --playlist="$PLAYLIST"
 fi
-
-# Photo display time + volume come from the config, not mpv.conf.
-# --sub-fonts-dir makes the HUD find Montserrat in Media/Fonts (a non-default
-# font path) and keeps the app self-contained when copied between machines.
-mpv --config-dir="$CFG_DIR" \
-    --sub-fonts-dir="$FONT_DIR" \
-    --image-display-duration="$PHOTO_DURATION" \
-    --volume="$VOLUME" \
-    --playlist="$PLAYLIST"
 LAUNCH_EOF
 chmod +x "$APP_DIR/launch.sh"
 
