@@ -1,25 +1,23 @@
 #!/bin/bash
-# >>> GENERATED FILE — DO NOT EDIT DIRECTLY. <<<
-# Assembled from src/ by build.sh. Edit the files under src/ (src/installer.tmpl
-# plus src/config, src/app, src/desktop, src/fontconfig) and run ./build.sh.
 # =============================================================================
-#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
+#  mpv Photo & Video Screensaver — installer  (App/PC/TV agnostic)
+#
+#  Run it either way:
+#    * curl -fsSL https://raw.githubusercontent.com/Wonhochoi123/screensaver/main/install.sh | bash
+#    * git clone … && ./install.sh        (uses the local checkout's files)
+#
+#  When piped from curl there is no local source tree, so this script downloads
+#  the repo tarball and installs the real files (config/*, app/*) from it. When
+#  run from a checkout it uses the files sitting next to it.
 #
 #  Single source of truth: the export block below. Each value is declared ONCE
 #  in reference-preserving form — SINGLE-quoted, so $HOME / $APP_DIR stay
-#  literal here (these are templates, not yet resolved). The installer writes
-#  them to config/screensaver.conf through an UNQUOTED heredoc: one round of
-#  expansion turns $APP_DIR into its value "$HOME/Screensaver-App", which still
-#  carries the reference, so the written file stays portable (no machine-
-#  specific absolute paths). The installer then SOURCES that file, which
-#  resolves every level correctly, top-down — and from then on runs on the
-#  exact values every runtime script will. Nothing downstream hardcodes a path.
-#
-#  Two rules make the source step resolve fully:
-#    (1) every referenced var is present in the file, and
-#    (2) it is listed before anything that references it (dependency order).
-#  A single `eval` only expands ONE level, which is why we must NOT eval the
-#  nested vars to resolve them — we source instead.
+#  literal here (templates, not yet resolved). It is written to
+#  config/screensaver.conf through an UNQUOTED heredoc: one round of expansion
+#  turns $APP_DIR into "$HOME/Screensaver-App", which still carries the $HOME
+#  reference, so the written file stays portable (no machine-specific absolute
+#  paths). The installer then SOURCES that file, resolving every level top-down,
+#  and every runtime script sources it too. Nothing downstream hardcodes a path.
 # =============================================================================
 set -u
 
@@ -60,6 +58,35 @@ export GEODB='$MAP_DIR/geo/geonames.sqlite'
 # one-time rebuild so the change actually takes effect.
 export GEODB_VERSION='6'
 
+# -----------------------------------------------------------------------------
+#  Locate the source tree (config/* and app/*). Use the local checkout when this
+#  script runs from one; otherwise bootstrap by downloading the repo tarball.
+# -----------------------------------------------------------------------------
+REPO_TARBALL="https://github.com/Wonhochoi123/screensaver/archive/refs/heads/main.tar.gz"
+SRC=""
+if [ -n "${BASH_SOURCE:-}" ] && [ -f "${BASH_SOURCE:-/nonexistent}" ]; then
+    SRC="$(cd "$(dirname "${BASH_SOURCE}")" && pwd)"
+fi
+if [ -z "$SRC" ] || [ ! -f "$SRC/config/photo.lua" ]; then
+    echo "▶ Fetching screensaver source..."
+    command -v curl >/dev/null 2>&1 || { echo "✗ curl is required to bootstrap." >&2; exit 1; }
+    command -v tar  >/dev/null 2>&1 || { echo "✗ tar is required to bootstrap."  >&2; exit 1; }
+    _SS_TMP="$(mktemp -d)"
+    trap 'rm -rf "$_SS_TMP"' EXIT
+    if ! curl -fsSL "$REPO_TARBALL" | tar -xz -C "$_SS_TMP"; then
+        echo "✗ Failed to download or extract the source from $REPO_TARBALL" >&2
+        exit 1
+    fi
+    SRC="$(echo "$_SS_TMP"/*/)"; SRC="${SRC%/}"   # the extracted screensaver-main/
+fi
+if [ ! -f "$SRC/config/photo.lua" ]; then
+    echo "✗ Could not locate source files (looked in: $SRC)." >&2
+    exit 1
+fi
+
+# install <relsrc> <dest> <mode>  — copy a source file into place with a mode.
+copy_file() { install -m "$3" "$SRC/$1" "$2"; }
+
 # Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
 # config goes. Everything deeper is resolved by sourcing the file we write.
 eval "REAL_APP=\"$APP_DIR\""
@@ -71,7 +98,33 @@ mkdir -p "$REAL_APP/config"
 # -----------------------------------------------------------------------------
 echo "▶ Writing screensaver.conf (single source of truth)..."
 cat > "$REAL_APP/config/screensaver.conf" << CONF
-@@INCLUDE config/screensaver.conf
+# =============================================================================
+#  Screensaver-App — central configuration  (AUTO-GENERATED, single source).
+#  Edit a value here and it applies everywhere; every script sources this file.
+#  Keep entries in dependency order so they resolve cleanly when sourced.
+# =============================================================================
+export APP_DIR="$APP_DIR"
+export DATA_DIR="$DATA_DIR"
+export CFG_DIR="$CFG"
+export BASE_DIR="$BASE_DIR"
+export MEDIA_DIR="$MEDIA_DIR"
+export MUSIC_DIR="$MUSIC_DIR"
+export MAP_DIR="$MAP_DIR"
+export OPT_DIR="$OPT_DIR"
+export TITLE_DIR="$TITLE_DIR"
+export PLAYLIST_DIR="$PLAYLIST_DIR"
+export PLAYLIST="$PLAYLIST"
+export POLICE="$POLICE"
+export FONT_DIR="$FONT_DIR"
+export AUDIO_SOCK="$AUDIO_SOCK"
+export PHOTO_DURATION="$PHOTO_DURATION"
+export VOLUME="$VOLUME"
+export IDLE_TIMEOUT_MS="$IDLE_TIMEOUT_MS"
+export MIN_LOAD_SECS="$MIN_LOAD_SECS"
+export VID_RESCAN_SECS="$VID_RESCAN_SECS"
+export GEONAMES_COUNTRIES="$GEONAMES_COUNTRIES"
+export GEODB="$GEODB"
+export GEODB_VERSION="$GEODB_VERSION"
 CONF
 
 # Run the installer on its own config — this resolves every level, top-down.
@@ -187,137 +240,66 @@ if [ "$got_font" = 1 ]; then
     FC_CONF_DIR="$HOME/.config/fontconfig/conf.d"
     mkdir -p "$FC_CONF_DIR"
     cat > "$FC_CONF_DIR/00-screensaver-fonts.conf" << FCEOF
-@@INCLUDE fontconfig/00-screensaver-fonts.conf
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>$FONT_DIR</dir>
+</fontconfig>
 FCEOF
     fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
     echo "▶ Montserrat fonts installed to $FONT_DIR and registered."
 fi
 
 # =============================================================================
-# 1. input.conf  (socket path injected from config via placeholder)
+#  Install the app files from the source tree.
 # =============================================================================
-echo "▶ Writing input.conf..."
-cat > "$CFG/input.conf" << 'EOF'
-@@INCLUDE config/input.conf
-EOF
-sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"
+echo "▶ Installing config and app files..."
+
+# config/  → $CFG
+copy_file config/input.conf       "$CFG/input.conf"       0644
+sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket path
+copy_file config/photo.lua        "$CFG/photo.lua"        0644
+copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
+copy_file config/build-minimap.sh "$CFG/build-minimap.sh" 0755
+copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755
+copy_file config/build-title.sh   "$CFG/build-title.sh"   0755
+copy_file config/build-geodb.sh   "$CFG/build-geodb.sh"   0755
+copy_file config/geo-resolve.sh   "$CFG/geo-resolve.sh"   0755
+
+# app/  → $APP_DIR
+copy_file app/xmp-police.sh       "$APP_DIR/xmp-police.sh"   0755
+copy_file app/vid-daemon.sh       "$APP_DIR/vid-daemon.sh"   0755
+copy_file app/launch.sh           "$APP_DIR/launch.sh"       0755
+copy_file app/idle-watcher.sh     "$APP_DIR/idle-watcher.sh" 0755
 
 # =============================================================================
-# 2. photo.lua  (paths come from the environment exported by the config)
-# =============================================================================
-echo "▶ Writing photo.lua..."
-cat > "$CFG/photo.lua" << 'EOF'
-@@INCLUDE config/photo.lua
-EOF
-
-# =============================================================================
-# 3. build-minimap.sh
-# =============================================================================
-echo "▶ Writing build-minimap.sh..."
-cat > "$CFG/build-minimap.sh" << 'EOF'
-@@INCLUDE config/build-minimap.sh
-EOF
-chmod +x "$CFG/build-minimap.sh"
-
-# =============================================================================
-# 3a2. trash-media.sh  (DEL key: move a media file + everything derived from it
-#      to the system trash, and drop it from the playlist)
-# =============================================================================
-echo "▶ Writing trash-media.sh..."
-cat > "$CFG/trash-media.sh" << 'EOF'
-@@INCLUDE config/trash-media.sh
-EOF
-chmod +x "$CFG/trash-media.sh"
-
-# =============================================================================
-# 3b. build-title.sh (Animated Cinematic Title Generator)
-# =============================================================================
-echo "▶ Writing build-title.sh..."
-cat > "$CFG/build-title.sh" << 'EOF'
-@@INCLUDE config/build-title.sh
-EOF
-chmod +x "$CFG/build-title.sh"
-
-# =============================================================================
-# 3c. build-geodb.sh  (one-time: download GeoNames dumps -> offline SQLite)
-#     Data © GeoNames, CC-BY 4.0 (https://www.geonames.org). Re-run to refresh
-#     or after changing GEONAMES_COUNTRIES. Needs: curl, unzip, python3.
-# =============================================================================
-echo "▶ Writing build-geodb.sh..."
-cat > "$CFG/build-geodb.sh" << 'EOF'
-@@INCLUDE config/build-geodb.sh
-EOF
-chmod +x "$CFG/build-geodb.sh"
-
-# =============================================================================
-# 3d. geo-resolve.sh  (offline: nearest prominent landmark + city via GeoNames)
-#     Prints "landmark<TAB>city<TAB>state<TAB>country". No network, no key.
-# =============================================================================
-echo "▶ Writing geo-resolve.sh..."
-cat > "$CFG/geo-resolve.sh" << 'EOF'
-@@INCLUDE config/geo-resolve.sh
-EOF
-chmod +x "$CFG/geo-resolve.sh"
-
-# =============================================================================
-# 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
-#    Supersedes the old exif-daemon.sh and apply-overrides.sh.
-# =============================================================================
-echo "▶ Writing xmp-police.sh..."
-cat > "$APP_DIR/xmp-police.sh" << 'EOF'
-@@INCLUDE app/xmp-police.sh
-EOF
-chmod +x "$APP_DIR/xmp-police.sh"
-
-# =============================================================================
-# 5. vid-daemon.sh
-# =============================================================================
-echo "▶ Writing vid-daemon.sh..."
-cat > "$APP_DIR/vid-daemon.sh" << 'EOF'
-@@INCLUDE app/vid-daemon.sh
-EOF
-chmod +x "$APP_DIR/vid-daemon.sh"
-
-# =============================================================================
-# 6. mpv.conf  (image-display-duration + volume now come from launch.sh/config)
-# =============================================================================
-echo "▶ Writing mpv.conf..."
-cat > "$CFG/mpv.conf" << 'EOF'
-@@INCLUDE config/mpv.conf
-EOF
-
-# =============================================================================
-# 7. launch.sh
-# =============================================================================
-echo "▶ Writing launch.sh..."
-cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
-@@INCLUDE app/launch.sh
-LAUNCH_EOF
-chmod +x "$APP_DIR/launch.sh"
-
-# =============================================================================
-# 8. idle-watcher.sh
-# =============================================================================
-echo "▶ Writing idle-watcher.sh..."
-cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
-@@INCLUDE app/idle-watcher.sh
-EOF
-chmod +x "$APP_DIR/idle-watcher.sh"
-
-# =============================================================================
-# 9. Autostart + manual launcher  (absolute paths baked from config)
+#  Autostart + manual launcher  (absolute paths baked from config)
 # =============================================================================
 echo "▶ Writing autostart + app launcher..."
 cat > "$HOME/.config/autostart/idle-watcher.desktop" << EOF
-@@INCLUDE desktop/idle-watcher.desktop
+[Desktop Entry]
+Type=Application
+Exec=sh -c "$APP_DIR/idle-watcher.sh"
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name=Screensaver Idle Watcher
+Comment=Launches the photo screensaver after the configured idle time
 EOF
 
 cat > "$HOME/.local/share/applications/screensaver-now.desktop" << EOF
-@@INCLUDE desktop/screensaver-now.desktop
+[Desktop Entry]
+Type=Application
+Exec=sh -c "$APP_DIR/launch.sh"
+Icon=video-display
+Terminal=false
+Name=Start Screensaver
+Comment=Launch the photo screensaver now
+Categories=Utility;
 EOF
 
 # =============================================================================
-# 10. Offline place database (build now if possible)
+#  Offline place database (build now if possible)
 # =============================================================================
 if command -v unzip >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
     echo "▶ Building offline GeoNames place database (one-time)..."
@@ -327,7 +309,7 @@ else
 fi
 
 # =============================================================================
-# 11. Done
+#  Done
 # =============================================================================
 echo ""
 echo "✅ Migration and Deployment finished!"

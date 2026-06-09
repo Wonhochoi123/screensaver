@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Exec=sh -c "$APP_DIR/idle-watcher.sh"
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Name=Screensaver Idle Watcher
-Comment=Launches the photo screensaver after the configured idle time
