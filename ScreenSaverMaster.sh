@@ -299,7 +299,8 @@ local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
 local landmark_ov  = mp.create_osd_overlay("ass-events")
-local progress_ov  = mp.create_osd_overlay("ass-events")
+local progress_ov  = mp.create_osd_overlay("ass-events")   -- played (white)
+local progress_bg_ov = mp.create_osd_overlay("ass-events") -- remaining (black)
 
 -- Now-playing marquee state (forward-declared so the click handler, defined
 -- earlier in the file, can reference them as upvalues).
@@ -1275,6 +1276,7 @@ mp.register_event("shutdown", function()
     music_ov:remove()
     landmark_ov:remove()
     progress_ov:remove()
+    progress_bg_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1404,7 +1406,9 @@ local prog_last = -1
 local function draw_progress()
     local pct = mp.get_property_number("percent-pos")
     if not pct then
-        if prog_last ~= -1 then progress_ov:remove(); prog_last = -1 end
+        if prog_last ~= -1 then
+            progress_ov:remove(); progress_bg_ov:remove(); prog_last = -1
+        end
         return
     end
     if math.abs(pct - prog_last) < 0.15 then return end
@@ -1418,22 +1422,27 @@ local function draw_progress()
         return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y0, x1, y0, x1, h, x0, h)
     end
 
-    progress_ov.res_x = w
-    progress_ov.res_y = h
-    -- Two separate, NON-overlapping events: libass does not reliably render two
-    -- {\p1}..{\p0} drawing scopes inside one event, so the played (white) and
-    -- remaining (black) halves are emitted as their own events. Opaque.
-    local parts = {}
-    if fillw > 0 then
-        parts[#parts + 1] = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}", rect(0, fillw))
-    end
+    -- One single-event overlay per colour (the pattern every other overlay in
+    -- this script uses). A single osd-overlay carrying two newline-separated
+    -- events does NOT render reliably, which is why nothing showed before.
+    -- Remaining (black) first so the played (white) sits cleanly beside it.
+    progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
     if fillw < w then
-        parts[#parts + 1] = string.format(
+        progress_bg_ov.data = string.format(
             "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\alpha&H00&\\p1}%s{\\p0}", rect(fillw, w))
+        progress_bg_ov:update()
+    else
+        progress_bg_ov:remove()
     end
-    progress_ov.data = table.concat(parts, "\n")
-    progress_ov:update()
+
+    progress_ov.res_x = w; progress_ov.res_y = h
+    if fillw > 0 then
+        progress_ov.data = string.format(
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}", rect(0, fillw))
+        progress_ov:update()
+    else
+        progress_ov:remove()
+    end
 end
 mp.add_periodic_timer(0.1, draw_progress)
 mp.register_event("file-loaded", function() prog_last = -1; draw_progress() end)
