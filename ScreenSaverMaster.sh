@@ -2755,6 +2755,12 @@ fi
 #     including dropping deleted media.
 #   HEAVY only decides whether to show the loading screen.
 # =============================================================================
+_SS_MC="$(find "$MEDIA_DIR" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
+       -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
+       -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
+       -o -iname '*.webm' \) -print 2>/dev/null | wc -l)"
+
 HEAVY=0
 if [ ! -f "$PLAYLIST" ]; then
     HEAVY=1
@@ -2784,30 +2790,52 @@ if [ "$HEAVY" = 0 ]; then
     fi
 fi
 
+# Also trigger if media count changed — catches files copied with old timestamps
+# (e.g. photos from a camera whose mtime is older than the playlist).
+if [ "$HEAVY" = 0 ] && \
+   [ "$_SS_MC" != "$(cat "$APP_DIR/media.count" 2>/dev/null)" ]; then
+    HEAVY=1
+fi
+
+# Detect actual screen resolution so the loading screen fills the display.
+_SS_W=1920; _SS_H=1080
+if [ -f "$APP_DIR/display.conf" ]; then
+    _SS_DR="$(tr -dc '0-9x' < "$APP_DIR/display.conf" 2>/dev/null)"
+    case "$_SS_DR" in
+        *x*) _SS_W="${_SS_DR%x*}"; _SS_H="${_SS_DR#*x}" ;;
+    esac
+fi
+
 if [ "$HEAVY" = 1 ]; then
     echo "Building playlist..."
     LOADING_ASS="/tmp/loading_$$.ass"
-    python3 - "$LOADING_ASS" <<'PY'
+    python3 - "$LOADING_ASS" "$_SS_W" "$_SS_H" <<'PY'
 import sys
-ass = """[Script Info]
-PlayResX: 1920
-PlayResY: 1080
+w, h = sys.argv[2], sys.argv[3]
+fs, fs2 = str(int(h) // 15), str(int(h) // 25)
+ass = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {w}
+PlayResY: {h}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, Alignment
-Style: Default,Montserrat ExtraBold,70,&H00FFFFFF,5
+Style: Default,Montserrat ExtraBold,{fs},&H00FFFFFF,5
 
 [Events]
 Format: Layer, Start, End, Style, Text
-Dialogue: 0,00:00:00.00,99:00:00.00,Default,{\\fsp40}UPDATING PLAYLIST\\N\\N{\\fs40\\fsp20}PLEASE WAIT
+Dialogue: 0,0:00:00.00,9:59:00.00,Default,{{\\fsp4}}UPDATING PLAYLIST\\N\\N{{\\fs{fs2}\\fsp2\\alpha&H80&}}PLEASE WAIT
 """
 with open(sys.argv[1], "w") as f:
     f.write(ass)
 PY
-    mpv "av://lavfi:color=c=black:s=1920x1080" --no-config --fullscreen --no-osc --no-osd-bar \
-        --no-input-default-bindings --input-conf=/dev/null --cursor-autohide=always \
-        --force-window=immediate --loop-file=inf --no-terminal \
-        --sub-file="$LOADING_ASS" --sub-fonts-dir="$FONT_DIR" >/dev/null 2>&1 &
+    mpv "av://lavfi:color=c=black:s=${_SS_W}x${_SS_H}" \
+        --no-config --fullscreen --no-osc --no-osd-bar \
+        --no-input-default-bindings --input-conf=/dev/null \
+        --cursor-autohide=always --force-window=immediate \
+        --loop-file=inf --no-terminal \
+        --sub-file="$LOADING_ASS" --sub-fonts-dir="$FONT_DIR" \
+        >/dev/null 2>&1 &
     LOADING_PID=$!
     SECONDS=0
 fi
@@ -2910,6 +2938,7 @@ done < "$PLAYLIST.raw"
 
 mv "$PLAYLIST.tmp" "$PLAYLIST"
 rm -f "$PLAYLIST.raw"
+echo "$_SS_MC" > "$APP_DIR/media.count"
 
 if [ -n "$LOADING_PID" ]; then
     [ "$SECONDS" -lt "$MIN_LOAD_SECS" ] && sleep "$((MIN_LOAD_SECS - SECONDS))"
