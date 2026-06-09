@@ -1,0 +1,345 @@
+#!/bin/bash
+# >>> GENERATED FILE — DO NOT EDIT DIRECTLY. <<<
+# Assembled from src/ by build.sh. Edit the files under src/ (src/installer.tmpl
+# plus src/config, src/app, src/desktop, src/fontconfig) and run ./build.sh.
+# =============================================================================
+#  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
+#
+#  Single source of truth: the export block below. Each value is declared ONCE
+#  in reference-preserving form — SINGLE-quoted, so $HOME / $APP_DIR stay
+#  literal here (these are templates, not yet resolved). The installer writes
+#  them to config/screensaver.conf through an UNQUOTED heredoc: one round of
+#  expansion turns $APP_DIR into its value "$HOME/Screensaver-App", which still
+#  carries the reference, so the written file stays portable (no machine-
+#  specific absolute paths). The installer then SOURCES that file, which
+#  resolves every level correctly, top-down — and from then on runs on the
+#  exact values every runtime script will. Nothing downstream hardcodes a path.
+#
+#  Two rules make the source step resolve fully:
+#    (1) every referenced var is present in the file, and
+#    (2) it is listed before anything that references it (dependency order).
+#  A single `eval` only expands ONE level, which is why we must NOT eval the
+#  nested vars to resolve them — we source instead.
+# =============================================================================
+set -u
+
+# -----------------------------------------------------------------------------
+#  DEFINE ONCE: portable templates (single-quoted) + tunables.
+# -----------------------------------------------------------------------------
+export APP_DIR='$HOME/Screensaver-App'
+export DATA_DIR='$APP_DIR/Data'
+export CFG='$APP_DIR/config'
+export BASE_DIR='$HOME/Pictures/Screensavers'
+export MEDIA_DIR='$DATA_DIR/Media'
+export MUSIC_DIR='$DATA_DIR/Music'
+export MAP_DIR='$DATA_DIR/Maps'
+export OPT_DIR='$DATA_DIR/Optimized_Vids'
+export TITLE_DIR='$DATA_DIR/TitleCards'
+export PLAYLIST_DIR='$DATA_DIR/Playlist'
+export PLAYLIST='$PLAYLIST_DIR/playlist.m3u'
+export POLICE='$APP_DIR/xmp-police.sh'
+export FONT_DIR='$MEDIA_DIR/Fonts'
+export AUDIO_SOCK='/tmp/ss_audio.sock'
+
+export PHOTO_DURATION=7        # seconds each still photo is shown (videos play in full)
+export VOLUME=70               # mpv startup volume (0-100)
+export IDLE_TIMEOUT_MS=300000  # idle ms before the screensaver auto-launches (= 5 min)
+export MIN_LOAD_SECS=2         # minimum seconds the "please wait" screen stays visible
+export VID_RESCAN_SECS=300     # how often vid-daemon rescans Media/ for new videos
+
+# Offline place-name resolution (GeoNames). The screensaver resolves the nearby
+# prominent landmark + city/state/country ENTIRELY OFFLINE from a local SQLite
+# built once by config/build-geodb.sh. No API key, no rate limit, no runtime
+# network. GEONAMES_COUNTRIES is a space-separated list of ISO country codes to
+# index (small, fast); leave it EMPTY to index the whole planet (~390MB
+# download, larger DB). Data © GeoNames, licensed CC-BY 4.0.
+export GEONAMES_COUNTRIES=''
+export GEODB='$MAP_DIR/geo/geonames.sqlite'
+# Bump GEODB_VERSION whenever the DB's contents change (country set or the
+# landmark feature-code table). On the next launch a version mismatch forces a
+# one-time rebuild so the change actually takes effect.
+export GEODB_VERSION='6'
+
+# Resolve ONLY APP_DIR (one level — it nests just $HOME) so we know where the
+# config goes. Everything deeper is resolved by sourcing the file we write.
+eval "REAL_APP=\"$APP_DIR\""
+mkdir -p "$REAL_APP/config"
+
+# -----------------------------------------------------------------------------
+#  Compile the single source of truth. Unquoted heredoc + single-quoted sources
+#  => the file keeps $HOME / $VAR references (portable). Order = dependency order.
+# -----------------------------------------------------------------------------
+echo "▶ Writing screensaver.conf (single source of truth)..."
+cat > "$REAL_APP/config/screensaver.conf" << CONF
+@@INCLUDE config/screensaver.conf
+CONF
+
+# Run the installer on its own config — this resolves every level, top-down.
+. "$REAL_APP/config/screensaver.conf"
+CFG="$CFG_DIR"   # legacy alias used by a few install steps below
+
+echo "▶ Preparing strict folder architecture..."
+
+rm -f "$HOME/.config/autostart/tv-watcher.desktop"
+rm -f "$HOME/.local/share/applications/tv-screensaver-now.desktop"
+pkill -f exif-daemon.sh 2>/dev/null || true
+pkill -f xmp-police.sh 2>/dev/null || true
+pkill -f vid-daemon.sh 2>/dev/null || true
+pkill -f tv-watcher.sh 2>/dev/null || true
+pkill -f idle-watcher.sh 2>/dev/null || true
+
+if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
+    mv "$HOME/TV-Screensaver" "$APP_DIR"
+fi
+
+mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$MAP_DIR/geo" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
+         "$HOME/.config/autostart" "$HOME/.local/share/applications" "$FONT_DIR"
+
+if [ -d "$BASE_DIR/_map" ]; then
+    mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
+    rm -rf "$BASE_DIR/_map"
+fi
+if [ -d "$BASE_DIR/optimized_vids" ]; then
+    mv "$BASE_DIR/optimized_vids"/* "$OPT_DIR/" 2>/dev/null || true
+    rm -rf "$BASE_DIR/optimized_vids"
+fi
+
+find "$BASE_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.txt' \) -exec mv {} "$MEDIA_DIR/" \; 2>/dev/null || true
+
+# =============================================================================
+# 0. Dependencies (distro-aware, single transaction, VERIFIED)
+# =============================================================================
+echo "▶ Resolving and installing dependencies..."
+
+REQUIRED_CMDS=(mpv exiftool python3 curl qrencode ffmpeg socat playerctl pactl fc-match unzip)
+
+detect_pm() {
+    for pm in dnf apt-get pacman zypper; do
+        command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return; }
+    done
+    echo ""
+}
+PM="$(detect_pm)"
+
+INSTALL=""
+PKGS=""
+case "$PM" in
+  dnf)
+    PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
+    INSTALL="sudo dnf install -y"
+    ;;
+  apt-get)
+    PKGS="mpv libimage-exiftool-perl python3 python3-qrcode python3-pil curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool unzip"
+    sudo apt-get update -y || true
+    INSTALL="sudo apt-get install -y"
+    ;;
+  pacman)
+    PKGS="mpv perl-image-exiftool python python-qrcode python-pillow curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool unzip"
+    INSTALL="sudo pacman -S --needed --noconfirm"
+    ;;
+  zypper)
+    PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
+    INSTALL="sudo zypper install -y"
+    ;;
+  *)
+    echo "⚠ No supported package manager (dnf/apt/pacman/zypper) found."
+    ;;
+esac
+
+if [ -n "$INSTALL" ]; then
+    echo "▶ Using ${PM}: installing all packages in one go..."
+    $INSTALL $PKGS || echo "⚠ Package manager reported errors — verifying what actually landed below."
+fi
+
+echo "▶ Verifying runtime tools..."
+MISSING=()
+for c in "${REQUIRED_CMDS[@]}"; do
+    if command -v "$c" >/dev/null 2>&1; then
+        printf '   ✓ %s\n' "$c"
+    else
+        printf '   ✗ %s  (MISSING)\n' "$c"
+        MISSING+=("$c")
+    fi
+done
+if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    printf '   ✓ ImageMagick (magick/convert)\n'
+else
+    printf '   ✗ ImageMagick (magick/convert)  (MISSING)\n'
+    MISSING+=("ImageMagick")
+fi
+
+FONT_BASE="https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf"
+got_font=0
+for w in ExtraBold SemiBold; do
+    if curl -fsSL --create-dirs -o "$FONT_DIR/Montserrat-$w.ttf" "$FONT_BASE/Montserrat-$w.ttf"; then
+        got_font=1
+    else
+        echo "⚠ Could not fetch Montserrat-$w."
+    fi
+done
+find "$FONT_DIR" -name 'Montserrat-*.ttf' -size 0 -delete 2>/dev/null || true
+
+# Media/Fonts is NOT on fontconfig's default search path, so register it. This
+# is the only per-machine bit written outside the app dir — re-run the installer
+# on a new computer to recreate it. (The mpv/ffmpeg calls also point at FONT_DIR
+# explicitly, so the fonts still work if you copy the app folder without it.)
+if [ "$got_font" = 1 ]; then
+    FC_CONF_DIR="$HOME/.config/fontconfig/conf.d"
+    mkdir -p "$FC_CONF_DIR"
+    cat > "$FC_CONF_DIR/00-screensaver-fonts.conf" << FCEOF
+@@INCLUDE fontconfig/00-screensaver-fonts.conf
+FCEOF
+    fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
+    echo "▶ Montserrat fonts installed to $FONT_DIR and registered."
+fi
+
+# =============================================================================
+# 1. input.conf  (socket path injected from config via placeholder)
+# =============================================================================
+echo "▶ Writing input.conf..."
+cat > "$CFG/input.conf" << 'EOF'
+@@INCLUDE config/input.conf
+EOF
+sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"
+
+# =============================================================================
+# 2. photo.lua  (paths come from the environment exported by the config)
+# =============================================================================
+echo "▶ Writing photo.lua..."
+cat > "$CFG/photo.lua" << 'EOF'
+@@INCLUDE config/photo.lua
+EOF
+
+# =============================================================================
+# 3. build-minimap.sh
+# =============================================================================
+echo "▶ Writing build-minimap.sh..."
+cat > "$CFG/build-minimap.sh" << 'EOF'
+@@INCLUDE config/build-minimap.sh
+EOF
+chmod +x "$CFG/build-minimap.sh"
+
+# =============================================================================
+# 3a2. trash-media.sh  (DEL key: move a media file + everything derived from it
+#      to the system trash, and drop it from the playlist)
+# =============================================================================
+echo "▶ Writing trash-media.sh..."
+cat > "$CFG/trash-media.sh" << 'EOF'
+@@INCLUDE config/trash-media.sh
+EOF
+chmod +x "$CFG/trash-media.sh"
+
+# =============================================================================
+# 3b. build-title.sh (Animated Cinematic Title Generator)
+# =============================================================================
+echo "▶ Writing build-title.sh..."
+cat > "$CFG/build-title.sh" << 'EOF'
+@@INCLUDE config/build-title.sh
+EOF
+chmod +x "$CFG/build-title.sh"
+
+# =============================================================================
+# 3c. build-geodb.sh  (one-time: download GeoNames dumps -> offline SQLite)
+#     Data © GeoNames, CC-BY 4.0 (https://www.geonames.org). Re-run to refresh
+#     or after changing GEONAMES_COUNTRIES. Needs: curl, unzip, python3.
+# =============================================================================
+echo "▶ Writing build-geodb.sh..."
+cat > "$CFG/build-geodb.sh" << 'EOF'
+@@INCLUDE config/build-geodb.sh
+EOF
+chmod +x "$CFG/build-geodb.sh"
+
+# =============================================================================
+# 3d. geo-resolve.sh  (offline: nearest prominent landmark + city via GeoNames)
+#     Prints "landmark<TAB>city<TAB>state<TAB>country". No network, no key.
+# =============================================================================
+echo "▶ Writing geo-resolve.sh..."
+cat > "$CFG/geo-resolve.sh" << 'EOF'
+@@INCLUDE config/geo-resolve.sh
+EOF
+chmod +x "$CFG/geo-resolve.sh"
+
+# =============================================================================
+# 4. xmp-police.sh  (non-destructive, incremental metadata -> XMP sidecars)
+#    Supersedes the old exif-daemon.sh and apply-overrides.sh.
+# =============================================================================
+echo "▶ Writing xmp-police.sh..."
+cat > "$APP_DIR/xmp-police.sh" << 'EOF'
+@@INCLUDE app/xmp-police.sh
+EOF
+chmod +x "$APP_DIR/xmp-police.sh"
+
+# =============================================================================
+# 5. vid-daemon.sh
+# =============================================================================
+echo "▶ Writing vid-daemon.sh..."
+cat > "$APP_DIR/vid-daemon.sh" << 'EOF'
+@@INCLUDE app/vid-daemon.sh
+EOF
+chmod +x "$APP_DIR/vid-daemon.sh"
+
+# =============================================================================
+# 6. mpv.conf  (image-display-duration + volume now come from launch.sh/config)
+# =============================================================================
+echo "▶ Writing mpv.conf..."
+cat > "$CFG/mpv.conf" << 'EOF'
+@@INCLUDE config/mpv.conf
+EOF
+
+# =============================================================================
+# 7. launch.sh
+# =============================================================================
+echo "▶ Writing launch.sh..."
+cat > "$APP_DIR/launch.sh" << 'LAUNCH_EOF'
+@@INCLUDE app/launch.sh
+LAUNCH_EOF
+chmod +x "$APP_DIR/launch.sh"
+
+# =============================================================================
+# 8. idle-watcher.sh
+# =============================================================================
+echo "▶ Writing idle-watcher.sh..."
+cat > "$APP_DIR/idle-watcher.sh" << 'EOF'
+@@INCLUDE app/idle-watcher.sh
+EOF
+chmod +x "$APP_DIR/idle-watcher.sh"
+
+# =============================================================================
+# 9. Autostart + manual launcher  (absolute paths baked from config)
+# =============================================================================
+echo "▶ Writing autostart + app launcher..."
+cat > "$HOME/.config/autostart/idle-watcher.desktop" << EOF
+@@INCLUDE desktop/idle-watcher.desktop
+EOF
+
+cat > "$HOME/.local/share/applications/screensaver-now.desktop" << EOF
+@@INCLUDE desktop/screensaver-now.desktop
+EOF
+
+# =============================================================================
+# 10. Offline place database (build now if possible)
+# =============================================================================
+if command -v unzip >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+    echo "▶ Building offline GeoNames place database (one-time)..."
+    "$CFG/build-geodb.sh" || echo "⚠ Place DB build failed — you can re-run: $CFG/build-geodb.sh"
+else
+    echo "⚠ Skipping place DB build (need curl + unzip). Run later: $CFG/build-geodb.sh"
+fi
+
+# =============================================================================
+# 11. Done
+# =============================================================================
+echo ""
+echo "✅ Migration and Deployment finished!"
+echo "Your structure is:"
+echo "   App Code   : $APP_DIR"
+echo "   Config     : $CFG/screensaver.conf  (edit this to change any setting)"
+echo "   Media      : $MEDIA_DIR"
+echo "   Caches     : $MAP_DIR & $OPT_DIR"
+echo "   Place DB   : $GEODB  (offline; rebuild with $CFG/build-geodb.sh)"
+echo "                Place data © GeoNames, CC-BY 4.0 (https://www.geonames.org)"
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo ""
+    echo "⚠ Reminder: still missing -> ${MISSING[*]}"
+    echo "  Install those, then re-run this script before launching."
+fi

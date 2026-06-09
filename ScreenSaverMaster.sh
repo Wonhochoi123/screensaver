@@ -1,4 +1,7 @@
 #!/bin/bash
+# >>> GENERATED FILE — DO NOT EDIT DIRECTLY. <<<
+# Assembled from src/ by build.sh. Edit the files under src/ (src/installer.tmpl
+# plus src/config, src/app, src/desktop, src/fontconfig) and run ./build.sh.
 # =============================================================================
 #  mpv Photo & Video Screensaver — Clean Architecture (App/PC/TV agnostic)
 #
