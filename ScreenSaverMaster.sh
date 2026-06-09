@@ -1423,11 +1423,10 @@ mp.register_script_message("year-prev", function() jump_year(-1) end)
 
 -- ----------------------------------------------------------------------------
 -- Now-playing progress bar — flare style
---   * Full-width dim track shows total duration range
---   * Bright played core + subtle glow forms the trail behind the head
---   * A glowing flare head sits at the leading edge and flickers each frame
---   * Click anywhere along the bottom strip to seek (handled in
---     handle-left-click above)
+--   All source shapes are 1-pixel tall; blur then spreads them into smooth
+--   soft ovals with zero visible straight edges ("not boxy").
+--   The flare head extends left AND right from the current position.
+--   Click anywhere along the bottom strip to seek.
 -- ----------------------------------------------------------------------------
 local prog_fill = -1
 local function draw_progress()
@@ -1441,35 +1440,36 @@ local function draw_progress()
         return
     end
 
-    local w, h   = refresh_display_size()
-    local fillw  = math.floor(w * pct / 100 + 0.5)
-    local th     = math.max(2, math.floor(h * 0.003 + 0.5))
-    local y0     = h - th
-    local bar_cy = h - math.floor(th / 2 + 0.5)
-    local flicker = 0.7 + math.random() * 0.6   -- 0.7 – 1.3 per frame
+    local w, h    = refresh_display_size()
+    local fillw   = math.floor(w * pct / 100 + 0.5)
+    local th      = math.max(2, math.floor(h * 0.003 + 0.5))
+    local ly      = h - 1   -- y of the 1-px source line (last row)
+    local flicker = 0.7 + math.random() * 0.6
 
-    local function rect(x0, x1)   -- bar-height rectangle (y0 → h)
-        return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y0, x1, y0, x1, h, x0, h)
-    end
-    local function frect(x0, x1, t, b)  -- arbitrary-height rectangle
-        return string.format("m %d %d l %d %d l %d %d l %d %d", x0, t, x1, t, x1, b, x0, b)
+    -- 1-pixel-tall horizontal line: source shape for all layers.
+    -- With blur B, the result looks like a smooth soft oval B*2 pixels tall.
+    local function hline(x0, x1)
+        return string.format("m %d %d l %d %d l %d %d l %d %d",
+            x0, ly, x1, ly, x1, ly + 1, x0, ly + 1)
     end
 
-    -- Static elements: only redraw when the pixel position changes.
+    -- Static elements: only redraw when pixel position changes.
     if fillw ~= prog_fill then
         prog_fill = fillw
 
+        -- Full-width track: 1-px source, barely-visible glow (≈8% opaque)
         progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
         progress_bg_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\blur0\\1c&HFFFFFF&\\1a&HCC&\\p1}%s{\\p0}",
-            rect(0, w))
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&HEE&\\p1}%s{\\p0}",
+            th, hline(0, w))
         progress_bg_ov:update()
 
+        -- Played trail: slightly brighter than track (≈22% opaque)
         if fillw > 0 then
             progress_ov.res_x = w; progress_ov.res_y = h
             progress_ov.data = string.format(
-                "{\\an7\\pos(0,0)\\bord0\\shad0\\blur1\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}",
-                rect(0, fillw))
+                "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&HC8&\\p1}%s{\\p0}",
+                th, hline(0, fillw))
             progress_ov:update()
         else
             progress_ov:remove()
@@ -1482,27 +1482,25 @@ local function draw_progress()
         return
     end
 
-    -- Outer glow: wide horizontal oval, heavily blurred, opacity flickers.
-    local fow   = math.floor(14 * th)
-    local foh   = math.floor(5  * th)
-    local fblur = math.max(2, math.floor(3 * th))
-    local falpha = math.max(0x50, math.min(0xB0,
-        math.floor(0x80 - (flicker - 1.0) * 0x38 + 0.5)))
+    -- Horizontal streak: 1-px source extends left AND right from head.
+    -- Large blur relative to 1-px height → smooth elongated soft oval.
+    local s_hw    = math.floor(12 * th)          -- half-width of source line
+    local s_blur  = math.max(2, math.floor(2.5 * th))
+    local s_alpha = math.max(0x90, math.min(0xD8,
+        math.floor(0xB4 - (flicker - 1.0) * 0x30 + 0.5)))
     progress_flare_ov.res_x = w; progress_flare_ov.res_y = h
     progress_flare_ov.data = string.format(
         "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\1a&H%02X&\\p1}%s{\\p0}",
-        fblur, falpha,
-        frect(fillw - fow, fillw + fow, bar_cy - foh, bar_cy + foh))
+        s_blur, s_alpha, hline(fillw - s_hw, fillw + s_hw))
     progress_flare_ov:update()
 
-    -- Core: tight bright oval, width flickers.
-    local cow   = math.max(th, math.floor(2 * th * flicker + 0.5))
-    local coh   = math.floor(2 * th)
-    local cblur = math.max(1, math.floor(th * 0.75 + 0.5))
+    -- Core hot-spot: tiny 1-px source, tight blur → round soft dot, flickering.
+    local c_hw    = math.max(1, math.floor(th * 0.5 * flicker + 0.5))
+    local c_blur  = math.max(1, math.floor(th * 1.0 + 0.5))
     progress_core_ov.res_x = w; progress_core_ov.res_y = h
     progress_core_ov.data = string.format(
         "{\\an7\\pos(0,0)\\bord0\\shad0\\blur%d\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}",
-        cblur, frect(fillw - cow, fillw + cow, bar_cy - coh, bar_cy + coh))
+        c_blur, hline(fillw - c_hw, fillw + c_hw))
     progress_core_ov:update()
 end
 mp.add_periodic_timer(0.03, draw_progress)
