@@ -299,10 +299,17 @@ pause_ov.res_y = 1080
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
+local music_bar_ov    = mp.create_osd_overlay("ass-events")  -- music played
+local music_bar_bg_ov = mp.create_osd_overlay("ass-events")  -- music track
 local landmark_ov  = mp.create_osd_overlay("ass-events")
-local progress_ov    = mp.create_osd_overlay("ass-events")  -- played (white)
-local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (black)
+local progress_ov    = mp.create_osd_overlay("ass-events")  -- played
+local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (track)
 local loading_ov   = mp.create_osd_overlay("ass-events")
+
+-- Shared progress-bar styling: a translucent light-gray track with a
+-- translucent white fill. Used by the bottom video bar and the music bar.
+local BAR_TRACK = "\\1c&HC8C8C8&\\alpha&H9E&"   -- light gray, mostly transparent
+local BAR_FILL  = "\\1c&HFFFFFF&\\alpha&H3C&"   -- white, mostly opaque
 
 -- ----------------------------------------------------------------------------
 -- Loading-screen input lock
@@ -340,6 +347,10 @@ lock_loading_input()
 local music_shown  = nil       -- full track string currently displayed
 local music_hit    = nil       -- clickable box {x0,y0,x1,y1}; nil when no track
 local poll_music               -- assigned later
+local music_bar    = nil       -- {x,y,w,th,W,H} bar geometry under the marquee
+local music_pct    = nil       -- 0..100 song position from the audio player
+local draw_music_bar           -- assigned later
+local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
 
 -- Strip distracting separators (comma, slash, hyphen, pipe, dot-sep, dashes…)
@@ -952,9 +963,10 @@ mp.register_script_message("handle-left-click", function()
 
     -- Click the razor-thin progress bar along the very bottom to seek. The
     -- visible bar is only a few pixels tall, so the clickable strip is a little
-    -- taller (bottom 3% of the screen) to stay easy to hit. Checked before the
-    -- GPS gate so seeking works on photos/videos without coordinates too.
-    if mouse then
+    -- taller (bottom 3% of the screen) to stay easy to hit. Only active when the
+    -- bar is actually shown (real videos) — clicking the bottom of a photo or a
+    -- title card does nothing, matching the hidden bar.
+    if mouse and progress_is_active and progress_is_active() then
         local w, h = refresh_display_size()
         if w > 0 and mouse.y >= h - math.floor(h * 0.03) then
             local frac = mouse.x / w
@@ -1209,19 +1221,23 @@ mp.register_event("file-loaded", function()
 end)
 
 -- Now-playing marquee (top-left). Same title-card style as the rest of the HUD:
--- Montserrat ExtraBold, no outline, no shadow, white. Stays on. A fixed-width
--- window shows ~MUSIC_VIS glyphs; longer titles scroll smoothly (pixel-by-pixel,
--- two stitched copies for a seamless loop), masked by a \clip rectangle. Click
--- it to skip to the next track.
-local MUSIC_VIS      = 16   -- approx glyphs visible in the window
+-- Montserrat ExtraBold, no outline, no shadow, white. Stays on. The window is a
+-- fraction of the screen width; titles that don't fit bounce (ping-pong) so the
+-- whole string is revealed and then it returns, never scrolling past the end to
+-- hide content. A \clip masks overflow. A progress bar sits just beneath it.
+-- Click it to skip to the next track.
+-- The marquee window is a fraction of the screen width (so it's "way longer"
+-- on bigger displays) rather than a fixed glyph count.
+local MUSIC_WIN_FRAC = 0.30
 local music_scroll_gen = 0  -- bumped on each new track; cancels the old scroller
 
 local function set_music(text)
     if not text or text == "" then return end
-    text = clean_text(text):sub(1, 120)        -- drop ·, commas, hyphens, etc.
+    text = clean_text(text):sub(1, 160)        -- drop ·, commas, hyphens, etc.
     if text == "" then return end
     if text == music_shown then return end
     music_shown = text
+    music_pct   = 0                            -- new track → bar restarts empty
     music_scroll_gen = music_scroll_gen + 1
     local gen = music_scroll_gen
 
@@ -1231,47 +1247,116 @@ local function set_music(text)
     local px   = math.floor(w * 0.025)
     local py   = math.floor(h * 0.04)
     local gw   = fs * 0.60 + fsp                 -- estimated per-glyph advance (px)
-    local win_px = math.floor(gw * MUSIC_VIS)
+    local win_px = math.floor(w * MUSIC_WIN_FRAC)
     local y_top  = py - math.floor(fs * 0.25)
     local y_bot  = py + math.floor(fs * 1.30)
+    local bar_th = math.max(2, math.floor(h * 0.0035 + 0.5))
+    local bar_y  = py + math.floor(fs * 1.45)    -- just under the text
 
     music_ov.res_x = w
     music_ov.res_y = h
 
-    local label  = "\xe2\x99\xaa  " .. text       -- ♪ + title
-    local glyphs = utf8_split(label)
-    local style  = string.format(
+    local label   = "\xe2\x99\xaa  " .. text      -- ♪ + title
+    local glyphs  = utf8_split(label)
+    local text_px = math.floor(gw * #glyphs)
+    local style   = string.format(
         "\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&", fs, fsp, glow(fs))
 
-    if #glyphs <= MUSIC_VIS then
-        -- Fits: static, no scroll, no clip. Hit box hugs the actual text width.
+    if text_px <= win_px then
+        -- Fits: static, no scroll, no clip. Hit box + bar hug the text width.
         music_ov.data = string.format("{\\an7\\pos(%d,%d)%s}%s", px, py, style, label)
         music_ov:update()
-        music_hit = { x0 = px - fs, y0 = y_top, x1 = px + math.floor(gw * #glyphs) + fs, y1 = y_bot }
+        music_hit = { x0 = px - fs, y0 = y_top, x1 = px + text_px + fs, y1 = y_bot }
+        music_bar = { x = px, y = bar_y, w = text_px, th = bar_th, W = w, H = h }
+        draw_music_bar()
         return
     end
 
-    -- Scrolls: two stitched copies separated by a gap; advance left smoothly and
-    -- wrap by exactly one copy-width so the loop seam falls inside the gap.
-    local one    = label .. "        "            -- copy + trailing gap
-    local copy_w = gw * #utf8_split(one)
-    local doubled = one .. one
-    local clip   = string.format("\\clip(%d,%d,%d,%d)", px, y_top, px + win_px, y_bot)
-    local SPEED  = math.max(1, fs * 0.045)        -- px per frame (~50 px/s)
+    -- Too long for the window: bounce (ping-pong). Scroll left only far enough
+    -- to reveal the end of the string, dwell, then scroll back to the start and
+    -- dwell. Never loops past the end to hide content. A \clip masks overflow.
+    local clip       = string.format("\\clip(%d,%d,%d,%d)", px, y_top, px + win_px, y_bot)
+    local SPEED      = math.max(1, fs * 0.045)    -- px per frame (~50 px/s)
+    local DWELL      = 30                          -- frames (~0.9s) held at each end
+    local max_offset = text_px - win_px            -- how far left fully reveals the end
     music_hit = { x0 = px - fs, y0 = y_top, x1 = px + win_px + fs, y1 = y_bot }
+    music_bar = { x = px, y = bar_y, w = win_px, th = bar_th, W = w, H = h }
+    draw_music_bar()
 
-    local sx = 0
+    local sx   = 0
+    local dir  = 1        -- 1 = scrolling left (revealing end), -1 = back to start
+    local hold = DWELL    -- start with a pause showing the beginning
     local function frame()
         if gen ~= music_scroll_gen then return end
-        sx = sx + SPEED
-        if sx >= copy_w then sx = sx - copy_w end
+        if hold > 0 then
+            hold = hold - 1
+        else
+            sx = sx + dir * SPEED
+            if sx >= max_offset then sx = max_offset; dir = -1; hold = DWELL
+            elseif sx <= 0 then sx = 0; dir = 1; hold = DWELL end
+        end
         music_ov.data = string.format("{\\an7\\pos(%d,%d)%s%s}%s",
-            math.floor(px - sx), py, clip, style, doubled)
+            math.floor(px - sx), py, clip, style, label)
         music_ov:update()
         mp.add_timeout(0.03, frame)
     end
     frame()
 end
+
+-- Music progress bar drawn under the marquee, the same width as the info text.
+-- Driven by the audio player's percent-pos (polled below). Same translucent
+-- look as the bottom video bar.
+function draw_music_bar()
+    local b = music_bar
+    if not b then
+        music_bar_ov:remove(); music_bar_bg_ov:remove(); return
+    end
+    local function rect(x0, x1)
+        return string.format("m %d %d l %d %d l %d %d l %d %d",
+            x0, b.y, x1, b.y, x1, b.y + b.th, x0, b.y + b.th)
+    end
+
+    music_bar_bg_ov.res_x = b.W; music_bar_bg_ov.res_y = b.H
+    music_bar_bg_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}", BAR_TRACK, rect(b.x, b.x + b.w))
+    music_bar_bg_ov:update()
+
+    music_bar_ov.res_x = b.W; music_bar_ov.res_y = b.H
+    local pct = music_pct
+    if pct and pct > 0 then
+        local fw = math.floor(b.w * math.max(0, math.min(pct, 100)) / 100 + 0.5)
+        if fw > 0 then
+            music_bar_ov.data = string.format(
+                "{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}", BAR_FILL, rect(b.x, b.x + fw))
+            music_bar_ov:update()
+        else
+            music_bar_ov:remove()
+        end
+    else
+        music_bar_ov:remove()
+    end
+end
+
+-- Poll the audio player's position (separate mpv on AUDIO_SOCK) for the bar.
+local function poll_music_pos()
+    if not music_bar then return end
+    mp.command_native_async({
+        name = "subprocess", capture_stdout = true,
+        args = { "/bin/sh", "-c",
+            "printf '%s\\n' '{\"command\":[\"get_property\",\"percent-pos\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
+    }, function(ok, res)
+        local pct
+        if ok and res and res.stdout and res.stdout ~= "" then
+            local j = utils.parse_json(res.stdout)
+            if j and j.error == "success" and type(j.data) == "number" then
+                pct = j.data
+            end
+        end
+        music_pct = pct
+        draw_music_bar()
+    end)
+end
+mp.add_periodic_timer(1, poll_music_pos)
 
 -- Poll the audio player; only rebuild the marquee when the track changes.
 function poll_music()
@@ -1335,6 +1420,8 @@ mp.register_event("shutdown", function()
     ov:remove()
     pause_ov:remove()
     music_ov:remove()
+    music_bar_ov:remove()
+    music_bar_bg_ov:remove()
     landmark_ov:remove()
     loading_ov:remove()
     progress_ov:remove()
@@ -1471,14 +1558,18 @@ mp.register_script_message("year-prev", function() jump_year(-1) end)
 -- ----------------------------------------------------------------------------
 local prog_fill = -1
 
-local function draw_progress(_, pp)
-    local path   = mp.get_property("path") or ""
-    local active = pp ~= nil
+-- The bar (and click-to-seek) is for real videos only: stills have no position
+-- and month title cards are excluded by request.
+function progress_is_active()
+    local path = mp.get_property("path") or ""
+    return mp.get_property_number("percent-pos") ~= nil
         and (mp.get_property_number("duration") or 0) > 0
         and not path:find("/TitleCards/", 1, true)
         and not path:find("lavfi", 1, true)
+end
 
-    if not active then
+local function draw_progress(_, pp)
+    if not (pp and progress_is_active()) then
         if prog_fill ~= -1 then
             progress_ov:remove(); progress_bg_ov:remove(); prog_fill = -1
         end
@@ -1499,7 +1590,7 @@ local function draw_progress(_, pp)
     progress_bg_ov.res_x = w; progress_bg_ov.res_y = h
     if fillw < w then
         progress_bg_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\alpha&H00&\\p1}%s{\\p0}", rect(fillw, w))
+            "{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}", BAR_TRACK, rect(fillw, w))
         progress_bg_ov:update()
     else
         progress_bg_ov:remove()
@@ -1508,7 +1599,7 @@ local function draw_progress(_, pp)
     progress_ov.res_x = w; progress_ov.res_y = h
     if fillw > 0 then
         progress_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H00&\\p1}%s{\\p0}", rect(0, fillw))
+            "{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}", BAR_FILL, rect(0, fillw))
         progress_ov:update()
     else
         progress_ov:remove()
