@@ -18,17 +18,12 @@
 #  tool isn't installed, it just exits 0 with no output. No nagging, ever.
 # =============================================================================
 set -u
-SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
-. "$SS_CONF" 2>/dev/null || exit 0
-
 MODE="${1:---watch}"
+SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
+. "$SS_CONF" 2>/dev/null || { [ "$MODE" = "--check" ] && echo "grok: cannot read $SS_CONF" >&2; exit 0; }
 
-# --- silent gate -------------------------------------------------------------
-[ "${GROK_BRIEFING:-0}" = "1" ] || exit 0
 . "$HOME/.profile" 2>/dev/null || true
 API_KEY="${XAI_API_KEY:-}"
-[ -n "$API_KEY" ] || exit 0
-for c in jq curl ffplay ffmpeg socat; do command -v "$c" >/dev/null 2>&1 || exit 0; done
 
 MODEL="${GROK_MODEL:-grok-4.3}"
 VOICE="${GROK_VOICE:-ara}"
@@ -46,7 +41,15 @@ PID_FILE="/tmp/ss_briefing.pid"
 FFPLAY_PID_FILE="/tmp/ss_briefing_ffplay.pid"
 API="https://api.x.ai/v1"
 
-mkdir -p "$TODAY_CACHE"
+mkdir -p "$TODAY_CACHE" 2>/dev/null
+
+# --- silent gate (applies to watch/prep/play; --check reports instead) -------
+gate_ok() {
+    [ "${GROK_BRIEFING:-0}" = "1" ] || return 1
+    [ -n "$API_KEY" ] || return 1
+    for c in jq curl ffplay ffmpeg socat; do command -v "$c" >/dev/null 2>&1 || return 1; done
+    return 0
+}
 
 # --- segment list: id | use_search | prompt ---------------------------------
 TODAY_HUMAN="$(date '+%A, %B %d, %Y')"
@@ -207,8 +210,44 @@ watch_loop() {
     done
 }
 
+# --- diagnostic: report every gate condition + test the API ------------------
+check() {
+    echo "── GrokMorning diagnostic ──────────────────────────────"
+    echo "  conf:  $SS_CONF"
+    [ "${GROK_BRIEFING:-0}" = "1" ] && echo "  [ok]   GROK_BRIEFING=1 (enabled)" \
+        || echo "  [SKIP] GROK_BRIEFING=${GROK_BRIEFING:-unset} — set it to 1 to enable"
+    [ -n "$API_KEY" ] && echo "  [ok]   XAI_API_KEY present (${#API_KEY} chars)" \
+        || echo "  [FAIL] XAI_API_KEY not found — add 'export XAI_API_KEY=...' to ~/.profile"
+    for c in jq curl ffplay ffmpeg socat; do
+        command -v "$c" >/dev/null 2>&1 && echo "  [ok]   $c" || echo "  [FAIL] $c not installed"
+    done
+    echo "  time:  GROK_TIME=$GROK_TIME  now=$(date '+%H:%M')  (pre-generates ~5 min before)"
+    if [ -d "$GBGM_DIR" ] && [ -n "$(ls -A "$GBGM_DIR" 2>/dev/null)" ]; then
+        echo "  [ok]   background music in $GBGM_DIR"
+    else
+        echo "  [note] no tracks in $GBGM_DIR (briefing still plays, just silent bgm)"
+    fi
+    [ -S "$AUDIO_SOCK" ] && echo "  [ok]   screensaver audio socket present (it's running)" \
+        || echo "  [note] no audio socket — the screensaver isn't running right now"
+    if [ -z "$API_KEY" ]; then echo "── stop: no key, can't test the API ──"; return; fi
+    printf "  net:   reaching api.x.ai ... "
+    if have_net; then echo "ok"; else echo "FAIL (no network, or key rejected)"; echo "──"; return; fi
+    printf "  gen:   generating one test segment ... "
+    build_segments
+    if gen_segment "${SEG_IDS[0]}" "${SEG_SEARCH[0]}" "${SEG_PROMPT[0]}"; then
+        echo "ok — text + audio cached"
+        echo "  => the briefing pipeline works. If it still doesn't fire on its"
+        echo "     own, the scheduler isn't being started (reinstall to refresh"
+        echo "     launch.sh), or the screensaver wasn't restarted."
+    else
+        echo "FAIL — the API returned no usable text/audio for the first segment"
+    fi
+    echo "────────────────────────────────────────────────────────"
+}
+
 case "$MODE" in
-    --prep) prep ;;
-    --play) play ;;
-    *)      watch_loop ;;
+    --check) check ;;
+    --prep)  gate_ok || exit 0; prep ;;
+    --play)  gate_ok || exit 0; play ;;
+    *)       gate_ok || exit 0; watch_loop ;;
 esac
