@@ -296,11 +296,19 @@ end
 local function apply_image_blur_vf(path)
     local w, h = refresh_display_size()
     local rot = get_video_rotation(path)
-    
+
     BLUR_W, BLUR_H, BLUR_ROT = w, h, rot
 
     if rot == 90 or rot == 270 then
         w, h = h, w
+    end
+
+    -- During a briefing the screensaver becomes a calm backdrop: just the blurred,
+    -- stretched-to-fill photo, no sharp foreground.
+    if briefing_active and briefing_active() then
+        mp.set_property("vf", string.format(
+            "lavfi=[scale=640:360,setsar=1,gblur=sigma=50,scale=%d:%d,setsar=1]", w, h))
+        return
     end
 
     local vf = string.format(
@@ -1111,6 +1119,19 @@ mp.register_event("file-loaded", function()
         unlock_loading_input()
     end
 
+    -- During a briefing the screensaver is a calm, light backdrop: skip videos &
+    -- title cards, and show photos blurred + stretched (no geo/HUD work). This is
+    -- BEFORE the HUD/landmark clears below so it never cancels the GROK title.
+    if briefing_active and briefing_active() and not path:find("lavfi", 1, true) then
+        local ext = (path:match("%.([^%.]+)$") or ""):lower()
+        if is_video[ext] or path:find("/Optimized_Vids/", 1, true) or path:find("/TitleCards/", 1, true) then
+            mp.add_timeout(0.1, function() mp.command("playlist-next") end)
+        else
+            apply_image_blur_vf(path)
+        end
+        return
+    end
+
     local orig_path = path
     if path:find("/Optimized_Vids/") then
         local orig_file = path:match("([^/]+)%.mp4$")
@@ -1129,7 +1150,6 @@ mp.register_event("file-loaded", function()
     prewarmed[orig_path] = true
 
     if path:find("/TitleCards/") then
-        cur.redraw = nil      -- title cards have no HUD to restore after a briefing
         return
     end
 
@@ -1221,22 +1241,6 @@ mp.register_event("file-loaded", function()
             end
         end
         draw_text()
-
-        -- How to bring this photo's HUD back when a briefing ends (the music HUD
-        -- is untouched; map/QR re-apply from their on-disk caches).
-        cur.redraw = function()
-            if briefing_active and briefing_active() then return end
-            draw_text()
-            if m.lat and m.lon then
-                local L2 = hud_geom()
-                draw_coord_labels(L2, m.lat, m.lon)
-                local z2, c2 = ZOOMS[cur.zidx], RING_COLORS[cur.zidx]
-                local qf = qr_path(mdir, m.lat, m.lon, w, h)
-                local mf = map_path(mdir, z2, m.lat, m.lon, w, h, c2)
-                if file_exists(qf) then apply_qr(qf, L2) end
-                if file_exists(mf) then apply_minimap(mf, L2) end
-            end
-        end
 
         if not (m.lat and m.lon) then
             mp.add_timeout(1.0, start_prewarm)
@@ -2596,11 +2600,24 @@ local function logo_tick()
     if active and not LB.hud_off then
         LB.hud_off = true
         clear_other_hud()
-        animate_gtitle("GROK " .. tod_word(), w, h)   -- "GROK MORNING/…" zoom-fade
+        animate_gtitle("GROK " .. tod_word(), w, h)   -- "GROK MORNING/…" build-up
+        -- Calm blurred backdrop: slow the photo cycle and skip videos.
+        LB.idd = mp.get_property_number("image-display-duration")
+        mp.set_property("image-display-duration", 10)
+        local p = cur.path or ""
+        local ext = (p:match("%.([^%.]+)$") or ""):lower()
+        if p == "" then                               -- nothing loaded yet; next load handles it
+            -- (no-op)
+        elseif is_video[ext] or p:find("/Optimized_Vids/", 1, true) or p:find("/TitleCards/", 1, true) then
+            mp.command("playlist-next")               -- skip the current video
+        else
+            apply_image_blur_vf(p)                    -- full-blur the current photo now
+        end
     elseif not active and LB.hud_off then
         LB.hud_off = false
-        if cur.redraw then cur.redraw() end
+        if LB.idd then mp.set_property("image-display-duration", LB.idd); LB.idd = nil end
         draw_top_bar()
+        mp.command("playlist-next")                   -- resume a fresh normal photo (sharp + HUD)
     end
 
     -- The badge is always visible (clock when idle). Under it: transport while
