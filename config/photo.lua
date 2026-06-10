@@ -34,6 +34,7 @@ local HUD_MAP_FRAC  = envn("HUD_MAP_FRAC",  0.27)   -- minimap/QR size (frac of 
 local MUSIC_WIN_FRAC = envn("MUSIC_WIN_FRAC", 0.30) -- marquee width (frac of width)
 local HUD_THUMB_FRAC = envn("HUD_THUMB_FRAC", 0.07) -- album-art thumb size (frac of height)
 local HUD_TEXT_BLUR  = envn("HUD_TEXT_BLUR", 0.10)  -- text shadow blur/spread (×font size)
+local HUD_TEXT_GLOW  = envn("HUD_TEXT_GLOW", 0.002) -- text shadow strength = border width (×font size)
 
 local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap)
 local THUMB_FRAMES = 240    -- rotation frames (1.5° each) — fine enough to look smooth
@@ -58,6 +59,7 @@ local progress_ov    = mp.create_osd_overlay("ass-events")  -- played
 local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (track)
 local top_bar_ov     = mp.create_osd_overlay("ass-events")  -- global progress, played
 local top_bar_bg_ov  = mp.create_osd_overlay("ass-events")  -- global progress, month sections
+local top_label_ov   = mp.create_osd_overlay("ass-events")  -- hovered month label
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Shared progress-bar styling: a translucent light-gray track with a
@@ -111,6 +113,8 @@ local music_path   = nil       -- current audio file (drives thumb regeneration)
 local music_playing = true     -- audio play state (spins the thumb when true)
 local draw_thumb_ring          -- assigned later
 local load_thumb_for           -- assigned later
+local gp_sections              -- global month sections (forward; built later)
+local gp_section_at            -- hit-test for the month bar (forward; defined later)
 local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
 
@@ -133,7 +137,7 @@ end
 -- at 1080p and 4K. HUD_TEXT_BLUR (config) controls the spread.
 local function glow(fs)
     return string.format("\\bord%.2f\\blur%.2f\\shad0\\3c&H000000&\\4c&H000000&",
-        fs * 0.020, fs * HUD_TEXT_BLUR)
+        fs * HUD_TEXT_GLOW, fs * HUD_TEXT_BLUR)
 end
 
 local seq       = 0
@@ -735,6 +739,15 @@ end)
 
 mp.register_script_message("handle-left-click", function()
     local mouse = mp.get_property_native("mouse-pos")
+
+    -- Click a month on the top global bar to jump straight to it.
+    if mouse and gp_section_at then
+        local hv = gp_section_at(mouse.x, mouse.y)
+        if hv and gp_sections and gp_sections[hv] then
+            mp.set_property_number("playlist-pos", gp_sections[hv].start - 1)
+            return
+        end
+    end
 
     -- Click the album-art thumb (left of the marquee) to pause/play the MUSIC
     -- only (independent of the slideshow). Works even with no cover art (the
@@ -1355,6 +1368,7 @@ mp.register_event("shutdown", function()
     progress_bg_ov:remove()
     top_bar_ov:remove()
     top_bar_bg_ov:remove()
+    top_label_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1539,27 +1553,99 @@ mp.observe_property("percent-pos", "number", draw_progress)
 mp.register_event("file-loaded", function() prog_fill = -1 end)
 
 -- ----------------------------------------------------------------------------
--- Global progress bar (top of screen), chaptered by month — YouTube-style.
+-- Global progress bar (very top of screen), chaptered by month — YouTube-style.
 --   The playlist is grouped into month sections (each begins with a title
 --   card); a section's width is proportional to how many items that month
 --   holds, so busier months are wider. The fill shows how far through the whole
---   library we are. Everything is a fraction of the actual display.
+--   library we are. Hovering a month thickens that section and shows its label
+--   (e.g. "Nov 2023"); clicking jumps to that month. All relative to the display.
 -- ----------------------------------------------------------------------------
-local gp_sections  = nil    -- { {start=1-based, count=, x0=, w=}, … }
+gp_sections        = nil    -- { {start=1-based, count=, x0=, w=, label=}, … }
 local gp_built_for = -1     -- playlist-count the sections were last built for
 local gp_W, gp_H   = 0, 0   -- display size the sections were laid out for
+local gp_hover     = nil    -- index of the hovered section; nil = none
 
 local function gp_geom()
     local w, h = refresh_display_size()
     local margin = math.floor(h * 0.02)                         -- side inset (matches HUD)
-    local y      = math.floor(h * 0.012)                        -- just below the top edge
-    local th     = math.max(2, math.floor(h * 0.006 + 0.5))     -- bar thickness
+    local th     = math.max(2, math.floor(h * 0.003 + 0.5))     -- same as the bottom bar
+    local th_hi  = math.max(th + 2, math.floor(h * 0.010 + 0.5))-- hovered section thickness
     local gap    = math.max(2, math.floor(w * 0.0016 + 0.5))    -- gap between months
-    return w, h, margin, y, th, gap
+    return w, h, margin, th, th_hi, gap
 end
 
-local function gp_rect(x0, x1, y, th)
-    return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y, x1, y, x1, y + th, x0, y + th)
+local function gp_rect(x0, x1, th)   -- flush to the top edge (y = 0)
+    return string.format("m %d 0 l %d 0 l %d %d l %d %d", x0, x1, x1, th, x0, th)
+end
+
+-- "Nov 2023" from a section's lead entry (its title card).
+local function gp_label(entry)
+    local t = entry.title
+    if t and t ~= "" then
+        local mon, yr = t:match("(%a+)%s+(%d+)")
+        if mon and yr then return mon:sub(1, 3) .. " " .. yr end
+        return t
+    end
+    local yr, mon = (entry.filename or ""):match("(%d%d%d%d)%-(%a+)")
+    if yr and mon then return mon:sub(1, 3) .. " " .. yr end
+    return ""
+end
+
+-- Which section is under (mx,my)? Only the top band counts as the hover zone, so
+-- the thin bar is still easy to hit.
+function gp_section_at(mx, my)
+    if not gp_sections or not mx then return nil end
+    local w, h = refresh_display_size()
+    if my > h * 0.03 then return nil end
+    for i, s in ipairs(gp_sections) do
+        if mx >= s.x0 and mx <= s.x0 + s.w then return i end
+    end
+    return nil
+end
+
+local function draw_top_bar()
+    if not gp_sections then top_bar_ov:remove(); top_bar_bg_ov:remove(); top_label_ov:remove(); return end
+    local w, h, _, th, th_hi = gp_geom()
+    local idx = (mp.get_property_number("playlist-pos") or 0) + 1
+    local track, fill = {}, {}
+    for i, s in ipairs(gp_sections) do
+        local sth = (gp_hover == i) and th_hi or th
+        track[#track + 1] = gp_rect(s.x0, s.x0 + s.w, sth)
+        local s_end = s.start + s.count - 1
+        if idx > s_end then
+            fill[#fill + 1] = gp_rect(s.x0, s.x0 + s.w, sth)
+        elseif idx >= s.start then
+            local fw = math.floor(s.w * (idx - s.start + 1) / s.count + 0.5)
+            if fw > 0 then fill[#fill + 1] = gp_rect(s.x0, s.x0 + fw, sth) end
+        end
+    end
+
+    top_bar_bg_ov.res_x = w; top_bar_bg_ov.res_y = h
+    top_bar_bg_ov.data = string.format("{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}",
+        BAR_TRACK, table.concat(track, " "))
+    top_bar_bg_ov:update()
+
+    top_bar_ov.res_x = w; top_bar_ov.res_y = h
+    if #fill > 0 then
+        top_bar_ov.data = string.format("{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}",
+            BAR_FILL, table.concat(fill, " "))
+        top_bar_ov:update()
+    else
+        top_bar_ov:remove()
+    end
+
+    if gp_hover and gp_sections[gp_hover] then
+        local s  = gp_sections[gp_hover]
+        local fs = math.floor(h * HUD_DATE_FS)
+        top_label_ov.res_x = w; top_label_ov.res_y = h
+        top_label_ov.data = string.format(
+            "{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&}%s",
+            s.x0 + math.floor(s.w / 2), th_hi + math.floor(h * 0.008),
+            fs, math.max(1, math.floor(fs * 0.05 + 0.5)), glow(fs), s.label)
+        top_label_ov:update()
+    else
+        top_label_ov:remove()
+    end
 end
 
 local function build_month_sections()
@@ -1568,7 +1654,7 @@ local function build_month_sections()
     gp_built_for = n
     if n <= 1 then                                   -- loading screen / nothing to chapter
         gp_sections = nil
-        top_bar_ov:remove(); top_bar_bg_ov:remove()
+        top_bar_ov:remove(); top_bar_bg_ov:remove(); top_label_ov:remove()
         return
     end
     -- Group into sections: a new one starts at each title card (and at index 1).
@@ -1576,54 +1662,22 @@ local function build_month_sections()
     for i = 1, n do
         local fn = pl[i].filename or ""
         if #secs == 0 or fn:find("/TitleCards/", 1, true) then
-            secs[#secs + 1] = { start = i, count = 0 }
+            secs[#secs + 1] = { start = i, count = 0, label = gp_label(pl[i]) }
         end
         secs[#secs].count = secs[#secs].count + 1
     end
 
-    local w, h, margin, y, th, gap = gp_geom()
+    local w, h, margin, _, _, gap = gp_geom()
     local avail = (w - 2 * margin) - (#secs - 1) * gap
     if avail < 1 then avail = w - 2 * margin; gap = 0 end
-    local x, parts = margin, {}
+    local x = margin
     for _, s in ipairs(secs) do
         s.w  = math.max(1, math.floor(avail * s.count / n + 0.5))
         s.x0 = x
-        parts[#parts + 1] = gp_rect(s.x0, s.x0 + s.w, y, th)
         x = x + s.w + gap
     end
     gp_sections = secs; gp_W = w; gp_H = h
-
-    top_bar_bg_ov.res_x = w; top_bar_bg_ov.res_y = h
-    top_bar_bg_ov.data = string.format("{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}",
-        BAR_TRACK, table.concat(parts, " "))
-    top_bar_bg_ov:update()
-end
-
-local function update_global_progress()
-    if not gp_sections then top_bar_ov:remove(); return end
-    local pos = mp.get_property_number("playlist-pos")
-    if not pos then return end
-    local idx = pos + 1                              -- 1-based current item
-    local _, _, _, y, th = gp_geom()
-    local parts = {}
-    for _, s in ipairs(gp_sections) do
-        local s_end = s.start + s.count - 1
-        if idx > s_end then                          -- whole month already played
-            parts[#parts + 1] = gp_rect(s.x0, s.x0 + s.w, y, th)
-        elseif idx >= s.start then                   -- current month: partial fill
-            local fw = math.floor(s.w * (idx - s.start + 1) / s.count + 0.5)
-            if fw > 0 then parts[#parts + 1] = gp_rect(s.x0, s.x0 + fw, y, th) end
-            break
-        end
-    end
-    top_bar_ov.res_x = gp_W; top_bar_ov.res_y = gp_H
-    if #parts > 0 then
-        top_bar_ov.data = string.format("{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}",
-            BAR_FILL, table.concat(parts, " "))
-        top_bar_ov:update()
-    else
-        top_bar_ov:remove()
-    end
+    draw_top_bar()
 end
 
 mp.register_event("file-loaded", function()
@@ -1631,8 +1685,16 @@ mp.register_event("file-loaded", function()
     local w, h = refresh_display_size()
     if n ~= gp_built_for or w ~= gp_W or h ~= gp_H then
         build_month_sections()
+    else
+        draw_top_bar()
     end
-    update_global_progress()
+end)
+
+-- Hover: thicken the month under the cursor and show its label.
+mp.observe_property("mouse-pos", "native", function(_, mpos)
+    if not mpos then return end
+    local hv = gp_section_at(mpos.x, mpos.y)
+    if hv ~= gp_hover then gp_hover = hv; draw_top_bar() end
 end)
 
 -- ----------------------------------------------------------------------------
