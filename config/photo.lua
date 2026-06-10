@@ -979,11 +979,38 @@ local lm_anim = nil   -- the in-flight reveal: {glyphs,start_t,t0,header,total,g
 -- fires every video frame — the same thing that keeps the bottom bar moving).
 -- Over stills the timer drives it (percent-pos doesn't advance for an image).
 local function lm_render()
-    -- The city headline shares the bottom-center with the briefing captions, so
-    -- hide it (and stop animating) while a briefing is on screen.
-    if briefing_active and briefing_active() then landmark_ov:remove(); lm_anim = nil; return end
     local a = lm_anim
+    -- The city headline shares the bottom-center with the captions, so hide it
+    -- during a briefing — EXCEPT the "GROK <time of day>" title (mode "title"),
+    -- which is meant to play right as the briefing goes live.
+    if briefing_active and briefing_active() and not (a and a.mode == "title") then
+        landmark_ov:remove(); lm_anim = nil; return
+    end
     if not a or a.gen ~= lm_gen then return end
+
+    if a.mode == "title" then        -- centered title that zooms up and fades out
+        local el = mp.get_time() - a.t0
+        if el >= a.total then landmark_ov:remove(); lm_anim = nil; return end
+        local p = el / a.total
+        local scale, alpha
+        if p < 0.12 then                              -- quick fade-in
+            scale = 90 + 10 * (p / 0.12)              -- 90% -> 100%
+            alpha = math.floor(0xFF * (1 - p / 0.12) + 0.5)
+        else                                          -- zoom + fade-out
+            local q = (p - 0.12) / 0.88
+            scale = 100 + 60 * q                      -- 100% -> 160%
+            alpha = math.floor(0xFF * q + 0.5)
+        end
+        landmark_ov.res_x = a.W; landmark_ov.res_y = a.H
+        landmark_ov.data = string.format(
+            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\fscx%d\\fscy%d"
+            .. "\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
+            math.floor(a.W / 2), math.floor(a.H / 2), a.fs, a.fsp,
+            math.floor(scale), math.floor(scale), glow(a.fs), alpha, a.text)
+        landmark_ov:update()
+        return
+    end
+
     local el = mp.get_time() - a.t0
     local parts = { a.header }
     for i = 1, #a.glyphs do
@@ -1015,6 +1042,24 @@ local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
     end
     lm_anim = { glyphs = glyphs, start_t = start_t, t0 = mp.get_time(), header = header,
                 total = last + FADE, gen = gen, W = win_w, H = win_h, fade = FADE }
+    lm_render()
+    local function tick()
+        if not lm_anim or lm_anim.gen ~= gen then return end
+        lm_render()
+        if lm_anim then mp.add_timeout(0.033, tick) end
+    end
+    mp.add_timeout(0.033, tick)
+end
+
+-- One-shot center title ("GROK MORNING/…") that zooms up and fades out — same
+-- stylish Montserrat ExtraBold + wide letter-spacing as the month cards. Reuses
+-- the landmark animator (lm_anim/lm_render) so it costs no extra state.
+local function animate_gtitle(text, w, h)
+    lm_gen = lm_gen + 1
+    lm_anim = { mode = "title", text = text, t0 = mp.get_time(), total = 2.6,
+                gen = lm_gen, W = w, H = h,
+                fs = math.floor(h * 0.13), fsp = math.floor(h * 0.13 * 0.22) }
+    local gen = lm_gen
     lm_render()
     local function tick()
         if not lm_anim or lm_anim.gen ~= gen then return end
@@ -2198,7 +2243,10 @@ local menu_boxes       = {}     -- {x0,y0,x1,y1,act} Replay/Refresh chooser
 -- Briefing/badge state (one table to stay under Lua's 200-local cap).
 local LB = { muted = false, vol = nil, spoke = false, hud_off = false, label = nil, near = false }
 
-function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
+-- "Active" = actually playing (mute, hide-HUD, bgm marquee key off this). The
+-- PID file exists earlier, during the "getting ready" phase, when the screensaver
+-- must stay normal — so this keys off the LIVE marker, written once it starts.
+function briefing_active() return file_exists("/tmp/ss_briefing_live") end
 
 function logo_hit(mx, my)
     return (logo ~= nil) and mx >= logo.x and mx <= logo.x + logo.w
@@ -2427,14 +2475,14 @@ local function draw_menu()
     controls_ov:update()
 end
 
--- "<time of day> BRIEFING" for the framed badge.
-local function tod_briefing_label()
+-- Time-of-day word, shared by the badge label and the GROK title.
+local function tod_word()
     local hr = tonumber(os.date("%H")) or 0
-    local part = (hr >= 5 and hr < 12 and "MORNING")
+    return (hr >= 5 and hr < 12 and "MORNING")
         or (hr >= 12 and hr < 17 and "AFTERNOON")
         or (hr >= 17 and hr < 21 and "EVENING") or "NIGHT"
-    return part .. " BRIEFING"
 end
+local function tod_briefing_label() return tod_word() .. " BRIEFING" end
 
 -- Generous reveal area around the badge (so the clock flips to the briefing
 -- badge as the mouse approaches it).
@@ -2475,6 +2523,7 @@ local function logo_tick()
     if active and not LB.hud_off then
         LB.hud_off = true
         clear_other_hud()
+        animate_gtitle("GROK " .. tod_word(), w, h)   -- "GROK MORNING/…" zoom-fade
     elseif not active and LB.hud_off then
         LB.hud_off = false
         if cur.redraw then cur.redraw() end
@@ -2499,16 +2548,19 @@ local function logo_tick()
         controls_ov:remove(); control_boxes = {}; menu_boxes = {}
     end
 
-    -- "GETTING READY…" before the first spoken line (on click-prep or while the
-    -- first segment generates), but not in the gaps between later segments.
+    -- "GETTING READY…" shows only during the prep phase (after a click, before it
+    -- goes live). Once it's live (active) or speaking, the prep phase is over.
     local f = io.open("/tmp/ss_briefing.txt", "r")
     local s = f and (f:read("*a") or "") or ""
     if f then f:close() end
     s = s:gsub("%s+$", "")
     local speaking = (s ~= "" and s ~= "__HIDE__")
-    if speaking then LB.spoke = true; BD.preparing = false end
-    local show_ready = (BD.preparing or active) and not LB.spoke and not speaking
-    if show_ready and (active or mp.get_time() - BD.t0 <= 90) then
+    if speaking then LB.spoke = true end
+    -- Prep ends when it goes live/speaks, or if the process died (PID gone) — but
+    -- give it a few seconds after the click for that PID file to appear.
+    local proc = file_exists("/tmp/ss_briefing.pid")
+    if speaking or active or (not proc and mp.get_time() - BD.t0 > 3) then BD.preparing = false end
+    if BD.preparing and not LB.spoke and (mp.get_time() - BD.t0 <= 185) then
         local fs = math.floor(h * 0.024)
         logo_text_ov.res_x = w; logo_text_ov.res_y = h
         logo_text_ov.data = string.format(
@@ -2517,7 +2569,6 @@ local function logo_tick()
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
         logo_text_ov:update()
     else
-        if not active then BD.preparing = false end
         logo_text_ov:remove()
     end
 end

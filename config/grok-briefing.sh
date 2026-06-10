@@ -32,13 +32,16 @@ LOCATION="${GROK_LOCATION:-}"
 TICKERS="${GROK_TICKERS:-}"
 
 GBGM_DIR="$MUSIC_DIR/GrokMorning"
-GBGM_VOL="${GROK_BGM_VOLUME:-100}"       # bgm plays at full by default (not ducked)
+GBGM_VOL="${GROK_BGM_VOLUME:-60}"        # briefing music volume (0-100)
+VOICE_VOL="${GROK_VOICE_VOLUME:-150}"    # spoken-voice gain in % (100 = as recorded)
+VOICE_GAIN="$(awk "BEGIN{print ${VOICE_VOL}/100}")"   # ffplay -af volume factor
 WELCOME_DIR="$CFG_DIR/welcome"           # premade greeting clips (play instantly)
 CACHE_DIR="$DATA_DIR/Briefing"
 TODAY="$(date '+%Y-%m-%d')"
 TODAY_CACHE="$CACHE_DIR/$TODAY"
 SUB_FILE="/tmp/ss_briefing.txt"          # photo.lua reads this for OSD subtitles
-PID_FILE="/tmp/ss_briefing.pid"
+PID_FILE="/tmp/ss_briefing.pid"          # exists for the whole process (controls/single-instance)
+LIVE_FILE="/tmp/ss_briefing_live"        # exists ONLY once it's actually playing (drives the HUD)
 FFPLAY_PID_FILE="/tmp/ss_briefing_ffplay.pid"
 BGM_TXT="/tmp/ss_briefing_bgm.txt"       # "Title - Artist" of the bgm (for the marquee)
 BGM_PATH_FILE="/tmp/ss_briefing_bgm_path"  # the bgm file path (for the cover thumb)
@@ -157,7 +160,7 @@ FADE_IN="${GROK_FADE_IN:-1.2}"      # soft-drop of the slideshow music on entry
 FADE_OUT="${GROK_FADE_OUT:-2.5}"    # longer soft-drop of the bgm on exit
 FADE_RESUME="${GROK_FADE_RESUME:-2.0}"  # soft resume of the slideshow music
 
-CUR_FFPLAY=""; BGM_PID=""; PREP_BG=""; SKIP=0; STEP=1; ENDED=0; SS_VOL=""
+CUR_FFPLAY=""; BGM_PID=""; PREP_BG=""; SKIP=0; STEP=1; ENDED=0; SS_VOL=""; WENT_LIVE=0
 on_skip() { SKIP=1; STEP=1;  [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }; }
 on_prev() { SKIP=1; STEP=-1; [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }; }
 end_play() {
@@ -165,19 +168,50 @@ end_play() {
     [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }
     [ -n "$PREP_BG" ] && kill "$PREP_BG" 2>/dev/null    # stop background generation
     sub_hide
-    # Longer soft-drop of the grokmorning music, then stop it.
-    if [ -n "$BGM_PID" ]; then
-        fade_vol "$BGM_SOCK" "$GBGM_VOL" 0 "$FADE_OUT"
-        jsock "$BGM_SOCK" '{"command":["quit"]}' >/dev/null 2>&1
-        kill "$BGM_PID" 2>/dev/null
+    # Only undo the screensaver changes if we actually went live (if we aborted
+    # while still getting ready, the screensaver was never touched).
+    if [ "$WENT_LIVE" = 1 ]; then
+        rm -f "$LIVE_FILE"                  # HUD comes back, mute lifts
+        # Longer soft-drop of the grokmorning music, then stop it.
+        if [ -n "$BGM_PID" ]; then
+            fade_vol "$BGM_SOCK" "$GBGM_VOL" 0 "$FADE_OUT"
+            jsock "$BGM_SOCK" '{"command":["quit"]}' >/dev/null 2>&1
+            kill "$BGM_PID" 2>/dev/null
+        fi
+        # Soft RESUME of the slideshow's own music (start silent, unpause, fade up).
+        [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
+        set_vol "$AUDIO_SOCK" 0
+        ss_music_pause false
+        fade_vol "$AUDIO_SOCK" 0 "$SS_VOL" "$FADE_RESUME"
     fi
     rm -f "$PID_FILE" "$FFPLAY_PID_FILE" "$BGM_TXT" "$BGM_PATH_FILE" "$BGM_SOCK"
-    # Soft RESUME of the slideshow's own music (start silent, unpause, fade up).
-    [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
-    set_vol "$AUDIO_SOCK" 0
-    ss_music_pause false
-    fade_vol "$AUDIO_SOCK" 0 "$SS_VOL" "$FADE_RESUME"
     exit 0
+}
+
+# Transition the screensaver INTO briefing mode — only once content is ready.
+go_live() {
+    WENT_LIVE=1
+    : > "$LIVE_FILE"                        # photo.lua: mute + hide HUD + show the title
+    # Soft-drop the slideshow's own music, then pause it (remember its volume).
+    SS_VOL="$(get_vol "$AUDIO_SOCK")"; [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
+    fade_vol "$AUDIO_SOCK" "$SS_VOL" 0 "$FADE_IN"
+    ss_music_pause true
+    # GrokMorning bgm via its own mpv (looped) so we can fade it out later.
+    if [ -d "$GBGM_DIR" ] && [ -n "$(ls -A "$GBGM_DIR" 2>/dev/null)" ]; then
+        local bgm; bgm="$(find "$GBGM_DIR" -maxdepth 1 -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.wav' \) 2>/dev/null | shuf -n1)"
+        if [ -n "$bgm" ]; then
+            rm -f "$BGM_SOCK"
+            mpv --no-config --no-video --no-terminal --idle=no --loop-file=inf \
+                --volume="$GBGM_VOL" --input-ipc-server="$BGM_SOCK" "$bgm" >/dev/null 2>&1 & BGM_PID=$!
+            local bt ba disp
+            bt="$(ffprobe -v quiet -show_entries format_tags=title  -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
+            ba="$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
+            [ -n "$bt" ] || bt="$(basename "${bgm%.*}")"
+            disp="$bt"; [ -n "$ba" ] && disp="$bt - $ba"
+            printf '%s' "$disp" > "$BGM_TXT"
+            printf '%s' "$bgm"  > "$BGM_PATH_FILE"
+        fi
+    fi
 }
 
 # Instant premade greeting while the first real segment is still generating.
@@ -189,7 +223,7 @@ play_welcome() {
     wtxt="${wmp3%.*}.txt"
     [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
     SKIP=0; STEP=1
-    ffplay -nodisp -autoexit -loglevel quiet "$wmp3" >/dev/null 2>&1 &
+    ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$wmp3" >/dev/null 2>&1 &
     CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
     wait "$CUR_FFPLAY" 2>/dev/null
     CUR_FFPLAY=""; rm -f "$FFPLAY_PID_FILE"; sub_hide
@@ -206,40 +240,25 @@ play() {
     trap on_prev SIGUSR2
     trap end_play SIGTERM SIGINT EXIT
 
-    # Soft-drop the slideshow's own music, then pause it (remember its volume to
-    # restore on the way out).
-    SS_VOL="$(get_vol "$AUDIO_SOCK")"; [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
-    fade_vol "$AUDIO_SOCK" "$SS_VOL" 0 "$FADE_IN"
-    ss_music_pause true
-
-    # GrokMorning bgm via its own mpv (looped) so we can fade it out later. It
-    # starts straight at volume — no soft start needed.
-    if [ -d "$GBGM_DIR" ] && [ -n "$(ls -A "$GBGM_DIR" 2>/dev/null)" ]; then
-        local bgm; bgm="$(find "$GBGM_DIR" -maxdepth 1 -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.wav' \) 2>/dev/null | shuf -n1)"
-        if [ -n "$bgm" ]; then
-            rm -f "$BGM_SOCK"
-            mpv --no-config --no-video --no-terminal --idle=no --loop-file=inf \
-                --volume="$GBGM_VOL" --input-ipc-server="$BGM_SOCK" "$bgm" >/dev/null 2>&1 & BGM_PID=$!
-            # Publish what's playing so the slideshow's music marquee can show it.
-            local bt ba disp
-            bt="$(ffprobe -v quiet -show_entries format_tags=title  -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
-            ba="$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
-            [ -n "$bt" ] || bt="$(basename "${bgm%.*}")"
-            disp="$bt"; [ -n "$ba" ] && disp="$bt - $ba"
-            printf '%s' "$disp" > "$BGM_TXT"
-            printf '%s' "$bgm"  > "$BGM_PATH_FILE"
-        fi
-    fi
-
-    # Generate EVERY segment up front, in parallel, in the background — so by the
-    # time the welcome clip finishes the first one is ready, and later ones keep
-    # loading while earlier ones play. (gen_segment no-ops anything already cached.)
+    # Generate everything in parallel, but DON'T touch the screensaver yet — it
+    # keeps playing normally (music + HUD on) through the whole "getting ready"
+    # phase, until the first segment is actually ready.
     prep >/dev/null 2>&1 & PREP_BG=$!
 
-    # Let the music breathe before the first words (only when there IS music).
-    [ -n "$BGM_PID" ] && sleep "$SPEAK_DELAY"
+    local f_id="${SEG_IDS[0]}" f_prompt="${SEG_PROMPT[0]}"
+    local f_hash; f_hash="$(printf '%s' "$f_prompt" | md5sum | cut -d' ' -f1)"
+    local f_mp3="$TODAY_CACHE/${f_id}_${f_hash}.mp3"
+    local waited=0
+    while [ ! -s "$f_mp3" ] && [ "$waited" -lt 180 ] && [ "$SKIP" = 0 ]; do
+        sleep 0.5; waited=$((waited+1))
+    done
+    [ -s "$f_mp3" ] || gen_segment "$f_id" "${SEG_SEARCH[0]}" "$f_prompt"
+    [ -s "$f_mp3" ] || end_play    # nothing came back — abort quietly (nothing was touched yet)
 
-    # Instant greeting covers the first segment's generation latency.
+    # READY → flip the screensaver into briefing mode (fade music down, hide HUD,
+    # start bgm). photo.lua shows the "GROK <time of day>" title at this moment.
+    go_live
+    [ -n "$BGM_PID" ] && sleep "$SPEAK_DELAY"   # a little music before the first words
     play_welcome
 
     local idx=0 n="${#SEG_IDS[@]}"
@@ -262,7 +281,7 @@ play() {
         [ -s "$cmp3" ] || { idx=$((idx+1)); continue; }
 
         [ -s "$ctxt" ] && sub_show "$(cat "$ctxt")" || sub_hide
-        ffplay -nodisp -autoexit -loglevel quiet "$cmp3" >/dev/null 2>&1 &
+        ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$cmp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
         wait "$CUR_FFPLAY" 2>/dev/null
         CUR_FFPLAY=""; rm -f "$FFPLAY_PID_FILE"; sub_hide
