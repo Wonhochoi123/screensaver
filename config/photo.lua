@@ -168,7 +168,8 @@ local draw_music_bar           -- assigned later
 -- scroll = first visible row (0-based); bounds = chooser panel box; poll_* = the
 -- audio-player poll throttle.
 local MQ = { layout = nil, hover = false, chooser = false, rows = {},
-             entries = nil, scroll = 0, bounds = nil, poll_t = 0, poll_busy = false }
+             entries = nil, scroll = 0, maxscroll = 0, bounds = nil, sbar = nil,
+             poll_t = 0, poll_busy = false }
 local render_marquee           -- assigned later; redraws the marquee for hover state
 local chooser_hit              -- assigned later; hit-test a chooser row
 local open_chooser             -- assigned later
@@ -876,13 +877,16 @@ mp.register_script_message("handle-left-click", function()
         end
     end
 
-    -- Song chooser (open below the bar): click a row to jump to that track, or a
-    -- ▲/▼ strip to scroll. Scroll with the mouse wheel too (handled separately).
+    -- Song chooser (open below the bar): click a row to jump to that track, click
+    -- the scrollbar to jump there, or use the mouse wheel (handled separately).
     if mouse and MQ.chooser then
+        if MQ.sbar and mouse.x >= MQ.sbar.x0 and mouse.x <= MQ.sbar.x1
+           and mouse.y >= MQ.sbar.y0 and mouse.y <= MQ.sbar.y1 then
+            local frac = (mouse.y - MQ.sbar.y0) / math.max(1, MQ.sbar.y1 - MQ.sbar.y0)
+            MQ.scroll = math.floor(frac * MQ.maxscroll + 0.5); draw_chooser(); return
+        end
         local r = chooser_hit and chooser_hit(mouse.x, mouse.y)
-        if r and r.scroll then
-            MQ.scroll = MQ.scroll + r.scroll; draw_chooser(); return
-        elseif r and r.idx ~= nil then
+        if r and r.idx ~= nil then
             mp.commandv("run", "/bin/sh", "-c",
                 "printf '%s\\n' '{\"command\":[\"set_property\",\"playlist-pos\"," .. r.idx
                 .. "]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
@@ -998,25 +1002,26 @@ local function lm_render()
     end
     if not a or a.gen ~= lm_gen then return end
 
-    if a.mode == "title" then        -- centered title that zooms up and fades out
+    if a.mode == "title" then        -- "GROK <time of day>", built exactly like a
+        -- month card: per-letter reveal (to pure white), brief hold, then a global
+        -- fade-out. No outline/shadow/glow, no zoom — just the build-up + fade.
         local el = mp.get_time() - a.t0
-        if el >= a.total then landmark_ov:remove(); lm_anim = nil; return end
-        local p = el / a.total
-        local scale, alpha
-        if p < 0.12 then                              -- quick fade-in
-            scale = 90 + 10 * (p / 0.12)              -- 90% -> 100%
-            alpha = math.floor(0xFF * (1 - p / 0.12) + 0.5)
-        else                                          -- zoom + fade-out
-            local q = (p - 0.12) / 0.88
-            scale = 100 + 60 * q                      -- 100% -> 160%
-            alpha = math.floor(0xFF * q + 0.5)
+        local total = a.build + a.hold + a.fout
+        if el >= total then landmark_ov:remove(); lm_anim = nil; return end
+        local gout = 0
+        if el > a.build + a.hold then gout = (el - a.build - a.hold) / a.fout end  -- 0..1
+        local parts = { a.header }
+        for i = 1, #a.glyphs do
+            local st, fd = a.start_t[i], a.fade_t[i]
+            local ain                                  -- per-letter build-up: FF -> 00
+            if el <= st then ain = 0xFF
+            elseif el >= st + fd then ain = 0x00
+            else ain = math.floor(0xFF * (1 - (el - st) / fd) + 0.5) end
+            local alpha = math.floor(ain + (0xFF - ain) * gout + 0.5)   -- + global fade-out
+            parts[#parts + 1] = string.format("{\\alpha&H%02X&}%s", alpha, a.glyphs[i])
         end
         landmark_ov.res_x = a.W; landmark_ov.res_y = a.H
-        landmark_ov.data = string.format(
-            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\fscx%d\\fscy%d"
-            .. "\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
-            math.floor(a.W / 2), math.floor(a.H / 2), a.fs, a.fsp,
-            math.floor(scale), math.floor(scale), glow(a.fs), alpha, a.text)
+        landmark_ov.data = table.concat(parts)
         landmark_ov:update()
         return
     end
@@ -1061,15 +1066,29 @@ local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
     mp.add_timeout(0.033, tick)
 end
 
--- One-shot center title ("GROK MORNING/…") that zooms up and fades out — same
--- stylish Montserrat ExtraBold + wide letter-spacing as the month cards. Reuses
--- the landmark animator (lm_anim/lm_render) so it costs no extra state.
+-- One-shot center title ("GROK MORNING/…") built exactly like a month card:
+-- Montserrat ExtraBold, same size/letter-spacing, per-letter reveal to PURE WHITE
+-- (no outline/shadow/glow, no zoom), brief hold, then fade out. Reuses the
+-- landmark animator (lm_anim/lm_render) so it costs no extra state.
 local function animate_gtitle(text, w, h)
     lm_gen = lm_gen + 1
-    lm_anim = { mode = "title", text = text, t0 = mp.get_time(), total = 2.6,
-                gen = lm_gen, W = w, H = h,
-                fs = math.floor(h * 0.13), fsp = math.floor(h * 0.13 * 0.22) }
     local gen = lm_gen
+    local glyphs = utf8_split(text)
+    local fs  = math.floor(h * 0.111)   -- month-card size (120 @ 1080)
+    local fsp = math.floor(h * 0.046)   -- month-card letter-spacing (50 @ 1080)
+    local header = string.format(
+        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&\\bord0\\shad0}",
+        math.floor(w / 2), math.floor(h / 2), fs, fsp)
+    local start_t, fade_t, last = {}, {}, 0
+    for i = 1, #glyphs do
+        local st = 0.1 + math.random() * 1.4    -- reveal starts 0.1–1.5s in
+        local fd = 0.5 + math.random() * 0.3    -- over 0.5–0.8s (as the month card)
+        start_t[i] = st; fade_t[i] = fd
+        if st + fd > last then last = st + fd end
+    end
+    lm_anim = { mode = "title", glyphs = glyphs, start_t = start_t, fade_t = fade_t,
+                header = header, t0 = mp.get_time(), gen = gen, W = w, H = h,
+                build = last, hold = 0.5, fout = 0.8 }
     lm_render()
     local function tick()
         if not lm_anim or lm_anim.gen ~= gen then return end
@@ -1416,66 +1435,73 @@ local function entry_name(e)
     return clean_text(s)
 end
 
--- A small triangle (up/down) centered at cx,cy, for the scroll strips.
-local function tri_path(cx, cy, s, up)
-    if up then return string.format("m %d %d l %d %d %d %d", cx, cy - s, cx + s, cy + s, cx - s, cy + s) end
-    return string.format("m %d %d l %d %d %d %d", cx - s, cy - s, cx + s, cy - s, cx, cy + s)
-end
-
 function draw_chooser()
-    MQ.rows = {}; MQ.bounds = nil
+    MQ.rows = {}; MQ.bounds = nil; MQ.sbar = nil
     local entries = MQ.entries
     if not MQ.chooser or not music_bar or not entries or #entries == 0 then
         music_menu_ov:remove(); return
     end
     local b = music_bar
     local w, h = b.W, b.H
-    local fs   = math.floor(h * HUD_MUSIC_FS * 0.92)
+    local fs   = math.floor(h * HUD_MUSIC_FS)        -- same size + font as the marquee
+    local fsp  = math.floor(h * 0.003 + 0.5)
     local rowh = math.floor(fs * 1.7)
-    local arrh = math.floor(rowh * 0.62)
-    local pad  = math.floor(fs * 0.6)
-    local gapy = math.max(1, math.floor(rowh * 0.12))
+    local gapy = math.max(1, math.floor(rowh * 0.10))
+    local pad  = math.floor(fs * 0.2)
     local boxw = math.max(b.w, math.floor(w * 0.26))
     local x0   = b.x
 
     -- Clamp the scroll window. MQ.scroll = index of the first visible row (0-based).
     local n = #entries
     local maxscroll = math.max(0, n - CHOOSER_MAX)
+    MQ.maxscroll = maxscroll
     if MQ.scroll < 0 then MQ.scroll = 0 elseif MQ.scroll > maxscroll then MQ.scroll = maxscroll end
     local first = MQ.scroll + 1
     local last  = math.min(n, first + CHOOSER_MAX - 1)
+    local count = last - first + 1
+    local has_above, has_below = MQ.scroll > 0, last < n
+    local FADE = 1.8                                  -- rows over which the edge fades
 
-    local y, parts = b.y + b.th + math.floor(rowh * 0.5), {}
-    local function strip(up, delta)            -- a clickable ▲/▼ scroll strip
-        local ry0, ry1 = y, y + arrh
-        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H3A&\\p1}"
-            .. rrect_path(x0, ry0, boxw, arrh, math.floor(arrh * 0.25)) .. "{\\p0}"
-        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\p1}"
-            .. tri_path(x0 + math.floor(boxw / 2), ry0 + math.floor(arrh / 2),
-                        math.floor(arrh * 0.22), up) .. "{\\p0}"
-        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry1, scroll = delta }
-        y = ry1 + gapy
-    end
-
-    if MQ.scroll > 0 then strip(true, -CHOOSER_MAX) end
+    local top_y = b.y + b.th + math.floor(rowh * 0.5)
+    local y, parts = top_y, {}
+    local mstyle = music_style(fs, fsp)               -- Montserrat ExtraBold + glow
     for i = first, last do
         local e = entries[i]
-        local ry0, ry1 = y, y + rowh
-        local ba = e.current and "&H1C&" or "&H4E&"        -- current row a touch more opaque
-        local tc = e.current and "&H50C0FF&" or "&HFFFFFF&" -- highlight current (warm gold)
-        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a" .. ba .. "\\p1}"
-            .. rrect_path(x0, ry0, boxw, rowh, math.floor(rowh * 0.18)) .. "{\\p0}"
+        local p = i - first                           -- 0 = top visible row
+        local ry0 = y
+        -- Edge fade: dim the rows nearest a scrollable edge (so it reads as "more").
+        local vis = 1
+        if has_above then vis = math.min(vis, math.max(0.10, (p + 0.5) / FADE)) end
+        if has_below then vis = math.min(vis, math.max(0.10, (count - 1 - p + 0.5) / FADE)) end
+        local alpha = math.floor(0x40 + (0xFF - 0x40) * (1 - vis) + 0.5)
+        local tc = e.current and "&H50C0FF&" or "&HFFFFFF&"   -- current track in gold
         parts[#parts + 1] = string.format(
-            "{\\an4\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp0\\1c%s\\bord0\\shad0"
-            .. "\\clip(%d,%d,%d,%d)}%s",
-            x0 + pad, ry0 + math.floor(rowh / 2), fs, tc,
-            x0, ry0, x0 + boxw - pad, ry1, entry_name(e))
-        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry1, idx = i - 1 }
-        y = ry1 + gapy
+            "{\\an4\\pos(%d,%d)%s\\1c%s\\alpha&H%02X&\\clip(%d,%d,%d,%d)}%s",
+            x0 + pad, ry0 + math.floor(rowh / 2), mstyle, tc, alpha,
+            x0, ry0, x0 + boxw, ry0 + rowh, entry_name(e))
+        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry0 + rowh, idx = i - 1 }
+        y = ry0 + rowh + gapy
     end
-    if last < n then strip(false, CHOOSER_MAX) end
+    local bottom_y = y - gapy
 
-    MQ.bounds = { x0 = x0, y0 = b.y + b.th, x1 = x0 + boxw, y1 = y }
+    -- A thin vertical scrollbar on the right (YouTube-style): faint track + a
+    -- brighter thumb sized/positioned to the visible window. Click it to jump.
+    local right = x0 + boxw
+    if n > CHOOSER_MAX then
+        local sbw = math.max(2, math.floor(fs * 0.16))
+        local sbx = right + math.floor(fs * 0.5)
+        local th  = bottom_y - top_y
+        local thumb_h = math.max(math.floor(rowh * 0.8), math.floor(th * count / n))
+        local thumb_y = top_y + math.floor((th - thumb_h) * MQ.scroll / maxscroll)
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&HCC&\\p1}"
+            .. rrect_path(sbx, top_y, sbw, th, math.floor(sbw / 2)) .. "{\\p0}"
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H30&\\p1}"
+            .. rrect_path(sbx, thumb_y, sbw, thumb_h, math.floor(sbw / 2)) .. "{\\p0}"
+        MQ.sbar = { x0 = sbx - sbw, y0 = top_y, x1 = sbx + sbw * 2, y1 = bottom_y }
+        right = sbx + sbw
+    end
+
+    MQ.bounds = { x0 = x0, y0 = b.y + b.th, x1 = right, y1 = bottom_y }
     music_menu_ov.res_x = w; music_menu_ov.res_y = h
     music_menu_ov.data = table.concat(parts, "\n")
     music_menu_ov:update()
