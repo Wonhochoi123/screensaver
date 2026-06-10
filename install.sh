@@ -222,6 +222,9 @@ sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket pa
 copy_file config/photo.lua        "$CFG/photo.lua"        0644
 copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
 copy_file config/grok-briefing.sh "$CFG/grok-briefing.sh" 0755
+# Premade briefing greeting clips (play instantly while the first segment loads).
+install -d -m 0755 "$CFG/welcome"
+for w in "$SRC"/config/welcome/*; do [ -e "$w" ] && install -m 0644 "$w" "$CFG/welcome/"; done
 copy_file config/build-minimap.sh "$CFG/build-minimap.sh" 0755
 copy_file config/build-thumb.sh   "$CFG/build-thumb.sh"   0755
 copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755

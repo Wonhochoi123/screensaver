@@ -33,6 +33,7 @@ TICKERS="${GROK_TICKERS:-}"
 
 GBGM_DIR="$MUSIC_DIR/GrokMorning"
 GBGM_VOL="${GROK_BGM_VOLUME:-30}"
+WELCOME_DIR="$CFG_DIR/welcome"           # premade greeting clips (play instantly)
 CACHE_DIR="$DATA_DIR/Briefing"
 TODAY="$(date '+%Y-%m-%d')"
 TODAY_CACHE="$CACHE_DIR/$TODAY"
@@ -134,15 +135,31 @@ ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
 sub_show()  { printf '%s' "$1" > "$SUB_FILE"; }
 sub_hide()  { printf '__HIDE__'  > "$SUB_FILE"; }
 
-CUR_FFPLAY=""; BGM_PID=""; SKIP=0; STEP=1
+CUR_FFPLAY=""; BGM_PID=""; PREP_BG=""; SKIP=0; STEP=1
 on_skip() { SKIP=1; STEP=1;  [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }; }
 on_prev() { SKIP=1; STEP=-1; [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }; }
 end_play() {
     [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }
     [ -n "$BGM_PID" ] && kill "$BGM_PID" 2>/dev/null
+    [ -n "$PREP_BG" ] && kill "$PREP_BG" 2>/dev/null    # stop background generation
     sub_hide; rm -f "$PID_FILE" "$FFPLAY_PID_FILE"
     ss_music_pause false        # resume the slideshow's own music
     exit 0
+}
+
+# Instant premade greeting while the first real segment is still generating.
+play_welcome() {
+    [ -d "$WELCOME_DIR" ] || return 0
+    local wmp3 wtxt
+    wmp3="$(find "$WELCOME_DIR" -maxdepth 1 -type f -iname '*.mp3' 2>/dev/null | shuf -n1)"
+    [ -n "$wmp3" ] && [ -s "$wmp3" ] || return 0
+    wtxt="${wmp3%.*}.txt"
+    [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
+    SKIP=0; STEP=1
+    ffplay -nodisp -autoexit -loglevel quiet "$wmp3" >/dev/null 2>&1 &
+    CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
+    wait "$CUR_FFPLAY" 2>/dev/null
+    CUR_FFPLAY=""; rm -f "$FFPLAY_PID_FILE"; sub_hide
 }
 
 play() {
@@ -164,18 +181,34 @@ play() {
         [ -n "$bgm" ] && { ffplay -nodisp -autoexit -loglevel quiet -loop 0 -volume "$GBGM_VOL" "$bgm" >/dev/null 2>&1 & BGM_PID=$!; }
     fi
 
+    # Generate EVERY segment up front, in parallel, in the background — so by the
+    # time the welcome clip finishes the first one is ready, and later ones keep
+    # loading while earlier ones play. (gen_segment no-ops anything already cached.)
+    prep >/dev/null 2>&1 & PREP_BG=$!
+
+    # Instant greeting covers the first segment's generation latency.
+    play_welcome
+
     local idx=0 n="${#SEG_IDS[@]}"
     while [ "$idx" -lt "$n" ] && [ "$idx" -ge 0 ]; do
         local id="${SEG_IDS[$idx]}" prompt="${SEG_PROMPT[$idx]}"
         local hash; hash="$(printf '%s' "$prompt" | md5sum | cut -d' ' -f1)"
         local cmp3="$TODAY_CACHE/${id}_${hash}.mp3" ctxt="$TODAY_CACHE/${id}_${hash}.txt"
+        SKIP=0; STEP=1
 
-        # generate on demand if prep didn't (e.g. slow first run)
+        # Wait for the background prep to produce this segment (up to ~45s),
+        # rather than generating a duplicate. Bail early if skipped/stopped.
+        local waited=0
+        while [ ! -s "$cmp3" ] && [ "$waited" -lt 90 ] && [ "$SKIP" = 0 ]; do
+            sleep 0.5; waited=$((waited+1))
+        done
+        # Honour a skip/prev pressed while still loading.
+        [ "$SKIP" = 1 ] && { idx=$(( idx + STEP )); [ "$idx" -lt 0 ] && idx=0; continue; }
+        # Last resort: if prep never made it, try once here.
         [ -s "$cmp3" ] || gen_segment "$id" "${SEG_SEARCH[$idx]}" "$prompt" || { idx=$((idx+1)); continue; }
         [ -s "$cmp3" ] || { idx=$((idx+1)); continue; }
 
         [ -s "$ctxt" ] && sub_show "$(cat "$ctxt")" || sub_hide
-        SKIP=0; STEP=1
         ffplay -nodisp -autoexit -loglevel quiet "$cmp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
         wait "$CUR_FFPLAY" 2>/dev/null

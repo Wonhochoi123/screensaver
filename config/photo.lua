@@ -181,6 +181,7 @@ local briefing_preparing = false  -- between logo click and the briefing speakin
 local prepare_t0 = 0
 local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
+local last_city    = nil       -- {city,cx,by,fs,fsp,ww,wh} — to re-show after a briefing
 
 -- Strip distracting separators (comma, slash, hyphen, pipe, dot-sep, dashes…)
 -- from display labels, collapsing to single spaces. Used everywhere EXCEPT the
@@ -943,6 +944,9 @@ local lm_anim = nil   -- the in-flight reveal: {glyphs,start_t,t0,header,total,g
 -- fires every video frame — the same thing that keeps the bottom bar moving).
 -- Over stills the timer drives it (percent-pos doesn't advance for an image).
 local function lm_render()
+    -- The city headline shares the bottom-center with the briefing captions, so
+    -- hide it (and stop animating) while a briefing is on screen.
+    if briefing_active and briefing_active() then landmark_ov:remove(); lm_anim = nil; return end
     local a = lm_anim
     if not a or a.gen ~= lm_gen then return end
     local el = mp.get_time() - a.t0
@@ -1084,7 +1088,14 @@ mp.register_event("file-loaded", function()
             local fsp  = math.floor(fs * 0.3636 + 0.5)       -- spacing scales with size
             local cx   = math.floor(L.win_w / 2)
             local by   = L.win_h - m_bottom
-            if city == "" then
+            -- Remember it so the city can re-appear when a briefing ends.
+            last_city = { city = city, cx = cx, by = by, fs = fs, fsp = fsp,
+                          ww = L.win_w, wh = L.win_h }
+            if briefing_active and briefing_active() then
+                main_shown = nil           -- a briefing owns the bottom-center now
+                lm_gen = lm_gen + 1
+                landmark_ov:remove()
+            elseif city == "" then
                 main_shown = nil
                 lm_gen = lm_gen + 1
                 landmark_ov:remove()
@@ -1878,17 +1889,52 @@ local briefing_subs_hidden = false
 local briefing_paused = false
 local briefing_shown = nil
 
-local function briefing_wrap(s, maxc)
-    local lines, line = {}, ""
+-- Rounded-rectangle ASS path (absolute coords; pair with \an7\pos(0,0)\p1).
+-- Shared by the subtitle boxes below and the logo/menu/controls further down.
+function rrect_path(x0, y0, W, H, r)
+    local x1, y1 = x0 + W, y0 + H
+    return string.format(
+        "m %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d "
+        .. "l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d",
+        x0 + r, y0,  x1 - r, y0,   x1, y0, x1, y0, x1, y0 + r,
+        x1, y1 - r,  x1, y1, x1, y1, x1 - r, y1,
+        x0 + r, y1,  x0, y1, x0, y1, x0, y1 - r,
+        x0, y0 + r,  x0, y0, x0, y0, x0 + r, y0)
+end
+
+-- Split into sentences (keeps the terminal . ! ? with each), so the captions
+-- can be laid out one sentence-block at a time — much easier to read.
+local function split_sentences(s)
+    s = s:gsub("([%.%!%?])%s+", "%1\1")
+    local out = {}
+    for part in (s .. "\1"):gmatch("(.-)\1") do
+        part = part:gsub("^%s+", ""):gsub("%s+$", "")
+        if part ~= "" then out[#out + 1] = part end
+    end
+    return out
+end
+
+local function wrap_words(s, maxc, into)
+    local line = ""
     for word in s:gmatch("%S+") do
         if line ~= "" and #line + #word + 1 > maxc then
-            lines[#lines + 1] = line; line = word
+            into[#into + 1] = { text = line }; line = word
         else
             line = (line == "") and word or (line .. " " .. word)
         end
     end
-    if line ~= "" then lines[#lines + 1] = line end
-    return table.concat(lines, "\\N")
+    if line ~= "" then into[#into + 1] = { text = line } end
+end
+
+-- Measure a caption line's real rendered width (hidden compute-bounds overlay).
+local function measure_px(w, h, fs, text)
+    music_measure_ov.res_x = w; music_measure_ov.res_y = h
+    music_measure_ov.hidden = true; music_measure_ov.compute_bounds = true
+    music_measure_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\fnMontserrat ExtraBold\\fs%d\\bord0\\shad0}%s", fs, text)
+    local mb = music_measure_ov:update(); music_measure_ov:remove()
+    if mb and mb.x0 and mb.x1 and mb.x1 > mb.x0 then return math.ceil(mb.x1 - mb.x0) end
+    return math.floor(#text * fs * 0.55)
 end
 
 local function draw_briefing()
@@ -1902,16 +1948,46 @@ local function draw_briefing()
     if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
         briefing_ov:remove(); return
     end
+
     local w, h = refresh_display_size()
-    local fs   = math.floor(h * 0.034)
-    local maxc = math.max(20, math.floor((w * 0.66) / (fs * 0.5)))
-    local wrapped = briefing_wrap(txt:gsub("[\r\n]+", " "), maxc)
+    local fs   = math.floor(h * 0.030)
+    local maxc = math.max(18, math.floor((w * 0.66) / (fs * 0.50)))
+
+    -- Build the wrapped lines, flagging the first line of each new sentence so we
+    -- can leave a little breathing room between sentences.
+    local lines = {}
+    for si, sent in ipairs(split_sentences(txt:gsub("[\r\n]+", " "))) do
+        local mark = #lines + 1
+        wrap_words(sent, maxc, lines)
+        if si > 1 and lines[mark] then lines[mark].gap_before = true end
+    end
+    if #lines == 0 then briefing_ov:remove(); return end
+
+    local lineH = math.floor(fs * 1.55)
+    local sgap  = math.floor(fs * 0.65)
+    local padx  = math.floor(fs * 0.70)
+    local rad   = math.floor(lineH * 0.20)
+
+    local totalH = 0
+    for _, L in ipairs(lines) do totalH = totalH + lineH + (L.gap_before and sgap or 0) end
+    local y = h - math.floor(h * 0.055) - totalH      -- bottom-anchored block
+
+    local boxes, texts = {}, {}
+    for _, L in ipairs(lines) do
+        if L.gap_before then y = y + sgap end
+        local tw = measure_px(w, h, fs, L.text)
+        local bw = tw + 2 * padx
+        local bx = math.floor(w / 2 - bw / 2)
+        boxes[#boxes + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H38&\\p1}"
+            .. rrect_path(bx, y, bw, lineH, rad) .. "{\\p0}"
+        texts[#texts + 1] = string.format(
+            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
+            math.floor(w / 2), y + math.floor(lineH / 2), fs, math.floor(fs * 0.02 + 0.5), L.text)
+        y = y + lineH
+    end
+
     briefing_ov.res_x = w; briefing_ov.res_y = h
-    briefing_ov.data = string.format(
-        "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&\\alpha&H10&"
-        .. "\\bord%d\\blur%d\\shad0\\3c&H000000&\\4c&H000000&}%s",
-        math.floor(w / 2), h - math.floor(h * 0.10), fs, math.floor(fs * 0.02 + 0.5),
-        math.max(2, math.floor(fs * 0.08 + 0.5)), math.max(2, math.floor(fs * 0.14 + 0.5)), wrapped)
+    briefing_ov.data = table.concat(boxes, "\n") .. "\n" .. table.concat(texts, "\n")
     briefing_ov:update()
 end
 mp.add_periodic_timer(0.3, draw_briefing)
@@ -1939,20 +2015,22 @@ mp.register_script_message("ss-briefing-stop", function()  -- end the briefing n
 end)
 
 -- ----------------------------------------------------------------------------
--- Morning-briefing logo (center-top), drawn as vector ASS (no image file).
---   * Idle: hidden until the mouse is near it. Clicking it opens a Replay /
---     Refresh chooser (Replay = today's cached briefing, Refresh = a fresh one).
---   * While a briefing is speaking: the logo stays up and a transport row
---     appears under it — previous / pause-play / next / stop — and the whole
---     screensaver is muted (the slideshow's own music can't be resumed).
+-- Morning-briefing badge (center-top), drawn as vector ASS (no image file).
+--   * Idle: shows the live clock (sun + current time). Clicking it opens a
+--     Replay / Refresh chooser (Replay = today's cached briefing, Refresh = new).
+--   * While a briefing is speaking: the badge becomes the "MORNING BRIEFING"
+--     logo with a transport row under it — previous / pause-play / next / stop —
+--     the city headline hides, and the whole screensaver is muted (its own music
+--     can't be resumed).
 -- Only active when GROK_BRIEFING=1.
 -- ----------------------------------------------------------------------------
-local mouse_near_logo  = false
 local control_boxes    = {}     -- {x0,y0,x1,y1,act} transport buttons (while speaking)
 local menu_boxes       = {}     -- {x0,y0,x1,y1,act} Replay/Refresh chooser
 local briefing_muted   = false
 local saved_volume     = nil
 local briefing_spoke_once = false
+local brief_city_hidden = false   -- city headline currently suppressed for a briefing
+local logo_label       = nil      -- last label compute_logo sized to (clock vs title)
 
 function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
 
@@ -1971,24 +2049,9 @@ function logo_menu_hit(mx, my)
     end
 end
 
-local function logo_zone(mx, my)        -- generous reveal area around the logo
-    if not logo then return false end
-    local mar = math.floor(logo.h * 0.7)
-    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar and my <= logo.y + logo.h + mar
-end
 
 -- --- small ASS vector helpers (all coords absolute; pair with \an7\pos(0,0)) --
-local function rrect_path(x0, y0, W, H, r)
-    local x1, y1 = x0 + W, y0 + H
-    return string.format(
-        "m %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d "
-        .. "l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d",
-        x0 + r, y0,  x1 - r, y0,   x1, y0, x1, y0, x1, y0 + r,
-        x1, y1 - r,  x1, y1, x1, y1, x1 - r, y1,
-        x0 + r, y1,  x0, y1, x0, y1, x0, y1 - r,
-        x0, y0 + r,  x0, y0, x0, y0, x0 + r, y0)
-end
-
+-- (rrect_path is defined up in the briefing section and shared.)
 local function sun_path(cx, cy, r)      -- a filled disc ringed by 8 rays
     local f, p = math.floor, {}
     local N = 24
@@ -2033,19 +2096,19 @@ local function icon_path(kind, cx, cy, s)   -- transport glyphs, centered on cx,
     return ""
 end
 
-local function compute_logo(w, h)
+local function compute_logo(w, h, label)
     if not w or w <= 0 then return end
+    label = label or "MORNING BRIEFING"
     local LH  = math.floor(h * 0.072)
     local fs  = math.floor(LH * 0.40)
-    local txt = "MORNING BRIEFING"
     local fsp = math.floor(fs * 0.06 + 0.5)
-    local tw  = math.floor(#txt * fs * 0.58 + (#txt - 1) * fsp)
+    local tw  = math.floor(#label * fs * 0.58 + (#label - 1) * fsp)
     local pad = math.floor(LH * 0.45)
     local sw  = math.floor(LH * 0.95)
     local gap = math.floor(LH * 0.32)
     local LW  = pad + sw + gap + tw + pad
     logo = { x = math.floor((w - LW) / 2), y = math.floor(h * 0.025),
-             w = LW, h = LH, fs = fs, fsp = fsp, text = txt,
+             w = LW, h = LH, fs = fs, fsp = fsp, text = label,
              pad = pad, sun_w = sw, gap = gap, W = w, H = h }
 end
 
@@ -2147,11 +2210,18 @@ local function logo_tick()
     if not GROK_ENABLED then return end
     local w, h = refresh_display_size()
     if w <= 0 then return end
-    if not logo or logo.W ~= w or logo.H ~= h then compute_logo(w, h) end
+    local active = briefing_active()
+
+    -- The badge shows the live clock when idle, and the briefing title while a
+    -- briefing is preparing or speaking. Re-measure the plaque when it changes.
+    local label = (active or briefing_preparing) and "MORNING BRIEFING"
+        or os.date("%I:%M %p"):gsub("^0", "")
+    if not logo or logo.W ~= w or logo.H ~= h or label ~= logo_label then
+        compute_logo(w, h, label); logo_label = label
+    end
     if not logo then return end
 
     -- Mute the whole screensaver while a briefing speaks; restore after.
-    local active = briefing_active()
     if active and not briefing_muted then
         saved_volume = mp.get_property_number("volume") or saved_volume
         mp.set_property_number("volume", 0); briefing_muted = true
@@ -2160,14 +2230,29 @@ local function logo_tick()
         briefing_spoke_once = false
     end
 
-    -- Pick what shows under the logo: transport (speaking), menu (chooser), or nothing.
+    -- City headline shares the bottom-center with the captions: hide it while a
+    -- briefing runs, and bring it back (re-animated) once the briefing ends.
+    if active and not brief_city_hidden then
+        brief_city_hidden = true; main_shown = nil
+        lm_gen = lm_gen + 1; landmark_ov:remove()
+    elseif not active and brief_city_hidden then
+        brief_city_hidden = false
+        if last_city and last_city.city ~= "" then
+            main_shown = last_city.city
+            animate_landmark(last_city.city, last_city.cx, last_city.by,
+                             last_city.fs, last_city.fsp, last_city.ww, last_city.wh)
+        end
+    end
+
+    -- The badge is always visible (a clock); under it goes transport (speaking),
+    -- the Replay/Refresh chooser, or nothing.
     if active then
         logo_menu_open = false
         draw_logo(true); draw_controls(); menu_boxes = {}
     elseif logo_menu_open then
         draw_logo(true); draw_menu(); control_boxes = {}
     else
-        draw_logo(mouse_near_logo or briefing_preparing)
+        draw_logo(true)
         controls_ov:remove(); control_boxes = {}; menu_boxes = {}
     end
 
@@ -2194,12 +2279,6 @@ local function logo_tick()
     end
 end
 mp.add_periodic_timer(0.3, logo_tick)
-
--- Reveal/hide with the mouse.
-mp.observe_property("mouse-pos", "native", function(_, m)
-    if not GROK_ENABLED or not m or not logo then return end
-    mouse_near_logo = logo_zone(m.x, m.y)
-end)
 
 -- ----------------------------------------------------------------------------
 -- Delete the current media (DEL key)
