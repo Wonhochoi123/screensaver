@@ -23,8 +23,16 @@ MTIME="$(stat -c '%Y' "$FILE" 2>/dev/null || echo 0)"
 KEY="$(printf '%s|%s|%s|%s' "$FILE" "$SIZE" "$FRAMES" "$MTIME" | md5sum | cut -d' ' -f1)"
 OUT="$MAP_DIR/thumbs/$KEY"
 
-# Cached already? (a complete run leaves .frames last)
+# Keep the thumb cache bounded: only the 30 most-recently-used sets survive.
+prune_cache() {
+    ls -1dt "$MAP_DIR/thumbs"/*/ 2>/dev/null | tail -n +31 | tr '\n' '\0' | xargs -0r rm -rf
+}
+
+# Cached already? (a complete run leaves .frames last). Touch it so it counts as
+# recently used, then prune.
 if [ -f "$OUT/.frames" ]; then
+    touch "$OUT" 2>/dev/null
+    prune_cache
     echo "$OUT"; exit 0
 fi
 
@@ -58,4 +66,5 @@ done
 rm -rf "$OUT"
 mv "$OUT.part" "$OUT"
 echo "$FRAMES" > "$OUT/.frames"
+prune_cache
 echo "$OUT"

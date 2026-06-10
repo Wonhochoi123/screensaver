@@ -33,9 +33,12 @@ local HUD_COORD_FS  = envn("HUD_COORD_FS",  0.025)  -- GPS coordinates
 local HUD_MAP_FRAC  = envn("HUD_MAP_FRAC",  0.27)   -- minimap/QR size (frac of height)
 local MUSIC_WIN_FRAC = envn("MUSIC_WIN_FRAC", 0.30) -- marquee width (frac of width)
 local HUD_THUMB_FRAC = envn("HUD_THUMB_FRAC", 0.07) -- album-art thumb size (frac of height)
+local HUD_TEXT_BLUR  = envn("HUD_TEXT_BLUR", 0.10)  -- text shadow blur/spread (×font size)
 
 local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap)
-local THUMB_FRAMES = 72     -- rotation frames build-thumb.sh renders (5° each, smooth)
+local THUMB_FRAMES = 240    -- rotation frames (1.5° each) — fine enough to look smooth
+local HUD_THUMB_SPIN_SECS = envn("HUD_THUMB_SPIN_SECS", 7.2)  -- seconds per revolution
+local THUMB_TICK   = HUD_THUMB_SPIN_SECS / THUMB_FRAMES       -- ≈0.03s → ~33 fps
 
 local ZOOMS        = {11, 14, 16}
 local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
@@ -53,6 +56,8 @@ local music_thumb_ov   = mp.create_osd_overlay("ass-events") -- album-art ring /
 local landmark_ov  = mp.create_osd_overlay("ass-events")
 local progress_ov    = mp.create_osd_overlay("ass-events")  -- played
 local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (track)
+local top_bar_ov     = mp.create_osd_overlay("ass-events")  -- global progress, played
+local top_bar_bg_ov  = mp.create_osd_overlay("ass-events")  -- global progress, month sections
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Shared progress-bar styling: a translucent light-gray track with a
@@ -123,12 +128,12 @@ local function clean_text(s)
     return s
 end
 
--- Very soft glow: just a faint, blurred dark halo (border only — fill colour and
--- alpha are kept by each caller, so the text stays semi-transparent). Scales with
--- the font so it looks the same at 1080p and 4K. Deliberately weak.
+-- Soft glow: a blurred dark halo behind the text (border only — each caller
+-- keeps its own fill colour/alpha). Scales with the font so it looks the same
+-- at 1080p and 4K. HUD_TEXT_BLUR (config) controls the spread.
 local function glow(fs)
     return string.format("\\bord%.2f\\blur%.2f\\shad0\\3c&H000000&\\4c&H000000&",
-        fs * 0.011, fs * 0.028)
+        fs * 0.020, fs * HUD_TEXT_BLUR)
 end
 
 local seq       = 0
@@ -924,7 +929,7 @@ mp.register_event("file-loaded", function()
         local function draw_text()
             local L = hud_geom()
             local m_top    = math.floor(L.win_h * 0.04)   -- top inset
-            local m_right  = math.floor(L.win_w * 0.025)   -- right inset
+            local m_right  = math.floor(L.win_h * 0.02)    -- right inset (matches the map's)
             local m_bottom = math.floor(L.win_h * 0.07)    -- bottom inset
 
             -- Top-right: date over the broader region (state / country). Each
@@ -1233,7 +1238,7 @@ local function thumb_tick()
             string.format("%s/f%03d.bgra", thumb_dir, thumb_idx),
             0, "bgra", thumb.d, thumb.d, thumb.d * 4})
     end
-    mp.add_timeout(0.10, thumb_tick)
+    mp.add_timeout(THUMB_TICK, thumb_tick)
 end
 thumb_tick()
 
@@ -1348,6 +1353,8 @@ mp.register_event("shutdown", function()
     loading_ov:remove()
     progress_ov:remove()
     progress_bg_ov:remove()
+    top_bar_ov:remove()
+    top_bar_bg_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1530,6 +1537,103 @@ end
 
 mp.observe_property("percent-pos", "number", draw_progress)
 mp.register_event("file-loaded", function() prog_fill = -1 end)
+
+-- ----------------------------------------------------------------------------
+-- Global progress bar (top of screen), chaptered by month — YouTube-style.
+--   The playlist is grouped into month sections (each begins with a title
+--   card); a section's width is proportional to how many items that month
+--   holds, so busier months are wider. The fill shows how far through the whole
+--   library we are. Everything is a fraction of the actual display.
+-- ----------------------------------------------------------------------------
+local gp_sections  = nil    -- { {start=1-based, count=, x0=, w=}, … }
+local gp_built_for = -1     -- playlist-count the sections were last built for
+local gp_W, gp_H   = 0, 0   -- display size the sections were laid out for
+
+local function gp_geom()
+    local w, h = refresh_display_size()
+    local margin = math.floor(h * 0.02)                         -- side inset (matches HUD)
+    local y      = math.floor(h * 0.012)                        -- just below the top edge
+    local th     = math.max(2, math.floor(h * 0.006 + 0.5))     -- bar thickness
+    local gap    = math.max(2, math.floor(w * 0.0016 + 0.5))    -- gap between months
+    return w, h, margin, y, th, gap
+end
+
+local function gp_rect(x0, x1, y, th)
+    return string.format("m %d %d l %d %d l %d %d l %d %d", x0, y, x1, y, x1, y + th, x0, y + th)
+end
+
+local function build_month_sections()
+    local pl = mp.get_property_native("playlist")
+    local n  = pl and #pl or 0
+    gp_built_for = n
+    if n <= 1 then                                   -- loading screen / nothing to chapter
+        gp_sections = nil
+        top_bar_ov:remove(); top_bar_bg_ov:remove()
+        return
+    end
+    -- Group into sections: a new one starts at each title card (and at index 1).
+    local secs = {}
+    for i = 1, n do
+        local fn = pl[i].filename or ""
+        if #secs == 0 or fn:find("/TitleCards/", 1, true) then
+            secs[#secs + 1] = { start = i, count = 0 }
+        end
+        secs[#secs].count = secs[#secs].count + 1
+    end
+
+    local w, h, margin, y, th, gap = gp_geom()
+    local avail = (w - 2 * margin) - (#secs - 1) * gap
+    if avail < 1 then avail = w - 2 * margin; gap = 0 end
+    local x, parts = margin, {}
+    for _, s in ipairs(secs) do
+        s.w  = math.max(1, math.floor(avail * s.count / n + 0.5))
+        s.x0 = x
+        parts[#parts + 1] = gp_rect(s.x0, s.x0 + s.w, y, th)
+        x = x + s.w + gap
+    end
+    gp_sections = secs; gp_W = w; gp_H = h
+
+    top_bar_bg_ov.res_x = w; top_bar_bg_ov.res_y = h
+    top_bar_bg_ov.data = string.format("{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}",
+        BAR_TRACK, table.concat(parts, " "))
+    top_bar_bg_ov:update()
+end
+
+local function update_global_progress()
+    if not gp_sections then top_bar_ov:remove(); return end
+    local pos = mp.get_property_number("playlist-pos")
+    if not pos then return end
+    local idx = pos + 1                              -- 1-based current item
+    local _, _, _, y, th = gp_geom()
+    local parts = {}
+    for _, s in ipairs(gp_sections) do
+        local s_end = s.start + s.count - 1
+        if idx > s_end then                          -- whole month already played
+            parts[#parts + 1] = gp_rect(s.x0, s.x0 + s.w, y, th)
+        elseif idx >= s.start then                   -- current month: partial fill
+            local fw = math.floor(s.w * (idx - s.start + 1) / s.count + 0.5)
+            if fw > 0 then parts[#parts + 1] = gp_rect(s.x0, s.x0 + fw, y, th) end
+            break
+        end
+    end
+    top_bar_ov.res_x = gp_W; top_bar_ov.res_y = gp_H
+    if #parts > 0 then
+        top_bar_ov.data = string.format("{\\an7\\pos(0,0)\\bord0\\shad0%s\\p1}%s{\\p0}",
+            BAR_FILL, table.concat(parts, " "))
+        top_bar_ov:update()
+    else
+        top_bar_ov:remove()
+    end
+end
+
+mp.register_event("file-loaded", function()
+    local n = mp.get_property_number("playlist-count") or 0
+    local w, h = refresh_display_size()
+    if n ~= gp_built_for or w ~= gp_W or h ~= gp_H then
+        build_month_sections()
+    end
+    update_global_progress()
+end)
 
 -- ----------------------------------------------------------------------------
 -- Delete the current media (DEL key)
