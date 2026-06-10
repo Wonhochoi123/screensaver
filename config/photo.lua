@@ -20,29 +20,80 @@ local MAP_DIR    = env("MAP_DIR",    DATA_DIR .. "/Maps")
 local builder    = CFG_DIR .. "/build-minimap.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
 
--- Tunable HUD sizes, all read from screensaver.conf (via the environment).
--- Text sizes are a fraction of screen HEIGHT; layout fracs are noted inline.
-local function envn(name, default)
-    return tonumber(os.getenv(name) or "") or default
+-- ============================================================================
+--  CONFIG IS THE SINGLE SOURCE OF TRUTH  →  screensaver.conf
+--
+--  >>> FOR ANY HUMAN OR AI EDITING THIS FILE <<<
+--  Every tunable is read with cfg*()/below. Those look at the live environment
+--  first (launch.sh exports the conf before mpv starts), then parse the conf
+--  file itself as a backup (so this script also works run standalone). The
+--  DEFAULT for each knob lives in screensaver.conf and NOWHERE ELSE.
+--
+--  Do NOT write literal default values here (no `cfgnum("X", 0.03)`, no
+--  `local X = 0.03`). If you need a new knob: add it to screensaver.conf, then
+--  read it here with cfgnum/cfgstr/cfglist and no baked-in number. A missing
+--  numeric key warns and returns 0 on purpose, so the omission is obvious.
+--  (Defaults kept getting duplicated here and drifting from the conf — that is
+--  the bug this design exists to prevent. Keep the conf authoritative.)
+-- ============================================================================
+local conf_raw = {}
+do
+    local f = io.open(CFG_DIR .. "/screensaver.conf", "r")
+    if f then
+        for line in f:lines() do
+            local k, rest = line:match("^%s*export%s+([%w_]+)=(.*)$")
+            if k then
+                rest = rest:gsub("^%s+", "")
+                local q = rest:match('^"(.-)"') or rest:match("^'(.-)'")
+                if q then rest = q else rest = rest:gsub("%s*#.*$", ""):gsub("%s+$", "") end
+                conf_raw[k] = rest
+            end
+        end
+        f:close()
+    end
 end
-local HUD_MUSIC_FS  = envn("HUD_MUSIC_FS",  0.030)  -- music info marquee
-local HUD_DATE_FS   = envn("HUD_DATE_FS",   0.030)  -- date (top-right line 1)
-local HUD_REGION_FS = envn("HUD_REGION_FS", 0.030)  -- region (top-right line 2)
-local HUD_CITY_FS   = envn("HUD_CITY_FS",   0.066)  -- city headline
-local HUD_COORD_FS  = envn("HUD_COORD_FS",  0.025)  -- GPS coordinates
-local HUD_MAP_FRAC  = envn("HUD_MAP_FRAC",  0.27)   -- minimap/QR size (frac of height)
-local MUSIC_WIN_FRAC = envn("MUSIC_WIN_FRAC", 0.30) -- marquee width (frac of width)
-local HUD_THUMB_FRAC = envn("HUD_THUMB_FRAC", 0.07) -- album-art thumb size (frac of height)
-local HUD_TEXT_BLUR  = envn("HUD_TEXT_BLUR", 0.10)  -- text shadow blur/spread (×font size)
-local HUD_TEXT_GLOW  = envn("HUD_TEXT_GLOW", 0.002) -- text shadow strength = border width (×font size)
+local function cfgraw(name)
+    local v = os.getenv(name)
+    if v == nil or v == "" then v = conf_raw[name] end
+    return v
+end
+local function cfgnum(name)            -- numeric knob; 0 + warning if absent
+    local n = tonumber(cfgraw(name) or "")
+    if n == nil then msg.warn("screensaver.conf: missing numeric key " .. name); return 0 end
+    return n
+end
+local function cfgstr(name) return cfgraw(name) end           -- string knob (may be nil)
+local function cfglist(name, conv)     -- space-separated list -> array
+    local t = {}
+    for tok in (cfgraw(name) or ""):gmatch("%S+") do t[#t + 1] = conv and conv(tok) or tok end
+    return t
+end
 
-local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap)
-local THUMB_FRAMES = 240    -- rotation frames (1.5° each) — fine enough to look smooth
-local HUD_THUMB_SPIN_SECS = envn("HUD_THUMB_SPIN_SECS", 7.2)  -- seconds per revolution
-local THUMB_TICK   = HUD_THUMB_SPIN_SECS / THUMB_FRAMES       -- ≈0.03s → ~33 fps
+local HUD_MUSIC_FS   = cfgnum("HUD_MUSIC_FS")     -- music info marquee
+local HUD_DATE_FS    = cfgnum("HUD_DATE_FS")      -- date (top-right line 1)
+local HUD_REGION_FS  = cfgnum("HUD_REGION_FS")    -- region (top-right line 2)
+local HUD_CITY_FS    = cfgnum("HUD_CITY_FS")      -- city headline
+local HUD_COORD_FS   = cfgnum("HUD_COORD_FS")     -- GPS coordinates
+local HUD_MAP_FRAC   = cfgnum("HUD_MAP_FRAC")     -- minimap/QR size (frac of height)
+local MUSIC_WIN_FRAC = cfgnum("MUSIC_WIN_FRAC")   -- marquee width (frac of width)
+local HUD_THUMB_FRAC = cfgnum("HUD_THUMB_FRAC")   -- album-art thumb size (frac of height)
+local HUD_TEXT_BLUR  = cfgnum("HUD_TEXT_BLUR")    -- text shadow blur/spread (×font size)
+local HUD_TEXT_GLOW  = cfgnum("HUD_TEXT_GLOW")    -- text shadow strength (×font size)
+local MUSIC_SCROLL_SPEED = cfgnum("MUSIC_SCROLL_SPEED")  -- marquee px/frame factor (×font size)
+local MUSIC_SCROLL_DWELL = cfgnum("MUSIC_SCROLL_DWELL")  -- marquee end pause (frames)
 
-local ZOOMS        = {11, 14, 16}
-local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
+local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap); internal
+local THUMB_FRAMES = math.max(1, math.floor(cfgnum("HUD_THUMB_FRAMES")))  -- rotation frames
+local HUD_THUMB_SPIN_SECS = cfgnum("HUD_THUMB_SPIN_SECS")     -- seconds per revolution
+local THUMB_SPIN   = HUD_THUMB_SPIN_SECS > 0                  -- 0 or less => frozen, no spin
+local THUMB_TICK   = THUMB_SPIN and (HUD_THUMB_SPIN_SECS / THUMB_FRAMES) or 0.20
+
+-- Minimap zoom levels + ring colours (emergency arrays only if the conf can't
+-- be read — arrays can't degrade to 0; the real values live in the conf).
+local ZOOMS        = cfglist("HUD_MAP_ZOOMS", tonumber)
+if #ZOOMS == 0 then ZOOMS = {11, 14, 16} end
+local RING_COLORS  = cfglist("HUD_RING_COLORS")
+if #RING_COLORS == 0 then RING_COLORS = {"#FFFFFF", "#B3E5FC", "#4FC3F7"} end
 local DEFAULT_ZIDX = 1
 
 local ov       = mp.create_osd_overlay("ass-events")
@@ -1123,8 +1174,8 @@ local function set_music(text)
     -- to reveal the end of the string, dwell, then scroll back to the start and
     -- dwell. Never loops past the end to hide content. A \clip masks overflow.
     local clip       = string.format("\\clip(%d,%d,%d,%d)", px, y_top, px + win_px, y_bot)
-    local SPEED      = math.max(1, fs * 0.045)    -- px per frame (~50 px/s)
-    local DWELL      = 30                          -- frames (~0.9s) held at each end
+    local SPEED      = math.max(1, fs * MUSIC_SCROLL_SPEED)  -- px per frame
+    local DWELL      = MUSIC_SCROLL_DWELL                    -- frames held at each end
     local max_offset = text_px - win_px            -- how far left fully reveals the end
     music_hit = { x0 = px - fs, y0 = y_top, x1 = px + win_px + fs, y1 = y_bot }
     music_bar = { x = px, y = bar_y, w = win_px, th = bar_th, W = w, H = h }
@@ -1245,15 +1296,15 @@ end
 -- Spin the thumb like a vinyl record while the music plays (freeze on the
 -- current frame when paused). Reversed direction, ~7.2s per revolution.
 local function thumb_tick()
-    if thumb and thumb_dir and music_playing then
+    if THUMB_SPIN and thumb and thumb_dir and music_playing then
         thumb_idx = (thumb_idx - 1) % THUMB_FRAMES   -- reverse spin
         mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
             string.format("%s/f%03d.bgra", thumb_dir, thumb_idx),
             0, "bgra", thumb.d, thumb.d, thumb.d * 4})
     end
-    mp.add_timeout(THUMB_TICK, thumb_tick)
+    mp.add_timeout(THUMB_TICK, thumb_tick)   -- THUMB_TICK never 0 (see config block)
 end
-thumb_tick()
+if THUMB_SPIN then thumb_tick() end
 
 -- Poll the audio player (separate mpv on AUDIO_SOCK): position for the bar, file
 -- path for the thumb, and pause state for the spin. One round-trip for all three.
@@ -1334,6 +1385,47 @@ function poll_music()
 end
 mp.add_periodic_timer(3, poll_music)
 poll_music()
+
+-- ----------------------------------------------------------------------------
+-- Quiet hours: pause the music during a configured sleep window (e.g. overnight)
+-- and resume it after. MUSIC_SLEEP_START/END are 24h "HH:MM" (or a bare hour);
+-- leave either empty to disable. Acts only on the sleep<->wake transition, so
+-- manual play/pause still works the rest of the time.
+-- ----------------------------------------------------------------------------
+local function parse_hm(s)
+    if not s or s == "" then return nil end
+    local h, m = s:match("^(%d+):(%d+)")
+    if h then return tonumber(h) * 60 + tonumber(m) end
+    local hh = tonumber(s)
+    return hh and math.floor(hh * 60) or nil
+end
+
+local function is_sleep_time()
+    local a = parse_hm(cfgstr("MUSIC_SLEEP_START"))
+    local b = parse_hm(cfgstr("MUSIC_SLEEP_END"))
+    if not a or not b or a == b then return false end     -- disabled
+    local t   = os.date("*t")
+    local now = t.hour * 60 + t.min
+    if a < b then return now >= a and now < b              -- same-day window
+    else        return now >= a or now < b end             -- crosses midnight
+end
+
+local function set_audio_pause(p)
+    mp.commandv("run", "/bin/sh", "-c",
+        "printf '%s\\n' '{\"command\":[\"set_property\",\"pause\"," .. (p and "true" or "false") ..
+        "]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+end
+
+local music_asleep = nil
+local function check_sleep()
+    local s = is_sleep_time()
+    if s ~= music_asleep then
+        music_asleep = s
+        set_audio_pause(s)        -- pause entering the window, resume leaving it
+    end
+end
+mp.add_periodic_timer(15, check_sleep)
+check_sleep()
 
 mp.register_script_message("ss-show-loading", function(title, subtitle)
     lock_loading_input()   -- defensive: stay non-interactive while loading
