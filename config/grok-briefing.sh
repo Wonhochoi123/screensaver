@@ -191,7 +191,8 @@ end_play() {
 # Transition the screensaver INTO briefing mode — only once content is ready.
 go_live() {
     WENT_LIVE=1
-    : > "$LIVE_FILE"                        # photo.lua: mute + hide HUD + show the title
+    echo $$ > "$LIVE_FILE"                  # photo.lua: mute + hide HUD + show the title
+                                            # (MUST be non-empty — file_exists needs size>0)
     # Soft-drop the slideshow's own music, then pause it (remember its volume).
     SS_VOL="$(get_vol "$AUDIO_SOCK")"; [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
     fade_vol "$AUDIO_SOCK" "$SS_VOL" 0 "$FADE_IN"

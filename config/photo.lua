@@ -163,12 +163,16 @@ local music_bar    = nil       -- {x,y,w,th,W,H} bar geometry under the marquee
 local music_pct    = nil       -- 0..100 song position from the audio player
 local draw_music_bar           -- assigned later
 -- Marquee + song-chooser data, grouped in one table (Lua caps main-chunk locals
--- at 200). MQ.layout = {label,glyphs,px,py,style,win_px,...}; MQ.hover = mouse over
--- the marquee; MQ.chooser = chooser open; MQ.rows = visible chooser row hit boxes.
-local MQ = { layout = nil, hover = false, chooser = false, rows = {} }
+-- at 200). layout = marquee layout; hover = mouse over the marquee; chooser =
+-- chooser open; rows = visible chooser hit boxes; entries = the playlist;
+-- scroll = first visible row (0-based); bounds = chooser panel box; poll_* = the
+-- audio-player poll throttle.
+local MQ = { layout = nil, hover = false, chooser = false, rows = {},
+             entries = nil, scroll = 0, bounds = nil, poll_t = 0, poll_busy = false }
 local render_marquee           -- assigned later; redraws the marquee for hover state
 local chooser_hit              -- assigned later; hit-test a chooser row
 local open_chooser             -- assigned later
+local draw_chooser             -- assigned later; (re)draw the chooser at MQ.scroll
 local thumb        = nil       -- {x,y,d,cx,cy,r,W,H} album-art circle; nil = none
 -- Album-art state, grouped: TH.color/gray = bgra paths, TH.shown = blitted variant,
 -- TH.path = current audio file (drives regeneration).
@@ -872,21 +876,27 @@ mp.register_script_message("handle-left-click", function()
         end
     end
 
-    -- Song chooser (open below the bar): click a row to jump to that track.
+    -- Song chooser (open below the bar): click a row to jump to that track, or a
+    -- ▲/▼ strip to scroll. Scroll with the mouse wheel too (handled separately).
     if mouse and MQ.chooser then
-        local idx = chooser_hit and chooser_hit(mouse.x, mouse.y)
-        if idx then
+        local r = chooser_hit and chooser_hit(mouse.x, mouse.y)
+        if r and r.scroll then
+            MQ.scroll = MQ.scroll + r.scroll; draw_chooser(); return
+        elseif r and r.idx ~= nil then
             mp.commandv("run", "/bin/sh", "-c",
-                "printf '%s\\n' '{\"command\":[\"set_property\",\"playlist-pos\"," .. idx
+                "printf '%s\\n' '{\"command\":[\"set_property\",\"playlist-pos\"," .. r.idx
                 .. "]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
             MQ.chooser = false; music_menu_ov:remove()
             if poll_music then mp.add_timeout(0.35, poll_music) end
             return
         end
-        -- Click outside a row closes the chooser (unless it's the marquee itself,
-        -- handled just below as a toggle).
+        -- A click inside the panel (just not on a row) is ignored; a click outside
+        -- it — and not on the marquee toggle below — closes it.
+        local in_panel = MQ.bounds and mouse.x >= MQ.bounds.x0 and mouse.x <= MQ.bounds.x1
+            and mouse.y >= MQ.bounds.y0 and mouse.y <= MQ.bounds.y1
         local on_marquee = music_hit and mouse.x >= music_hit.x0 and mouse.x <= music_hit.x1
             and mouse.y >= music_hit.y0 and mouse.y <= music_hit.y1
+        if in_panel then return end
         if not on_marquee then MQ.chooser = false; music_menu_ov:remove(); return end
     end
 
@@ -1406,8 +1416,15 @@ local function entry_name(e)
     return clean_text(s)
 end
 
-local function draw_chooser(entries)
-    MQ.rows = {}
+-- A small triangle (up/down) centered at cx,cy, for the scroll strips.
+local function tri_path(cx, cy, s, up)
+    if up then return string.format("m %d %d l %d %d %d %d", cx, cy - s, cx + s, cy + s, cx - s, cy + s) end
+    return string.format("m %d %d l %d %d %d %d", cx - s, cy - s, cx + s, cy - s, cx, cy + s)
+end
+
+function draw_chooser()
+    MQ.rows = {}; MQ.bounds = nil
+    local entries = MQ.entries
     if not MQ.chooser or not music_bar or not entries or #entries == 0 then
         music_menu_ov:remove(); return
     end
@@ -1415,19 +1432,33 @@ local function draw_chooser(entries)
     local w, h = b.W, b.H
     local fs   = math.floor(h * HUD_MUSIC_FS * 0.92)
     local rowh = math.floor(fs * 1.7)
+    local arrh = math.floor(rowh * 0.62)
     local pad  = math.floor(fs * 0.6)
     local gapy = math.max(1, math.floor(rowh * 0.12))
     local boxw = math.max(b.w, math.floor(w * 0.26))
     local x0   = b.x
 
-    -- Window CHOOSER_MAX rows around the current track.
-    local n, cur = #entries, 1
-    for i, e in ipairs(entries) do if e.current then cur = i; break end end
-    local count = math.min(CHOOSER_MAX, n)
-    local first = math.max(1, math.min(cur - math.floor(count / 2), n - count + 1))
+    -- Clamp the scroll window. MQ.scroll = index of the first visible row (0-based).
+    local n = #entries
+    local maxscroll = math.max(0, n - CHOOSER_MAX)
+    if MQ.scroll < 0 then MQ.scroll = 0 elseif MQ.scroll > maxscroll then MQ.scroll = maxscroll end
+    local first = MQ.scroll + 1
+    local last  = math.min(n, first + CHOOSER_MAX - 1)
 
     local y, parts = b.y + b.th + math.floor(rowh * 0.5), {}
-    for i = first, first + count - 1 do
+    local function strip(up, delta)            -- a clickable ▲/▼ scroll strip
+        local ry0, ry1 = y, y + arrh
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H3A&\\p1}"
+            .. rrect_path(x0, ry0, boxw, arrh, math.floor(arrh * 0.25)) .. "{\\p0}"
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\p1}"
+            .. tri_path(x0 + math.floor(boxw / 2), ry0 + math.floor(arrh / 2),
+                        math.floor(arrh * 0.22), up) .. "{\\p0}"
+        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry1, scroll = delta }
+        y = ry1 + gapy
+    end
+
+    if MQ.scroll > 0 then strip(true, -CHOOSER_MAX) end
+    for i = first, last do
         local e = entries[i]
         local ry0, ry1 = y, y + rowh
         local ba = e.current and "&H1C&" or "&H4E&"        -- current row a touch more opaque
@@ -1442,6 +1473,9 @@ local function draw_chooser(entries)
         MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry1, idx = i - 1 }
         y = ry1 + gapy
     end
+    if last < n then strip(false, CHOOSER_MAX) end
+
+    MQ.bounds = { x0 = x0, y0 = b.y + b.th, x1 = x0 + boxw, y1 = y }
     music_menu_ov.res_x = w; music_menu_ov.res_y = h
     music_menu_ov.data = table.concat(parts, "\n")
     music_menu_ov:update()
@@ -1449,11 +1483,12 @@ end
 
 function chooser_hit(mx, my)
     for _, r in ipairs(MQ.rows) do
-        if mx >= r.x0 and mx <= r.x1 and my >= r.y0 and my <= r.y1 then return r.idx end
+        if mx >= r.x0 and mx <= r.x1 and my >= r.y0 and my <= r.y1 then return r end
     end
 end
 
--- Query the audio player's playlist, then show the chooser.
+-- Query the audio player's playlist, then show the chooser scrolled to the
+-- current track.
 function open_chooser()
     if not music_bar or (briefing_active and briefing_active()) then return end
     mp.command_native_async({ name = "subprocess", capture_stdout = true,
@@ -1466,10 +1501,24 @@ function open_chooser()
                 local j = utils.parse_json(res.stdout)
                 if j and j.error == "success" and type(j.data) == "table" then entries = j.data end
             end
+            local cur = 1
+            for i, e in ipairs(entries) do if e.current then cur = i; break end end
+            MQ.entries = entries
+            MQ.scroll  = math.max(0, cur - 1 - math.floor(CHOOSER_MAX / 2))
             MQ.chooser = true
-            draw_chooser(entries)
+            draw_chooser()
         end)
 end
+
+-- Mouse wheel: scroll the open song chooser; otherwise step the slideshow.
+mp.register_script_message("ss-wheel", function(dir)
+    if MQ.chooser then
+        MQ.scroll = MQ.scroll + (dir == "up" and -2 or 2)
+        draw_chooser()
+    else
+        mp.command(dir == "up" and "playlist-prev" or "playlist-next")
+    end
+end)
 
 -- A circle as an ASS vector path (4 cubic beziers), for the thumb's ring and
 -- its empty (no-cover) state.
@@ -1550,8 +1599,6 @@ end
 -- timer and the percent-pos observer: on a heavy (e.g. 4K) machine, video decode
 -- starves the periodic timer, so the observer — which fires every presented
 -- frame, the same signal that keeps the bottom bar alive — keeps the poll going.
-local last_music_poll = 0
-local music_poll_busy = false
 local function poll_music_pos()
     if not music_shown then return end
     -- During a briefing the marquee/thumb track the bgm's own mpv: reflect ITS
@@ -1572,9 +1619,9 @@ local function poll_music_pos()
         draw_music_bar(); return
     end
     local now = mp.get_time()
-    if music_poll_busy or (now - last_music_poll) < 0.8 then return end
-    last_music_poll = now
-    music_poll_busy = true
+    if MQ.poll_busy or (now - MQ.poll_t) < 0.8 then return end
+    MQ.poll_t = now
+    MQ.poll_busy = true
     mp.command_native_async({
         name = "subprocess", capture_stdout = true, playback_only = false,
         args = { "/bin/sh", "-c",
@@ -1584,7 +1631,7 @@ local function poll_music_pos()
             .. "'{\"command\":[\"get_property\",\"pause\"],\"request_id\":3}' "
             .. "| socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
     }, function(ok, res)
-        music_poll_busy = false
+        MQ.poll_busy = false
         -- Each property only updates on a successful read; nothing is cleared on
         -- a slow/empty poll, so the bar holds its position instead of flickering
         -- off (this is what made it look broken on some mp3/flac files).
