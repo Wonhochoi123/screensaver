@@ -191,20 +191,23 @@ play() {
 to_min() { case "$1" in *:*) echo $(( 10#${1%%:*} * 60 + 10#${1##*:} ));; *) echo $(( 10#$1 * 60 ));; esac; }
 
 watch_loop() {
-    local target prep_at last_prep="" last_play="" today now
-    target="$(to_min "$GROK_TIME")"; prep_at=$(( target - 5 ))
-    [ "$prep_at" -lt 0 ] && prep_at=0
+    local target prep_at last_prep="" last_play="" today now t
     while true; do
+        # Re-read GROK_TIME from the conf each pass so editing it takes effect
+        # within ~30s without restarting the screensaver. Keying last_prep/last_play
+        # on "day+target" also lets a changed time re-fire later the same day.
+        t="$(. "$SS_CONF" 2>/dev/null; printf '%s' "${GROK_TIME:-07:30}")"
+        target="$(to_min "$t")"; prep_at=$(( target - 5 )); [ "$prep_at" -lt 0 ] && prep_at=0
         today="$(date '+%Y-%m-%d')"
         now=$(( 10#$(date +%H) * 60 + 10#$(date +%M) ))
-        if [ "$last_prep" != "$today" ] && [ "$now" -ge "$prep_at" ] && [ "$now" -lt "$target" ]; then
+        if [ "$last_prep" != "$today/$target" ] && [ "$now" -ge "$prep_at" ] && [ "$now" -lt "$target" ]; then
             TODAY="$today"; TODAY_CACHE="$CACHE_DIR/$today"; mkdir -p "$TODAY_CACHE"
-            prep >/dev/null 2>&1; last_prep="$today"
+            prep >/dev/null 2>&1; last_prep="$today/$target"
         fi
-        if [ "$last_play" != "$today" ] && [ "$now" -ge "$target" ] && [ "$now" -lt $(( target + 5 )) ]; then
+        if [ "$last_play" != "$today/$target" ] && [ "$now" -ge "$target" ] && [ "$now" -lt $(( target + 5 )) ]; then
             # Run as its own process so its $$ (the controls' target) is correct
             # and its exit doesn't end this scheduler loop.
-            "$0" --play; last_play="$today"
+            "$0" --play; last_play="$today/$target"
         fi
         sleep 30
     done
@@ -248,6 +251,8 @@ check() {
 case "$MODE" in
     --check) check ;;
     --prep)  gate_ok || exit 0; prep ;;
-    --play)  gate_ok || exit 0; play ;;
+    --play)  gate_ok || exit 0; play ;;                 # replay today's cached briefing
+    --fresh) gate_ok || exit 0;                         # discard today's cache, make a new one
+             rm -f "$TODAY_CACHE"/*.mp3 "$TODAY_CACHE"/*.txt 2>/dev/null; play ;;
     *)       gate_ok || exit 0; watch_loop ;;
 esac

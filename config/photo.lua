@@ -83,10 +83,10 @@ local MUSIC_SCROLL_SPEED = cfgnum("MUSIC_SCROLL_SPEED")  -- marquee px/frame fac
 local MUSIC_SCROLL_DWELL = cfgnum("MUSIC_SCROLL_DWELL")  -- marquee end pause (frames)
 
 local GROK_ENABLED = cfgraw("GROK_BRIEFING") == "1"
-local GROK_LOGO    = cfgstr("GROK_LOGO") or ""    -- click-to-run briefing logo (optional)
+-- The briefing logo is now drawn (vector ASS), not a PNG — see the briefing
+-- section at the bottom. GROK_LOGO in the conf is no longer used.
 
 local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap); internal
-local LOGO_ID      = 4      -- mpv overlay id for the briefing logo
 
 -- Minimap zoom levels + ring colours (emergency arrays only if the conf can't
 -- be read — arrays can't degrade to 0; the real values live in the conf).
@@ -112,6 +112,8 @@ local top_bar_ov     = mp.create_osd_overlay("ass-events")  -- global progress, 
 local top_bar_bg_ov  = mp.create_osd_overlay("ass-events")  -- global progress, month sections
 local top_label_ov   = mp.create_osd_overlay("ass-events")  -- hovered month label
 local briefing_ov    = mp.create_osd_overlay("ass-events")  -- morning-briefing subtitles
+local logo_ov        = mp.create_osd_overlay("ass-events")  -- stylish briefing logo (drawn)
+local controls_ov    = mp.create_osd_overlay("ass-events")  -- briefing transport / replay menu
 local logo_text_ov   = mp.create_osd_overlay("ass-events")  -- "getting ready" under the logo
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
@@ -169,8 +171,11 @@ local draw_thumb_ring          -- assigned later
 local load_thumb_for           -- assigned later
 local gp_sections              -- global month sections (forward; built later)
 local gp_section_at            -- hit-test for the month bar (forward; defined later)
-local logo                    -- briefing logo geometry {bgra,w,h,x,y}; nil until prepared
-local logo_hit                -- hit-test for the logo (forward; defined later)
+local logo                    -- briefing logo geometry {x,y,w,h,...}; drawn, not a bitmap
+local logo_hit                -- hit-test for the logo plaque (forward; defined later)
+local logo_menu_hit           -- hit-test for the Replay/Refresh menu (forward)
+local controls_hit            -- hit-test for the transport buttons (forward)
+local logo_menu_open = false  -- the Replay/Refresh chooser is showing
 local briefing_active         -- is a briefing process running? (forward)
 local briefing_preparing = false  -- between logo click and the briefing speaking
 local prepare_t0 = 0
@@ -759,6 +764,9 @@ end
 mp.observe_property("pause", "bool", function(_, v) set_pause_indicator(v or false) end)
 
 mp.register_script_message("ss-toggle-pause", function()
+    -- While a briefing speaks the whole screensaver is held muted/paused; don't
+    -- let space / clicks resume the slideshow's own music underneath it.
+    if briefing_active and briefing_active() then return end
     local newp = not mp.get_property_bool("pause")
     mp.set_property_bool("pause", newp)
     local v = newp and "true" or "false"
@@ -799,12 +807,27 @@ end)
 mp.register_script_message("handle-left-click", function()
     local mouse = mp.get_property_native("mouse-pos")
 
-    -- Click the morning-briefing logo (center-top) to run the briefing now.
-    if mouse and logo_hit and logo_hit(mouse.x, mouse.y)
-       and not (briefing_active and briefing_active()) then
-        mp.commandv("run", CFG_DIR .. "/grok-briefing.sh", "--play")
-        briefing_preparing = true; prepare_t0 = mp.get_time()
-        return
+    -- Morning-briefing logo (center-top). While a briefing is speaking it shows a
+    -- transport row (prev / pause / next / stop); otherwise clicking the logo opens
+    -- a Replay / Refresh chooser.
+    if mouse then
+        local active = briefing_active and briefing_active()
+        if active then
+            local act = controls_hit and controls_hit(mouse.x, mouse.y)
+            if act then act(); return end
+        else
+            if logo_menu_open then
+                local act = logo_menu_hit and logo_menu_hit(mouse.x, mouse.y)
+                if act then act(); logo_menu_open = false; return end
+                if not (logo_hit and logo_hit(mouse.x, mouse.y)) then
+                    logo_menu_open = false; return    -- click outside closes it
+                end
+            end
+            if logo_hit and logo_hit(mouse.x, mouse.y) then
+                logo_menu_open = not logo_menu_open
+                return
+            end
+        end
     end
 
     -- Click a month on the top global bar to jump straight to it.
@@ -819,7 +842,7 @@ mp.register_script_message("handle-left-click", function()
     -- Click the album-art thumb (left of the marquee) to pause/play the MUSIC
     -- only (independent of the slideshow). Works even with no cover art (the
     -- empty ring is still a target).
-    if mouse and thumb then
+    if mouse and thumb and not (briefing_active and briefing_active()) then
         local dx = mouse.x - thumb.cx
         local dy = mouse.y - thumb.cy
         if dx * dx + dy * dy <= thumb.r * thumb.r then
@@ -1512,8 +1535,9 @@ mp.register_event("shutdown", function()
     top_bar_bg_ov:remove()
     top_label_ov:remove()
     briefing_ov:remove()
+    logo_ov:remove()
+    controls_ov:remove()
     logo_text_ov:remove()
-    pcall(mp.command_native, {"overlay-remove", LOGO_ID})
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1909,15 +1933,26 @@ mp.register_script_message("ss-briefing-subs", function()
     briefing_subs_hidden = not briefing_subs_hidden
     briefing_shown = nil; draw_briefing()
 end)
+mp.register_script_message("ss-briefing-stop", function()  -- end the briefing now
+    mp.commandv("run", "/bin/sh", "-c",
+        'p=$(cat /tmp/ss_briefing.pid 2>/dev/null); [ -n "$p" ] && kill -TERM "$p" 2>/dev/null')
+end)
 
 -- ----------------------------------------------------------------------------
--- Morning-briefing logo button (center-top). Hidden until the mouse is near it;
--- click it (handled above) to run the briefing now. "GETTING READY…" shows
--- under it while the first segment generates, then the briefing speaks and the
--- subtitles take over. Only present when GROK_BRIEFING=1 and GROK_LOGO is set.
+-- Morning-briefing logo (center-top), drawn as vector ASS (no image file).
+--   * Idle: hidden until the mouse is near it. Clicking it opens a Replay /
+--     Refresh chooser (Replay = today's cached briefing, Refresh = a fresh one).
+--   * While a briefing is speaking: the logo stays up and a transport row
+--     appears under it — previous / pause-play / next / stop — and the whole
+--     screensaver is muted (the slideshow's own music can't be resumed).
+-- Only active when GROK_BRIEFING=1.
 -- ----------------------------------------------------------------------------
-local logo_shown    = false
-local mouse_near_logo = false
+local mouse_near_logo  = false
+local control_boxes    = {}     -- {x0,y0,x1,y1,act} transport buttons (while speaking)
+local menu_boxes       = {}     -- {x0,y0,x1,y1,act} Replay/Refresh chooser
+local briefing_muted   = false
+local saved_volume     = nil
+local briefing_spoke_once = false
 
 function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
 
@@ -1925,81 +1960,245 @@ function logo_hit(mx, my)
     return (logo ~= nil) and mx >= logo.x and mx <= logo.x + logo.w
        and my >= logo.y and my <= logo.y + logo.h
 end
-
-local function logo_zone(mx, my)        -- generous reveal area around the logo
-    if not logo then return false end
-    local mar = math.floor(logo.h * 0.6)
-    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar and my <= logo.y + logo.h + mar
+function controls_hit(mx, my)
+    for _, b in ipairs(control_boxes) do
+        if mx >= b.x0 and mx <= b.x1 and my >= b.y0 and my <= b.y1 then return b.act end
+    end
 end
-
-local function logo_set(show)
-    if not logo or show == logo_shown then return end
-    logo_shown = show
-    if show then
-        mp.command_native({"overlay-add", LOGO_ID, logo.x, logo.y, logo.bgra,
-            0, "bgra", logo.w, logo.h, logo.w * 4})
-    else
-        mp.command_native({"overlay-remove", LOGO_ID})
+function logo_menu_hit(mx, my)
+    for _, b in ipairs(menu_boxes) do
+        if mx >= b.x0 and mx <= b.x1 and my >= b.y0 and my <= b.y1 then return b.act end
     end
 end
 
+local function logo_zone(mx, my)        -- generous reveal area around the logo
+    if not logo then return false end
+    local mar = math.floor(logo.h * 0.7)
+    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar and my <= logo.y + logo.h + mar
+end
+
+-- --- small ASS vector helpers (all coords absolute; pair with \an7\pos(0,0)) --
+local function rrect_path(x0, y0, W, H, r)
+    local x1, y1 = x0 + W, y0 + H
+    return string.format(
+        "m %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d "
+        .. "l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d",
+        x0 + r, y0,  x1 - r, y0,   x1, y0, x1, y0, x1, y0 + r,
+        x1, y1 - r,  x1, y1, x1, y1, x1 - r, y1,
+        x0 + r, y1,  x0, y1, x0, y1, x0, y1 - r,
+        x0, y0 + r,  x0, y0, x0, y0, x0 + r, y0)
+end
+
+local function sun_path(cx, cy, r)      -- a filled disc ringed by 8 rays
+    local f, p = math.floor, {}
+    local N = 24
+    for i = 0, N do
+        local a = (i / N) * 2 * math.pi
+        p[#p + 1] = string.format("%s %d %d", (i == 0) and "m" or "l",
+            f(cx + r * math.cos(a) + 0.5), f(cy + r * math.sin(a) + 0.5))
+    end
+    local r1, r2, hw = r * 1.30, r * 1.85, r * 0.17
+    for k = 0, 7 do
+        local a = (k / 8) * 2 * math.pi
+        local ca, sa = math.cos(a), math.sin(a)
+        local pa, ps = math.cos(a + math.pi / 2), math.sin(a + math.pi / 2)
+        p[#p + 1] = string.format("m %d %d l %d %d %d %d",
+            f(cx + ca * r1 + pa * hw + 0.5), f(cy + sa * r1 + ps * hw + 0.5),
+            f(cx + ca * r2 + 0.5),           f(cy + sa * r2 + 0.5),
+            f(cx + ca * r1 - pa * hw + 0.5), f(cy + sa * r1 - ps * hw + 0.5))
+    end
+    return table.concat(p, " ")
+end
+
+local function rect_path(x0, y0, x1, y1)
+    return string.format("m %d %d l %d %d %d %d %d %d", x0, y0, x1, y0, x1, y1, x0, y1)
+end
+
+local function icon_path(kind, cx, cy, s)   -- transport glyphs, centered on cx,cy
+    local f = math.floor
+    if kind == "play" then
+        return string.format("m %d %d l %d %d %d %d", cx - f(s * 0.7), cy - s, cx + s, cy, cx - f(s * 0.7), cy + s)
+    elseif kind == "pause" then
+        return rect_path(cx - f(s * 0.7), cy - s, cx - f(s * 0.15), cy + s) .. " "
+            .. rect_path(cx + f(s * 0.15), cy - s, cx + f(s * 0.7), cy + s)
+    elseif kind == "stop" then
+        return rect_path(cx - f(s * 0.8), cy - f(s * 0.8), cx + f(s * 0.8), cy + f(s * 0.8))
+    elseif kind == "next" then
+        return string.format("m %d %d l %d %d %d %d", cx - s, cy - s, cx + f(s * 0.3), cy, cx - s, cy + s)
+            .. " " .. rect_path(cx + f(s * 0.4), cy - s, cx + f(s * 0.8), cy + s)
+    elseif kind == "prev" then
+        return string.format("m %d %d l %d %d %d %d", cx + s, cy - s, cx - f(s * 0.3), cy, cx + s, cy + s)
+            .. " " .. rect_path(cx - f(s * 0.8), cy - s, cx - f(s * 0.4), cy + s)
+    end
+    return ""
+end
+
+local function compute_logo(w, h)
+    if not w or w <= 0 then return end
+    local LH  = math.floor(h * 0.072)
+    local fs  = math.floor(LH * 0.40)
+    local txt = "MORNING BRIEFING"
+    local fsp = math.floor(fs * 0.06 + 0.5)
+    local tw  = math.floor(#txt * fs * 0.58 + (#txt - 1) * fsp)
+    local pad = math.floor(LH * 0.45)
+    local sw  = math.floor(LH * 0.95)
+    local gap = math.floor(LH * 0.32)
+    local LW  = pad + sw + gap + tw + pad
+    logo = { x = math.floor((w - LW) / 2), y = math.floor(h * 0.025),
+             w = LW, h = LH, fs = fs, fsp = fsp, text = txt,
+             pad = pad, sun_w = sw, gap = gap, W = w, H = h }
+end
+
+local function draw_logo(show)
+    if not show or not logo then logo_ov:remove(); return end
+    local L  = logo
+    local cx = L.x + L.pad + math.floor(L.sun_w / 2)
+    local cy = L.y + math.floor(L.h / 2)
+    local r  = math.floor(L.h * 0.19)
+    local tx = L.x + L.pad + L.sun_w + L.gap
+    local rad = math.floor(L.h * 0.30)
+    logo_ov.res_x = L.W; logo_ov.res_y = L.H
+    logo_ov.data = table.concat({
+        "{\\an7\\pos(0,0)\\bord2\\shad0\\1c&H120E0A&\\1a&H2A&\\3c&H4FB8E8&\\3a&H20&\\p1}"
+            .. rrect_path(L.x, L.y, L.w, L.h, rad) .. "{\\p0}",
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H3FC0FF&\\p1}" .. sun_path(cx, cy, r) .. "{\\p0}",
+        string.format("{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0"
+            .. "\\shad1\\4c&H000000&\\4a&H60&\\1c&HFFFFFF&}%s", tx, cy, L.fs, L.fsp, L.text),
+    }, "\n")
+    logo_ov:update()
+end
+
+-- Transport row while a briefing speaks: prev / pause-play / next / stop.
+local function draw_controls()
+    control_boxes = {}
+    if not logo then controls_ov:remove(); return end
+    local L  = logo
+    local bw = math.floor(L.h * 0.82)
+    local bh = math.floor(L.h * 0.60)
+    local g  = math.floor(L.h * 0.16)
+    local rad = math.floor(bh * 0.30)
+    local defs = {
+        { kind = "prev",  msg = "ss-briefing-prev"  },
+        { kind = briefing_paused and "play" or "pause", msg = "ss-briefing-pause" },
+        { kind = "next",  msg = "ss-briefing-skip"  },
+        { kind = "stop",  msg = "ss-briefing-stop"  },
+    }
+    local totalw = #defs * bw + (#defs - 1) * g
+    local bx = L.x + math.floor((L.w - totalw) / 2)
+    local by = L.y + L.h + math.floor(L.h * 0.16)
+    local parts = {}
+    for i, d in ipairs(defs) do
+        local x0 = bx + (i - 1) * (bw + g)
+        local x1, y0, y1 = x0 + bw, by, by + bh
+        local cx, cy = x0 + math.floor(bw / 2), y0 + math.floor(bh / 2)
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord1\\shad0\\1c&H1A1410&\\1a&H22&\\3c&H4FB8E8&\\3a&H40&\\p1}"
+            .. rrect_path(x0, y0, bw, bh, rad) .. "{\\p0}"
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\p1}"
+            .. icon_path(d.kind, cx, cy, math.floor(bh * 0.23)) .. "{\\p0}"
+        control_boxes[#control_boxes + 1] = { x0 = x0, y0 = y0, x1 = x1, y1 = y1,
+            act = (function(m) return function() mp.command("script-message " .. m) end end)(d.msg) }
+    end
+    controls_ov.res_x = L.W; controls_ov.res_y = L.H
+    controls_ov.data = table.concat(parts, "\n")
+    controls_ov:update()
+end
+
+-- Replay / Refresh chooser (idle, after clicking the logo).
+local function draw_menu()
+    menu_boxes = {}
+    if not logo then controls_ov:remove(); return end
+    local L  = logo
+    local fs = math.floor(L.h * 0.30)
+    local bh = math.floor(L.h * 0.66)
+    local g  = math.floor(L.h * 0.22)
+    local rad = math.floor(bh * 0.32)
+    local defs = {
+        { t = "REPLAY",  mode = "--play"  },
+        { t = "REFRESH", mode = "--fresh" },
+    }
+    local bws = {}
+    for i, d in ipairs(defs) do bws[i] = math.floor(#d.t * fs * 0.66 + fs * 1.6) end
+    local totalw = bws[1] + bws[2] + g
+    local bx = L.x + math.floor((L.w - totalw) / 2)
+    local by = L.y + L.h + math.floor(L.h * 0.16)
+    local parts = {}
+    local cursor = bx
+    for i, d in ipairs(defs) do
+        local bw = bws[i]
+        local x0, x1, y0, y1 = cursor, cursor + bw, by, by + bh
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord1\\shad0\\1c&H120E0A&\\1a&H1A&\\3c&H4FB8E8&\\3a&H30&\\p1}"
+            .. rrect_path(x0, y0, bw, bh, rad) .. "{\\p0}"
+        parts[#parts + 1] = string.format("{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d"
+            .. "\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
+            x0 + math.floor(bw / 2), y0 + math.floor(bh / 2), fs, math.floor(fs * 0.05 + 0.5), d.t)
+        menu_boxes[#menu_boxes + 1] = { x0 = x0, y0 = y0, x1 = x1, y1 = y1,
+            act = (function(mode) return function()
+                mp.commandv("run", CFG_DIR .. "/grok-briefing.sh", mode)
+                briefing_preparing = true; prepare_t0 = mp.get_time(); briefing_spoke_once = false
+            end end)(d.mode) }
+        cursor = cursor + bw + g
+    end
+    controls_ov.res_x = L.W; controls_ov.res_y = L.H
+    controls_ov.data = table.concat(parts, "\n")
+    controls_ov:update()
+end
+
 local function logo_tick()
+    if not GROK_ENABLED then return end
+    local w, h = refresh_display_size()
+    if w <= 0 then return end
+    if not logo or logo.W ~= w or logo.H ~= h then compute_logo(w, h) end
     if not logo then return end
-    logo_set(mouse_near_logo or briefing_preparing)
-    if briefing_preparing then
-        local f = io.open("/tmp/ss_briefing.txt", "r")
-        local s = f and (f:read("*a") or "") or ""
-        if f then f:close() end
-        s = s:gsub("%s+$", "")
-        -- Done once the briefing starts speaking, or after a timeout (fail quietly).
-        if (s ~= "" and s ~= "__HIDE__") or (mp.get_time() - prepare_t0 > 90) then
-            briefing_preparing = false
-            logo_text_ov:remove()
-            logo_set(mouse_near_logo)
-            return
-        end
-        local w, h = refresh_display_size()
-        local fs = math.floor(h * 0.026)
+
+    -- Mute the whole screensaver while a briefing speaks; restore after.
+    local active = briefing_active()
+    if active and not briefing_muted then
+        saved_volume = mp.get_property_number("volume") or saved_volume
+        mp.set_property_number("volume", 0); briefing_muted = true
+    elseif not active and briefing_muted then
+        mp.set_property_number("volume", saved_volume or 70); briefing_muted = false
+        briefing_spoke_once = false
+    end
+
+    -- Pick what shows under the logo: transport (speaking), menu (chooser), or nothing.
+    if active then
+        logo_menu_open = false
+        draw_logo(true); draw_controls(); menu_boxes = {}
+    elseif logo_menu_open then
+        draw_logo(true); draw_menu(); control_boxes = {}
+    else
+        draw_logo(mouse_near_logo or briefing_preparing)
+        controls_ov:remove(); control_boxes = {}; menu_boxes = {}
+    end
+
+    -- "GETTING READY…" before the first spoken line (on click-prep or while the
+    -- first segment generates), but not in the gaps between later segments.
+    local f = io.open("/tmp/ss_briefing.txt", "r")
+    local s = f and (f:read("*a") or "") or ""
+    if f then f:close() end
+    s = s:gsub("%s+$", "")
+    local speaking = (s ~= "" and s ~= "__HIDE__")
+    if speaking then briefing_spoke_once = true; briefing_preparing = false end
+    local show_ready = (briefing_preparing or active) and not briefing_spoke_once and not speaking
+    if show_ready and (active or mp.get_time() - prepare_t0 <= 90) then
+        local fs = math.floor(h * 0.024)
         logo_text_ov.res_x = w; logo_text_ov.res_y = h
         logo_text_ov.data = string.format(
             "{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H30&}GETTING READY…",
-            math.floor(w / 2), logo.y + logo.h + math.floor(h * 0.012),
+            math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.95),
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
         logo_text_ov:update()
     else
+        if not active then briefing_preparing = false end
         logo_text_ov:remove()
     end
 end
 mp.add_periodic_timer(0.3, logo_tick)
 
-local function prepare_logo()
-    if logo or not GROK_ENABLED or GROK_LOGO == "" or not file_exists(GROK_LOGO) then return end
-    local w, h = refresh_display_size()
-    local lh = math.floor(h * 0.11)
-    local out = RES_DIR .. "/briefing-logo.bgra"
-    mp.command_native_async({ name = "subprocess", capture_stdout = true, playback_only = false,
-        args = { "/bin/sh", "-c",
-            'command -v magick >/dev/null 2>&1 && IM=magick || IM=convert; '
-            .. 't="$(mktemp --suffix=.png)"; '
-            .. '"$IM" "' .. GROK_LOGO .. '" -resize x' .. lh .. ' "$t" 2>/dev/null && '
-            .. '"$IM" identify -format "%wx%h" "$t" 2>/dev/null && '
-            .. '"$IM" "$t" -depth 8 "bgra:' .. out .. '" 2>/dev/null; rm -f "$t"' } },
-        function(ok, res)
-            local lw, lhh = ((ok and res and res.stdout) or ""):match("(%d+)x(%d+)")
-            if lw and lhh and file_exists(out) then
-                lw, lhh = tonumber(lw), tonumber(lhh)
-                local W, Hd = refresh_display_size()
-                logo = { bgra = out, w = lw, h = lhh,
-                         x = math.floor((W - lw) / 2), y = math.floor(Hd * 0.02) }
-            end
-        end)
-end
-
--- Reveal/hide with the mouse; prepare the logo lazily on the first move.
+-- Reveal/hide with the mouse.
 mp.observe_property("mouse-pos", "native", function(_, m)
-    if not GROK_ENABLED then return end
-    if not logo then prepare_logo(); return end
-    if m then mouse_near_logo = logo_zone(m.x, m.y) end
+    if not GROK_ENABLED or not m or not logo then return end
+    mouse_near_logo = logo_zone(m.x, m.y)
 end)
 
 -- ----------------------------------------------------------------------------
