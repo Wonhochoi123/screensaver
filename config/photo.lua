@@ -32,6 +32,10 @@ local HUD_CITY_FS   = envn("HUD_CITY_FS",   0.066)  -- city headline
 local HUD_COORD_FS  = envn("HUD_COORD_FS",  0.025)  -- GPS coordinates
 local HUD_MAP_FRAC  = envn("HUD_MAP_FRAC",  0.27)   -- minimap/QR size (frac of height)
 local MUSIC_WIN_FRAC = envn("MUSIC_WIN_FRAC", 0.30) -- marquee width (frac of width)
+local HUD_THUMB_FRAC = envn("HUD_THUMB_FRAC", 0.07) -- album-art thumb size (frac of height)
+
+local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap)
+local THUMB_FRAMES = 24     -- rotation frames build-thumb.sh renders
 
 local ZOOMS        = {11, 14, 16}
 local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
@@ -47,6 +51,7 @@ local music_ov     = mp.create_osd_overlay("ass-events")
 local music_bar_ov    = mp.create_osd_overlay("ass-events")  -- music played
 local music_bar_bg_ov = mp.create_osd_overlay("ass-events")  -- music track
 local music_measure_ov = mp.create_osd_overlay("ass-events") -- hidden; measures text width
+local music_thumb_ov   = mp.create_osd_overlay("ass-events") -- album-art ring / empty target
 local landmark_ov  = mp.create_osd_overlay("ass-events")
 local progress_ov    = mp.create_osd_overlay("ass-events")  -- played
 local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (track)
@@ -96,6 +101,13 @@ local poll_music               -- assigned later
 local music_bar    = nil       -- {x,y,w,th,W,H} bar geometry under the marquee
 local music_pct    = nil       -- 0..100 song position from the audio player
 local draw_music_bar           -- assigned later
+local thumb        = nil       -- {x,y,d,cx,cy,r,W,H} album-art circle; nil = none
+local thumb_dir    = nil       -- dir of f000.bgra rotation frames; nil = no art
+local thumb_idx    = 0         -- current rotation frame
+local music_path   = nil       -- current audio file (drives thumb regeneration)
+local music_playing = true     -- audio play state (spins the thumb when true)
+local draw_thumb_ring          -- assigned later
+local load_thumb_for           -- assigned later
 local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
 
@@ -695,6 +707,19 @@ end)
 mp.register_script_message("handle-left-click", function()
     local mouse = mp.get_property_native("mouse-pos")
 
+    -- Click the album-art thumb (left of the marquee) to pause/play the MUSIC
+    -- only (independent of the slideshow). Works even with no cover art (the
+    -- empty ring is still a target).
+    if mouse and thumb then
+        local dx = mouse.x - thumb.cx
+        local dy = mouse.y - thumb.cy
+        if dx * dx + dy * dy <= thumb.r * thumb.r then
+            mp.commandv("run", "/bin/sh", "-c",
+                "printf '%s\\n' '{\"command\":[\"cycle\",\"pause\"]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+            return
+        end
+    end
+
     -- Click the now-playing marquee (top-left) to skip to the next track.
     -- Checked first so it works regardless of whether the photo has GPS.
     if mouse and music_hit then
@@ -994,13 +1019,28 @@ local function set_music(text)
     local w, h = refresh_display_size()
     local fs   = math.floor(h * HUD_MUSIC_FS)
     local fsp  = math.floor(h * 0.003 + 0.5)
-    local px   = math.floor(w * 0.025)
     local py   = math.floor(h * 0.04)
-    local win_px = math.floor(w * MUSIC_WIN_FRAC)
     local y_top  = py - math.floor(fs * 0.25)
     local y_bot  = py + math.floor(fs * 1.30)
     local bar_th = math.max(2, math.floor(h * 0.0035 + 0.5))
     local bar_y  = py + math.floor(fs * 1.45)    -- just under the text
+
+    -- Album-art thumb sits at the left margin; the text starts to its right.
+    local left_x  = math.floor(w * 0.025)
+    local thumb_d = math.floor(h * HUD_THUMB_FRAC)
+    local px      = left_x
+    if thumb_d > 0 then
+        local block_cy = math.floor((y_top + bar_y + bar_th) / 2)
+        thumb = { x = left_x, y = block_cy - math.floor(thumb_d / 2), d = thumb_d,
+                  cx = left_x + math.floor(thumb_d / 2), cy = block_cy,
+                  r = math.floor(thumb_d / 2), W = w, H = h }
+        px = left_x + thumb_d + math.floor(thumb_d * 0.30)   -- gap after the thumb
+        draw_thumb_ring()
+    else
+        thumb = nil; music_thumb_ov:remove()
+        mp.command_native({"overlay-remove", THUMB_ID})
+    end
+    local win_px = math.floor(w * MUSIC_WIN_FRAC)
 
     music_ov.res_x = w
     music_ov.res_y = h
@@ -1101,23 +1141,107 @@ function draw_music_bar()
     end
 end
 
--- Poll the audio player's position (separate mpv on AUDIO_SOCK) for the bar.
-local function poll_music_pos()
-    if not music_bar then return end
+-- A circle as an ASS vector path (4 cubic beziers), for the thumb's ring and
+-- its empty (no-cover) state.
+local function ass_circle(cx, cy, r)
+    local k = math.floor(r * 0.5523 + 0.5)
+    return string.format(
+        "m %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d",
+        cx, cy - r,
+        cx + k, cy - r, cx + r, cy - k, cx + r, cy,
+        cx + r, cy + k, cx + k, cy + r, cx, cy + r,
+        cx - k, cy + r, cx - r, cy + k, cx - r, cy,
+        cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+end
+
+-- The thumb's faint ring — drawn whenever there's a thumb, so the album art has
+-- a border and the empty (no-cover) state still shows a clickable target.
+function draw_thumb_ring()
+    if not thumb then music_thumb_ov:remove(); return end
+    local t = thumb
+    music_thumb_ov.res_x = t.W; music_thumb_ov.res_y = t.H
+    music_thumb_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\p1\\1a&HFF&\\bord%d\\3c&HFFFFFF&\\3a&H90&\\shad0}%s{\\p0}",
+        math.max(1, math.floor(t.d * 0.03 + 0.5)), ass_circle(t.cx, t.cy, t.r))
+    music_thumb_ov:update()
+end
+
+-- Generate (or reuse cached) rotation frames for the current track's cover art,
+-- then show the first frame. build-thumb.sh prints its output dir, or nothing
+-- when the file has no embedded art (then the thumb stays an empty ring).
+function load_thumb_for(path)
+    if not thumb or path == nil or path == "" then return end
+    local d = thumb.d
     mp.command_native_async({
-        name = "subprocess", capture_stdout = true,
-        args = { "/bin/sh", "-c",
-            "printf '%s\\n' '{\"command\":[\"get_property\",\"percent-pos\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
+        name = "subprocess", capture_stdout = true, playback_only = false,
+        args = { CFG_DIR .. "/build-thumb.sh", path, tostring(d), tostring(THUMB_FRAMES) },
     }, function(ok, res)
-        -- Only update on a successful read; never clear on a slow/empty poll, so
-        -- the bar holds its position instead of flickering off (this is what made
-        -- it look broken on some mp3/flac files). set_music resets it per track.
-        if ok and res and res.stdout and res.stdout ~= "" then
-            local j = utils.parse_json(res.stdout)
-            if j and j.error == "success" and type(j.data) == "number" then
-                music_pct = j.data
+        if music_path ~= path or not thumb then return end   -- track moved on
+        local dir = (ok and res and res.stdout or ""):gsub("%s+$", "")
+        if dir ~= "" and file_exists(dir .. "/.frames") then
+            thumb_dir = dir; thumb_idx = 0
+            mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
+                string.format("%s/f000.bgra", dir), 0, "bgra", thumb.d, thumb.d, thumb.d * 4})
+        else
+            thumb_dir = nil
+            mp.command_native({"overlay-remove", THUMB_ID})
+        end
+    end)
+end
+
+-- New audio file → reset the thumb and (re)generate its frames.
+local function on_music_path(p)
+    if p == music_path then return end
+    music_path = p
+    thumb_dir = nil; thumb_idx = 0
+    mp.command_native({"overlay-remove", THUMB_ID})
+    load_thumb_for(p)
+end
+
+-- Spin the thumb while the music plays (freeze on the current frame when paused).
+local function thumb_tick()
+    if thumb and thumb_dir and music_playing then
+        thumb_idx = (thumb_idx + 1) % THUMB_FRAMES
+        mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
+            string.format("%s/f%03d.bgra", thumb_dir, thumb_idx),
+            0, "bgra", thumb.d, thumb.d, thumb.d * 4})
+    end
+    mp.add_timeout(0.06, thumb_tick)
+end
+thumb_tick()
+
+-- Poll the audio player (separate mpv on AUDIO_SOCK): position for the bar, file
+-- path for the thumb, and pause state for the spin. One round-trip for all three.
+local function poll_music_pos()
+    if not music_shown then return end
+    mp.command_native_async({
+        name = "subprocess", capture_stdout = true, playback_only = false,
+        args = { "/bin/sh", "-c",
+            "printf '%s\\n%s\\n%s\\n' "
+            .. "'{\"command\":[\"get_property\",\"percent-pos\"],\"request_id\":1}' "
+            .. "'{\"command\":[\"get_property\",\"path\"],\"request_id\":2}' "
+            .. "'{\"command\":[\"get_property\",\"pause\"],\"request_id\":3}' "
+            .. "| socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
+    }, function(ok, res)
+        -- Each property only updates on a successful read; nothing is cleared on
+        -- a slow/empty poll, so the bar holds its position instead of flickering
+        -- off (this is what made it look broken on some mp3/flac files).
+        local new_path
+        if ok and res and res.stdout then
+            for line in res.stdout:gmatch("[^\n]+") do
+                local j = utils.parse_json(line)
+                if j and j.error == "success" and j.request_id then
+                    if j.request_id == 1 and type(j.data) == "number" then
+                        music_pct = j.data
+                    elseif j.request_id == 2 and type(j.data) == "string" then
+                        new_path = j.data
+                    elseif j.request_id == 3 then
+                        music_playing = (j.data ~= true)
+                    end
+                end
             end
         end
+        if new_path then on_music_path(new_path) end
         draw_music_bar()
     end)
 end
@@ -1191,6 +1315,8 @@ mp.register_event("shutdown", function()
     music_bar_ov:remove()
     music_bar_bg_ov:remove()
     music_measure_ov:remove()
+    music_thumb_ov:remove()
+    pcall(mp.command_native, {"overlay-remove", THUMB_ID})
     landmark_ov:remove()
     loading_ov:remove()
     progress_ov:remove()

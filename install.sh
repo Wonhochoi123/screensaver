@@ -187,6 +187,7 @@ sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket pa
 copy_file config/photo.lua        "$CFG/photo.lua"        0644
 copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
 copy_file config/build-minimap.sh "$CFG/build-minimap.sh" 0755
+copy_file config/build-thumb.sh   "$CFG/build-thumb.sh"   0755
 copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755
 copy_file config/build-title.sh   "$CFG/build-title.sh"   0755
 copy_file config/build-geodb.sh   "$CFG/build-geodb.sh"   0755
