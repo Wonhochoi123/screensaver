@@ -76,17 +76,13 @@ local HUD_CITY_FS    = cfgnum("HUD_CITY_FS")      -- city headline
 local HUD_COORD_FS   = cfgnum("HUD_COORD_FS")     -- GPS coordinates
 local HUD_MAP_FRAC   = cfgnum("HUD_MAP_FRAC")     -- minimap/QR size (frac of height)
 local MUSIC_WIN_FRAC = cfgnum("MUSIC_WIN_FRAC")   -- marquee width (frac of width)
-local HUD_THUMB_FRAC = cfgnum("HUD_THUMB_FRAC")   -- album-art thumb size (frac of height)
+local SHOW_THUMB     = cfgraw("HUD_THUMB") ~= "0" -- album-art thumb shown unless set to 0
 local HUD_TEXT_BLUR  = cfgnum("HUD_TEXT_BLUR")    -- text shadow blur/spread (×font size)
 local HUD_TEXT_GLOW  = cfgnum("HUD_TEXT_GLOW")    -- text shadow strength (×font size)
 local MUSIC_SCROLL_SPEED = cfgnum("MUSIC_SCROLL_SPEED")  -- marquee px/frame factor (×font size)
 local MUSIC_SCROLL_DWELL = cfgnum("MUSIC_SCROLL_DWELL")  -- marquee end pause (frames)
 
 local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap); internal
-local THUMB_FRAMES = math.max(1, math.floor(cfgnum("HUD_THUMB_FRAMES")))  -- rotation frames
-local HUD_THUMB_SPIN_SECS = cfgnum("HUD_THUMB_SPIN_SECS")     -- seconds per revolution
-local THUMB_SPIN   = HUD_THUMB_SPIN_SECS > 0                  -- 0 or less => frozen, no spin
-local THUMB_TICK   = THUMB_SPIN and (HUD_THUMB_SPIN_SECS / THUMB_FRAMES) or 0.20
 
 -- Minimap zoom levels + ring colours (emergency arrays only if the conf can't
 -- be read — arrays can't degrade to 0; the real values live in the conf).
@@ -158,10 +154,11 @@ local music_bar    = nil       -- {x,y,w,th,W,H} bar geometry under the marquee
 local music_pct    = nil       -- 0..100 song position from the audio player
 local draw_music_bar           -- assigned later
 local thumb        = nil       -- {x,y,d,cx,cy,r,W,H} album-art circle; nil = none
-local thumb_dir    = nil       -- dir of f000.bgra rotation frames; nil = no art
-local thumb_idx    = 0         -- current rotation frame
+local thumb_color  = nil       -- path to color.bgra (playing); nil = no art
+local thumb_gray   = nil       -- path to gray.bgra  (paused)
+local thumb_shown  = nil       -- which variant is currently blitted (avoids re-blits)
 local music_path   = nil       -- current audio file (drives thumb regeneration)
-local music_playing = true     -- audio play state (spins the thumb when true)
+local music_playing = true     -- audio play state (color when true, gray when paused)
 local draw_thumb_ring          -- assigned later
 local load_thumb_for           -- assigned later
 local gp_sections              -- global month sections (forward; built later)
@@ -1119,16 +1116,20 @@ local function set_music(text)
     local bar_y  = py + math.floor(fs * 1.45)    -- just under the text
 
     -- Album-art thumb sits at the left margin; the text starts to its right.
-    -- Left inset matches the QR/minimap's (hud_geom pad = win_h * 0.02).
+    -- Left inset matches the QR/minimap's (hud_geom pad = win_h * 0.02). Its
+    -- diameter equals the height of the text+progress-bar group, and it is
+    -- centred vertically on that group — so it reads as one unit.
     local left_x  = math.floor(h * 0.02)
-    local thumb_d = math.floor(h * HUD_THUMB_FRAC)
+    local grp_top = y_top
+    local grp_bot = bar_y + bar_th
+    local thumb_d = grp_bot - grp_top
     local px      = left_x
-    if thumb_d > 0 then
-        local block_cy = math.floor((y_top + bar_y + bar_th) / 2)
+    if SHOW_THUMB and thumb_d > 0 then
+        local block_cy = math.floor((grp_top + grp_bot) / 2)
         thumb = { x = left_x, y = block_cy - math.floor(thumb_d / 2), d = thumb_d,
                   cx = left_x + math.floor(thumb_d / 2), cy = block_cy,
                   r = math.floor(thumb_d / 2), W = w, H = h }
-        px = left_x + thumb_d + math.floor(thumb_d * 0.30)   -- gap after the thumb
+        px = left_x + thumb_d + math.floor(thumb_d * 0.45)   -- gap after the thumb
         draw_thumb_ring()
     else
         thumb = nil; music_thumb_ov:remove()
@@ -1261,50 +1262,50 @@ function draw_thumb_ring()
     music_thumb_ov:update()
 end
 
--- Generate (or reuse cached) rotation frames for the current track's cover art,
--- then show the first frame. build-thumb.sh prints its output dir, or nothing
--- when the file has no embedded art (then the thumb stays an empty ring).
+-- Blit the album art: colour while the music plays, grayscale while paused (so
+-- you can tell at a glance it's stopped). Only re-blits when the variant changes.
+local function draw_thumb()
+    if not thumb then thumb_shown = nil; return end
+    local want = music_playing and thumb_color or thumb_gray
+    if not want then return end          -- no cover art yet → just the empty ring
+    if want == thumb_shown then return end
+    thumb_shown = want
+    mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
+        want, 0, "bgra", thumb.d, thumb.d, thumb.d * 4})
+end
+
+-- Generate (or reuse cached) the cover-art thumbnails for the current track,
+-- then show one. build-thumb.sh prints its output dir, or nothing when the file
+-- has no embedded art (then the thumb stays an empty ring).
 function load_thumb_for(path)
     if not thumb or path == nil or path == "" then return end
     local d = thumb.d
     mp.command_native_async({
         name = "subprocess", capture_stdout = true, playback_only = false,
-        args = { CFG_DIR .. "/build-thumb.sh", path, tostring(d), tostring(THUMB_FRAMES) },
+        args = { CFG_DIR .. "/build-thumb.sh", path, tostring(d) },
     }, function(ok, res)
         if music_path ~= path or not thumb then return end   -- track moved on
         local dir = (ok and res and res.stdout or ""):gsub("%s+$", "")
-        if dir ~= "" and file_exists(dir .. "/.frames") then
-            thumb_dir = dir; thumb_idx = 0
-            mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
-                string.format("%s/f000.bgra", dir), 0, "bgra", thumb.d, thumb.d, thumb.d * 4})
+        if dir ~= "" and file_exists(dir .. "/.thumb") then
+            thumb_color = dir .. "/color.bgra"
+            thumb_gray  = dir .. "/gray.bgra"
+            thumb_shown = nil
+            draw_thumb()
         else
-            thumb_dir = nil
+            thumb_color = nil; thumb_gray = nil; thumb_shown = nil
             mp.command_native({"overlay-remove", THUMB_ID})
         end
     end)
 end
 
--- New audio file → reset the thumb and (re)generate its frames.
+-- New audio file → reset the thumb and (re)generate its art.
 local function on_music_path(p)
     if p == music_path then return end
     music_path = p
-    thumb_dir = nil; thumb_idx = 0
+    thumb_color = nil; thumb_gray = nil; thumb_shown = nil
     mp.command_native({"overlay-remove", THUMB_ID})
     load_thumb_for(p)
 end
-
--- Spin the thumb like a vinyl record while the music plays (freeze on the
--- current frame when paused). Reversed direction, ~7.2s per revolution.
-local function thumb_tick()
-    if THUMB_SPIN and thumb and thumb_dir and music_playing then
-        thumb_idx = (thumb_idx - 1) % THUMB_FRAMES   -- reverse spin
-        mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
-            string.format("%s/f%03d.bgra", thumb_dir, thumb_idx),
-            0, "bgra", thumb.d, thumb.d, thumb.d * 4})
-    end
-    mp.add_timeout(THUMB_TICK, thumb_tick)   -- THUMB_TICK never 0 (see config block)
-end
-if THUMB_SPIN then thumb_tick() end
 
 -- Poll the audio player (separate mpv on AUDIO_SOCK): position for the bar, file
 -- path for the thumb, and pause state for the spin. One round-trip for all three.
@@ -1338,6 +1339,7 @@ local function poll_music_pos()
             end
         end
         if new_path then on_music_path(new_path) end
+        draw_thumb()      -- swap colour/grayscale if the play/pause state changed
         draw_music_bar()
     end)
 end
