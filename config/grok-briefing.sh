@@ -40,6 +40,10 @@ TODAY_CACHE="$CACHE_DIR/$TODAY"
 SUB_FILE="/tmp/ss_briefing.txt"          # photo.lua reads this for OSD subtitles
 PID_FILE="/tmp/ss_briefing.pid"
 FFPLAY_PID_FILE="/tmp/ss_briefing_ffplay.pid"
+BGM_TXT="/tmp/ss_briefing_bgm.txt"       # "Title - Artist" of the bgm (for the marquee)
+BGM_PATH_FILE="/tmp/ss_briefing_bgm_path"  # the bgm file path (for the cover thumb)
+SPEAK_DELAY="${GROK_SPEAK_DELAY:-5}"     # seconds of music before the first words
+SECTION_GAP="${GROK_SECTION_GAP:-2}"     # seconds of music between segments
 API="https://api.x.ai/v1"
 
 mkdir -p "$TODAY_CACHE" 2>/dev/null
@@ -142,7 +146,7 @@ end_play() {
     [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }
     [ -n "$BGM_PID" ] && kill "$BGM_PID" 2>/dev/null
     [ -n "$PREP_BG" ] && kill "$PREP_BG" 2>/dev/null    # stop background generation
-    sub_hide; rm -f "$PID_FILE" "$FFPLAY_PID_FILE"
+    sub_hide; rm -f "$PID_FILE" "$FFPLAY_PID_FILE" "$BGM_TXT" "$BGM_PATH_FILE"
     ss_music_pause false        # resume the slideshow's own music
     exit 0
 }
@@ -178,13 +182,26 @@ play() {
     # GrokMorning background music (random track, looped quietly) if any exist
     if [ -d "$GBGM_DIR" ] && [ -n "$(ls -A "$GBGM_DIR" 2>/dev/null)" ]; then
         local bgm; bgm="$(find "$GBGM_DIR" -maxdepth 1 -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.wav' \) 2>/dev/null | shuf -n1)"
-        [ -n "$bgm" ] && { ffplay -nodisp -autoexit -loglevel quiet -loop 0 -volume "$GBGM_VOL" "$bgm" >/dev/null 2>&1 & BGM_PID=$!; }
+        if [ -n "$bgm" ]; then
+            ffplay -nodisp -autoexit -loglevel quiet -loop 0 -volume "$GBGM_VOL" "$bgm" >/dev/null 2>&1 & BGM_PID=$!
+            # Publish what's playing so the slideshow's music marquee can show it.
+            local bt ba disp
+            bt="$(ffprobe -v quiet -show_entries format_tags=title  -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
+            ba="$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
+            [ -n "$bt" ] || bt="$(basename "${bgm%.*}")"
+            disp="$bt"; [ -n "$ba" ] && disp="$bt - $ba"
+            printf '%s' "$disp" > "$BGM_TXT"
+            printf '%s' "$bgm"  > "$BGM_PATH_FILE"
+        fi
     fi
 
     # Generate EVERY segment up front, in parallel, in the background — so by the
     # time the welcome clip finishes the first one is ready, and later ones keep
     # loading while earlier ones play. (gen_segment no-ops anything already cached.)
     prep >/dev/null 2>&1 & PREP_BG=$!
+
+    # Let the music breathe before the first words (only when there IS music).
+    [ -n "$BGM_PID" ] && sleep "$SPEAK_DELAY"
 
     # Instant greeting covers the first segment's generation latency.
     play_welcome
@@ -216,6 +233,8 @@ play() {
 
         idx=$(( idx + STEP ))
         [ "$idx" -lt 0 ] && idx=0
+        # A short musical breather between sections (skip if the user skipped).
+        [ "$SKIP" = 0 ] && [ "$idx" -lt "$n" ] && [ "$idx" -ge 0 ] && sleep "$SECTION_GAP"
     done
     end_play
 }

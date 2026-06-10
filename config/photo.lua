@@ -79,8 +79,7 @@ local MUSIC_WIN_FRAC = cfgnum("MUSIC_WIN_FRAC")   -- marquee width (frac of widt
 local SHOW_THUMB     = cfgraw("HUD_THUMB") ~= "0" -- album-art thumb shown unless set to 0
 local HUD_TEXT_BLUR  = cfgnum("HUD_TEXT_BLUR")    -- text shadow blur/spread (×font size)
 local HUD_TEXT_GLOW  = cfgnum("HUD_TEXT_GLOW")    -- text shadow strength (×font size)
-local MUSIC_SCROLL_SPEED = cfgnum("MUSIC_SCROLL_SPEED")  -- marquee px/frame factor (×font size)
-local MUSIC_SCROLL_DWELL = cfgnum("MUSIC_SCROLL_DWELL")  -- marquee end pause (frames)
+-- (MUSIC_SCROLL_SPEED / MUSIC_SCROLL_DWELL retired — the marquee no longer scrolls.)
 
 local GROK_ENABLED = cfgraw("GROK_BRIEFING") == "1"
 -- The briefing logo is now drawn (vector ASS), not a PNG — see the briefing
@@ -101,6 +100,7 @@ local pause_ov = mp.create_osd_overlay("ass-events")  -- res set per-draw from t
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
+local music_menu_ov   = mp.create_osd_overlay("ass-events")  -- song chooser (below the bar)
 local music_bar_ov    = mp.create_osd_overlay("ass-events")  -- music played
 local music_bar_bg_ov = mp.create_osd_overlay("ass-events")  -- music track
 local music_measure_ov = mp.create_osd_overlay("ass-events") -- hidden; measures text width
@@ -161,11 +161,17 @@ local poll_music               -- assigned later
 local music_bar    = nil       -- {x,y,w,th,W,H} bar geometry under the marquee
 local music_pct    = nil       -- 0..100 song position from the audio player
 local draw_music_bar           -- assigned later
+-- Marquee + song-chooser data, grouped in one table (Lua caps main-chunk locals
+-- at 200). MQ.layout = {label,glyphs,px,py,style,win_px,...}; MQ.hover = mouse over
+-- the marquee; MQ.chooser = chooser open; MQ.rows = visible chooser row hit boxes.
+local MQ = { layout = nil, hover = false, chooser = false, rows = {} }
+local render_marquee           -- assigned later; redraws the marquee for hover state
+local chooser_hit              -- assigned later; hit-test a chooser row
+local open_chooser             -- assigned later
 local thumb        = nil       -- {x,y,d,cx,cy,r,W,H} album-art circle; nil = none
-local thumb_color  = nil       -- path to color.bgra (playing); nil = no art
-local thumb_gray   = nil       -- path to gray.bgra  (paused)
-local thumb_shown  = nil       -- which variant is currently blitted (avoids re-blits)
-local music_path   = nil       -- current audio file (drives thumb regeneration)
+-- Album-art state, grouped: TH.color/gray = bgra paths, TH.shown = blitted variant,
+-- TH.path = current audio file (drives regeneration).
+local TH = { color = nil, gray = nil, shown = nil, path = nil }
 local music_playing = true     -- audio play state (color when true, gray when paused)
 local draw_thumb_ring          -- assigned later
 local load_thumb_for           -- assigned later
@@ -853,14 +859,30 @@ mp.register_script_message("handle-left-click", function()
         end
     end
 
-    -- Click the now-playing marquee (top-left) to skip to the next track.
-    -- Checked first so it works regardless of whether the photo has GPS.
-    if mouse and music_hit then
+    -- Song chooser (open below the bar): click a row to jump to that track.
+    if mouse and MQ.chooser then
+        local idx = chooser_hit and chooser_hit(mouse.x, mouse.y)
+        if idx then
+            mp.commandv("run", "/bin/sh", "-c",
+                "printf '%s\\n' '{\"command\":[\"set_property\",\"playlist-pos\"," .. idx
+                .. "]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+            MQ.chooser = false; music_menu_ov:remove()
+            if poll_music then mp.add_timeout(0.35, poll_music) end
+            return
+        end
+        -- Click outside a row closes the chooser (unless it's the marquee itself,
+        -- handled just below as a toggle).
+        local on_marquee = music_hit and mouse.x >= music_hit.x0 and mouse.x <= music_hit.x1
+            and mouse.y >= music_hit.y0 and mouse.y <= music_hit.y1
+        if not on_marquee then MQ.chooser = false; music_menu_ov:remove(); return end
+    end
+
+    -- Click the now-playing marquee (top-left) to open/close the song chooser.
+    if mouse and music_hit and not (briefing_active and briefing_active()) then
         if mouse.x >= music_hit.x0 and mouse.x <= music_hit.x1
            and mouse.y >= music_hit.y0 and mouse.y <= music_hit.y1 then
-            mp.commandv("run", "/bin/sh", "-c",
-                "printf '%s\\n' '{\"command\":[\"playlist-next\"]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
-            if poll_music then mp.add_timeout(0.35, poll_music) end
+            if MQ.chooser then MQ.chooser = false; music_menu_ov:remove()
+            else open_chooser() end
             return
         end
     end
@@ -1154,15 +1176,45 @@ mp.register_event("file-loaded", function()
     end)
 end)
 
--- Now-playing marquee (top-left). Same title-card style as the rest of the HUD:
--- Montserrat ExtraBold, no outline, no shadow, white. Stays on. The window is a
--- fraction of the screen width; titles that don't fit bounce (ping-pong) so the
--- whole string is revealed and then it returns, never scrolling past the end to
--- hide content. A \clip masks overflow. A progress bar sits just beneath it.
--- Click it to skip to the next track.
--- The marquee window width (MUSIC_WIN_FRAC, read at the top) is a fraction of
--- the screen width, so it's "way longer" on bigger displays.
-local music_scroll_gen = 0  -- bumped on each new track; cancels the old scroller
+-- Now-playing marquee (top-left). Montserrat ExtraBold, white. It never scrolls:
+-- a title too long for its window is shown static and simply FADES OUT toward the
+-- right edge where it's cut off (per-glyph alpha ramp). Hovering the marquee
+-- reveals the whole title+artist; clicking it opens a song chooser below the bar.
+-- The window width (MUSIC_WIN_FRAC) is a fraction of the screen width.
+local function music_style(fs, fsp)
+    return string.format("\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&",
+        fs, fsp, glow(fs))
+end
+
+-- Redraw the marquee for the current hover state (full when hovered, otherwise
+-- faded at the cut-off). Uses the layout stashed by set_music.
+function render_marquee()
+    local L = MQ.layout
+    if not L then music_ov:remove(); return end
+    music_ov.res_x = L.w; music_ov.res_y = L.h
+    if MQ.hover or L.text_px <= L.win_px then
+        -- Reveal everything (no fade, no clip).
+        music_ov.data = string.format("{\\an7\\pos(%d,%d)%s}%s", L.px, L.py, L.style, L.label)
+    else
+        -- Fade the glyphs that fall in the last stretch before the cut-off; make
+        -- anything past the window edge fully transparent (so it reads as cut off).
+        local fade  = math.max(L.fs * 1.5, L.win_px * 0.18)
+        local edge  = L.px + L.win_px           -- right cut-off (transparent past here)
+        local start = edge - fade               -- fade begins here
+        local avg   = L.text_px / math.max(1, #L.glyphs)
+        local parts = { string.format("{\\an7\\pos(%d,%d)%s}", L.px, L.py, L.style) }
+        for i, g in ipairs(L.glyphs) do
+            local gx = L.px + (i - 0.5) * avg    -- glyph centre (uniform estimate)
+            local a
+            if gx <= start then a = 0x40
+            elseif gx >= edge then a = 0xFF
+            else a = math.floor(0x40 + (0xFF - 0x40) * ((gx - start) / fade) + 0.5) end
+            parts[#parts + 1] = string.format("{\\alpha&H%02X&}%s", a, g)
+        end
+        music_ov.data = table.concat(parts)
+    end
+    music_ov:update()
+end
 
 local function set_music(text)
     if not text or text == "" then return end
@@ -1171,8 +1223,7 @@ local function set_music(text)
     if text == music_shown then return end
     music_shown = text
     music_pct   = 0                            -- new track → bar restarts empty
-    music_scroll_gen = music_scroll_gen + 1
-    local gen = music_scroll_gen
+    MQ.chooser = false; music_menu_ov:remove()   -- close the chooser on track change
 
     local w, h = refresh_display_size()
     local fs   = math.floor(h * HUD_MUSIC_FS)
@@ -1183,97 +1234,61 @@ local function set_music(text)
     local bar_th = math.max(1, math.floor(h * 0.00117 + 0.5))   -- thin (≈1/3 of old)
     local bar_y  = py + math.floor(fs * 1.45)    -- just under the text
 
-    -- Album-art thumb sits at the left margin; the text starts to its right.
-    -- Left inset matches the QR/minimap's (hud_geom pad = win_h * 0.02). Its
-    -- diameter equals the height of the text+progress-bar group, and it is
-    -- centred vertically on that group — so it reads as one unit.
+    -- Album-art thumb sits at the left margin; the text starts to its right. The
+    -- diameter is 1.8× the text+bar group height, centred vertically on it.
     local left_x  = math.floor(h * 0.02)
     local grp_top = y_top
     local grp_bot = bar_y + bar_th
-    local thumb_d = grp_bot - grp_top
+    local thumb_d = math.floor((grp_bot - grp_top) * 1.8)
     local px      = left_x
     if SHOW_THUMB and thumb_d > 0 then
         local block_cy = math.floor((grp_top + grp_bot) / 2)
         thumb = { x = left_x, y = block_cy - math.floor(thumb_d / 2), d = thumb_d,
                   cx = left_x + math.floor(thumb_d / 2), cy = block_cy,
                   r = math.floor(thumb_d / 2), W = w, H = h }
-        px = left_x + thumb_d + math.floor(thumb_d * 0.45)   -- gap after the thumb
+        px = left_x + thumb_d + math.floor(thumb_d * 0.22)   -- gap after the thumb
         draw_thumb_ring()
     else
         thumb = nil; music_thumb_ov:remove()
         mp.command_native({"overlay-remove", THUMB_ID})
     end
     local win_px = math.floor(w * MUSIC_WIN_FRAC)
+    local style  = music_style(fs, fsp)
 
-    music_ov.res_x = w
-    music_ov.res_y = h
-
-    local label   = text
-    local style   = string.format(
-        "\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&", fs, fsp, glow(fs))
-
-    -- Measure the real rendered width (a hidden compute-bounds overlay), so the
-    -- scroll stops exactly when the last glyph reaches the window edge — no
-    -- per-glyph estimate, no over-scroll past the end. Falls back to an estimate
-    -- if the measurement is unavailable.
+    -- Measure the real rendered width (hidden compute-bounds overlay).
     local text_px
     music_measure_ov.res_x = w; music_measure_ov.res_y = h
     music_measure_ov.hidden = true
     music_measure_ov.compute_bounds = true
-    music_measure_ov.data = string.format("{\\an7\\pos(0,0)%s}%s", style, label)
+    music_measure_ov.data = string.format("{\\an7\\pos(0,0)%s}%s", style, text)
     local mb = music_measure_ov:update()
     music_measure_ov:remove()
     if mb and mb.x0 and mb.x1 and mb.x1 > mb.x0 then
         text_px = math.ceil(mb.x1 - mb.x0)
     else
-        text_px = math.floor((fs * 0.60 + fsp) * #utf8_split(label))
+        text_px = math.floor((fs * 0.60 + fsp) * #utf8_split(text))
     end
 
-    if text_px <= win_px then
-        -- Fits: static, no scroll, no clip. Hit box + bar hug the text width.
-        music_ov.data = string.format("{\\an7\\pos(%d,%d)%s}%s", px, py, style, label)
-        music_ov:update()
-        music_hit = { x0 = px - fs, y0 = y_top, x1 = px + text_px + fs, y1 = y_bot }
-        music_bar = { x = px, y = bar_y, w = text_px, th = bar_th, W = w, H = h }
-        draw_music_bar()
-        return
-    end
-
-    -- Too long for the window: bounce (ping-pong). Scroll left only far enough
-    -- to reveal the end of the string, dwell, then scroll back to the start and
-    -- dwell. Never loops past the end to hide content. A \clip masks overflow.
-    local clip       = string.format("\\clip(%d,%d,%d,%d)", px, y_top, px + win_px, y_bot)
-    local SPEED      = math.max(1, fs * MUSIC_SCROLL_SPEED)  -- px per frame
-    local DWELL      = MUSIC_SCROLL_DWELL                    -- frames held at each end
-    local max_offset = text_px - win_px            -- how far left fully reveals the end
-    music_hit = { x0 = px - fs, y0 = y_top, x1 = px + win_px + fs, y1 = y_bot }
-    music_bar = { x = px, y = bar_y, w = win_px, th = bar_th, W = w, H = h }
+    local vis_w = math.min(text_px, win_px)      -- width the bar hugs (visible window)
+    MQ.layout = { label = text, glyphs = utf8_split(text), px = px, py = py,
+                     style = style, win_px = win_px, text_px = text_px,
+                     fs = fs, w = w, h = h }
+    -- Hit/hover box spans the FULL title so hovering the revealed text is stable.
+    music_hit = { x0 = px - fs, y0 = y_top, x1 = px + text_px + fs, y1 = y_bot }
+    music_bar = { x = px, y = bar_y, w = vis_w, th = bar_th, W = w, H = h }
+    render_marquee()
     draw_music_bar()
-
-    local sx   = 0
-    local dir  = 1        -- 1 = scrolling left (revealing end), -1 = back to start
-    local hold = DWELL    -- start with a pause showing the beginning
-    local function frame()
-        if gen ~= music_scroll_gen then return end
-        if hold > 0 then
-            hold = hold - 1
-        else
-            sx = sx + dir * SPEED
-            if sx >= max_offset then sx = max_offset; dir = -1; hold = DWELL
-            elseif sx <= 0 then sx = 0; dir = 1; hold = DWELL end
-        end
-        music_ov.data = string.format("{\\an7\\pos(%d,%d)%s%s}%s",
-            math.floor(px - sx), py, clip, style, label)
-        music_ov:update()
-        mp.add_timeout(0.03, frame)
-    end
-    frame()
 end
 
 -- Music progress bar drawn under the marquee, the same width as the info text.
 -- Driven by the audio player's percent-pos (polled below). Same translucent
 -- look as the bottom video bar.
 function draw_music_bar()
+    -- A briefing's looping bgm has no position feed, so hide the bar then (the
+    -- marquee still shows the bgm's title/artist).
+    if briefing_active and briefing_active() then
+        music_bar_ov:remove(); music_bar_bg_ov:remove(); return
+    end
     local b = music_bar
     if not b then
         music_bar_ov:remove(); music_bar_bg_ov:remove(); return
@@ -1302,6 +1317,85 @@ function draw_music_bar()
     else
         music_bar_ov:remove()
     end
+end
+
+-- ----------------------------------------------------------------------------
+-- Song chooser — a short list of tracks shown below the progress bar when the
+-- marquee is clicked. Click a row to jump to that track on the audio player.
+-- ----------------------------------------------------------------------------
+local CHOOSER_MAX = 8           -- (const; not a separate state local)
+
+local function entry_name(e)
+    local s = e.title
+    if not s or s == "" then
+        s = (e.filename or ""):gsub("^.*/", ""):gsub("%.[^%.]+$", "")
+    end
+    return clean_text(s)
+end
+
+local function draw_chooser(entries)
+    MQ.rows = {}
+    if not MQ.chooser or not music_bar or not entries or #entries == 0 then
+        music_menu_ov:remove(); return
+    end
+    local b = music_bar
+    local w, h = b.W, b.H
+    local fs   = math.floor(h * HUD_MUSIC_FS * 0.92)
+    local rowh = math.floor(fs * 1.7)
+    local pad  = math.floor(fs * 0.6)
+    local gapy = math.max(1, math.floor(rowh * 0.12))
+    local boxw = math.max(b.w, math.floor(w * 0.26))
+    local x0   = b.x
+
+    -- Window CHOOSER_MAX rows around the current track.
+    local n, cur = #entries, 1
+    for i, e in ipairs(entries) do if e.current then cur = i; break end end
+    local count = math.min(CHOOSER_MAX, n)
+    local first = math.max(1, math.min(cur - math.floor(count / 2), n - count + 1))
+
+    local y, parts = b.y + b.th + math.floor(rowh * 0.5), {}
+    for i = first, first + count - 1 do
+        local e = entries[i]
+        local ry0, ry1 = y, y + rowh
+        local ba = e.current and "&H1C&" or "&H4E&"        -- current row a touch more opaque
+        local tc = e.current and "&H50C0FF&" or "&HFFFFFF&" -- highlight current (warm gold)
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a" .. ba .. "\\p1}"
+            .. rrect_path(x0, ry0, boxw, rowh, math.floor(rowh * 0.18)) .. "{\\p0}"
+        parts[#parts + 1] = string.format(
+            "{\\an4\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp0\\1c%s\\bord0\\shad0"
+            .. "\\clip(%d,%d,%d,%d)}%s",
+            x0 + pad, ry0 + math.floor(rowh / 2), fs, tc,
+            x0, ry0, x0 + boxw - pad, ry1, entry_name(e))
+        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry1, idx = i - 1 }
+        y = ry1 + gapy
+    end
+    music_menu_ov.res_x = w; music_menu_ov.res_y = h
+    music_menu_ov.data = table.concat(parts, "\n")
+    music_menu_ov:update()
+end
+
+function chooser_hit(mx, my)
+    for _, r in ipairs(MQ.rows) do
+        if mx >= r.x0 and mx <= r.x1 and my >= r.y0 and my <= r.y1 then return r.idx end
+    end
+end
+
+-- Query the audio player's playlist, then show the chooser.
+function open_chooser()
+    if not music_bar or (briefing_active and briefing_active()) then return end
+    mp.command_native_async({ name = "subprocess", capture_stdout = true,
+        args = { "/bin/sh", "-c",
+            "printf '%s\\n' '{\"command\":[\"get_property\",\"playlist\"]}' "
+            .. "| socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" } },
+        function(ok, res)
+            local entries = {}
+            if ok and res and res.stdout then
+                local j = utils.parse_json(res.stdout)
+                if j and j.error == "success" and type(j.data) == "table" then entries = j.data end
+            end
+            MQ.chooser = true
+            draw_chooser(entries)
+        end)
 end
 
 -- A circle as an ASS vector path (4 cubic beziers), for the thumb's ring and
@@ -1333,11 +1427,11 @@ end
 -- Blit the album art: colour while the music plays, grayscale while paused (so
 -- you can tell at a glance it's stopped). Only re-blits when the variant changes.
 local function draw_thumb()
-    if not thumb then thumb_shown = nil; return end
-    local want = music_playing and thumb_color or thumb_gray
+    if not thumb then TH.shown = nil; return end
+    local want = music_playing and TH.color or TH.gray
     if not want then return end          -- no cover art yet → just the empty ASS ring
-    if want == thumb_shown then return end
-    thumb_shown = want
+    if want == TH.shown then return end
+    TH.shown = want
     music_thumb_ov:remove()              -- the bitmap has its own baked ring on top
     mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
         want, 0, "bgra", thumb.d, thumb.d, thumb.d * 4})
@@ -1353,15 +1447,15 @@ function load_thumb_for(path)
         name = "subprocess", capture_stdout = true, playback_only = false,
         args = { CFG_DIR .. "/build-thumb.sh", path, tostring(d) },
     }, function(ok, res)
-        if music_path ~= path or not thumb then return end   -- track moved on
+        if TH.path ~= path or not thumb then return end   -- track moved on
         local dir = (ok and res and res.stdout or ""):gsub("%s+$", "")
         if dir ~= "" and file_exists(dir .. "/color.bgra") then   -- non-empty art file
-            thumb_color = dir .. "/color.bgra"
-            thumb_gray  = dir .. "/gray.bgra"
-            thumb_shown = nil
+            TH.color = dir .. "/color.bgra"
+            TH.gray  = dir .. "/gray.bgra"
+            TH.shown = nil
             draw_thumb()
         else
-            thumb_color = nil; thumb_gray = nil; thumb_shown = nil
+            TH.color = nil; TH.gray = nil; TH.shown = nil
             mp.command_native({"overlay-remove", THUMB_ID})
         end
     end)
@@ -1369,9 +1463,9 @@ end
 
 -- New audio file → reset the thumb and (re)generate its art.
 local function on_music_path(p)
-    if p == music_path then return end
-    music_path = p
-    thumb_color = nil; thumb_gray = nil; thumb_shown = nil
+    if p == TH.path then return end
+    TH.path = p
+    TH.color = nil; TH.gray = nil; TH.shown = nil
     mp.command_native({"overlay-remove", THUMB_ID})
     draw_thumb_ring()        -- empty ring while the new art is generated
     load_thumb_for(p)
@@ -1387,6 +1481,11 @@ local last_music_poll = 0
 local music_poll_busy = false
 local function poll_music_pos()
     if not music_shown then return end
+    -- During a briefing the bgm (a separate ffplay) has no position feed; keep the
+    -- thumb in colour and let draw_music_bar hide the bar — don't poll the socket.
+    if briefing_active and briefing_active() then
+        music_playing = true; draw_thumb(); draw_music_bar(); return
+    end
     local now = mp.get_time()
     if music_poll_busy or (now - last_music_poll) < 0.8 then return end
     last_music_poll = now
@@ -1429,6 +1528,23 @@ mp.observe_property("percent-pos", "number", poll_music_pos)  -- videos (decode-
 
 -- Poll the audio player; only rebuild the marquee when the track changes.
 function poll_music()
+    -- During a briefing the slideshow's own music is paused; show the GrokMorning
+    -- background track instead (grok-briefing.sh publishes its title/path to /tmp).
+    if briefing_active and briefing_active() then
+        local f = io.open("/tmp/ss_briefing_bgm.txt", "r")
+        local t = f and (f:read("*a") or "") or ""
+        if f then f:close() end
+        t = t:gsub("%s+$", "")
+        if t ~= "" then
+            local pf = io.open("/tmp/ss_briefing_bgm_path", "r")
+            local p = pf and (pf:read("*l") or "") or ""
+            if pf then pf:close() end
+            music_playing = true
+            if p ~= "" then on_music_path(p) end
+            set_music(clean_text(t))
+        end
+        return
+    end
     mp.command_native_async({
         name = "subprocess", capture_stdout = true,
         args = { "/bin/sh", "-c",
@@ -1469,6 +1585,13 @@ function poll_music()
 end
 mp.add_periodic_timer(3, poll_music)
 poll_music()
+
+-- Hover the marquee to reveal the full title+artist (re-render only on change).
+mp.observe_property("mouse-pos", "native", function(_, m)
+    local over = m and music_hit and m.x >= music_hit.x0 and m.x <= music_hit.x1
+        and m.y >= music_hit.y0 and m.y <= music_hit.y1 or false
+    if over ~= MQ.hover then MQ.hover = over; render_marquee() end
+end)
 
 -- ----------------------------------------------------------------------------
 -- Quiet hours: pause the music during a configured sleep window (e.g. overnight)
@@ -1533,6 +1656,7 @@ mp.register_event("shutdown", function()
     ov:remove()
     pause_ov:remove()
     music_ov:remove()
+    music_menu_ov:remove()
     music_bar_ov:remove()
     music_bar_bg_ov:remove()
     music_measure_ov:remove()
@@ -2026,11 +2150,8 @@ end)
 -- ----------------------------------------------------------------------------
 local control_boxes    = {}     -- {x0,y0,x1,y1,act} transport buttons (while speaking)
 local menu_boxes       = {}     -- {x0,y0,x1,y1,act} Replay/Refresh chooser
-local briefing_muted   = false
-local saved_volume     = nil
-local briefing_spoke_once = false
-local brief_city_hidden = false   -- city headline currently suppressed for a briefing
-local logo_label       = nil      -- last label compute_logo sized to (clock vs title)
+-- Briefing/badge state (one table to stay under Lua's 200-local cap).
+local LB = { muted = false, vol = nil, spoke = false, city_hidden = false, label = nil }
 
 function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
 
@@ -2096,9 +2217,19 @@ local function icon_path(kind, cx, cy, s)   -- transport glyphs, centered on cx,
     return ""
 end
 
-local function compute_logo(w, h, label)
+local function compute_logo(w, h, label, mode)
     if not w or w <= 0 then return end
     label = label or "MORNING BRIEFING"
+    if mode == "clock" then
+        -- Just the time: thinner (SemiBold), bigger, no frame.
+        local fs = math.floor(h * 0.045)
+        local tw = math.floor(#label * fs * 0.56)
+        local LH = math.floor(fs * 1.25)
+        logo = { mode = "clock", x = math.floor((w - tw) / 2), y = math.floor(h * 0.03),
+                 w = tw, h = LH, fs = fs, fsp = math.floor(fs * 0.04 + 0.5),
+                 text = label, W = w, H = h }
+        return
+    end
     local LH  = math.floor(h * 0.072)
     local fs  = math.floor(LH * 0.40)
     local fsp = math.floor(fs * 0.06 + 0.5)
@@ -2107,7 +2238,7 @@ local function compute_logo(w, h, label)
     local sw  = math.floor(LH * 0.95)
     local gap = math.floor(LH * 0.32)
     local LW  = pad + sw + gap + tw + pad
-    logo = { x = math.floor((w - LW) / 2), y = math.floor(h * 0.025),
+    logo = { mode = "brief", x = math.floor((w - LW) / 2), y = math.floor(h * 0.025),
              w = LW, h = LH, fs = fs, fsp = fsp, text = label,
              pad = pad, sun_w = sw, gap = gap, W = w, H = h }
 end
@@ -2115,6 +2246,16 @@ end
 local function draw_logo(show)
     if not show or not logo then logo_ov:remove(); return end
     local L  = logo
+    if L.mode == "clock" then
+        -- Frameless clock: thin SemiBold time with a soft drop shadow.
+        logo_ov.res_x = L.W; logo_ov.res_y = L.H
+        logo_ov.data = string.format(
+            "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\bord0\\shad2"
+            .. "\\4c&H000000&\\4a&H30&\\1c&HFFFFFF&\\alpha&H18&}%s",
+            math.floor(L.W / 2), L.y, L.fs, L.fsp, L.text)
+        logo_ov:update()
+        return
+    end
     local cx = L.x + L.pad + math.floor(L.sun_w / 2)
     local cy = L.y + math.floor(L.h / 2)
     local r  = math.floor(L.h * 0.19)
@@ -2197,7 +2338,7 @@ local function draw_menu()
         menu_boxes[#menu_boxes + 1] = { x0 = x0, y0 = y0, x1 = x1, y1 = y1,
             act = (function(mode) return function()
                 mp.commandv("run", CFG_DIR .. "/grok-briefing.sh", mode)
-                briefing_preparing = true; prepare_t0 = mp.get_time(); briefing_spoke_once = false
+                briefing_preparing = true; prepare_t0 = mp.get_time(); LB.spoke = false
             end end)(d.mode) }
         cursor = cursor + bw + g
     end
@@ -2212,31 +2353,32 @@ local function logo_tick()
     if w <= 0 then return end
     local active = briefing_active()
 
-    -- The badge shows the live clock when idle, and the briefing title while a
-    -- briefing is preparing or speaking. Re-measure the plaque when it changes.
-    local label = (active or briefing_preparing) and "MORNING BRIEFING"
-        or os.date("%I:%M %p"):gsub("^0", "")
-    if not logo or logo.W ~= w or logo.H ~= h or label ~= logo_label then
-        compute_logo(w, h, label); logo_label = label
+    -- The badge shows the live clock when idle, and the briefing title (framed,
+    -- with the sun) while a briefing is preparing or speaking.
+    local brief = active or briefing_preparing
+    local mode  = brief and "brief" or "clock"
+    local label = brief and "MORNING BRIEFING" or os.date("%I:%M %p"):gsub("^0", "")
+    if not logo or logo.W ~= w or logo.H ~= h or label ~= LB.label or logo.mode ~= mode then
+        compute_logo(w, h, label, mode); LB.label = label
     end
     if not logo then return end
 
     -- Mute the whole screensaver while a briefing speaks; restore after.
-    if active and not briefing_muted then
-        saved_volume = mp.get_property_number("volume") or saved_volume
-        mp.set_property_number("volume", 0); briefing_muted = true
-    elseif not active and briefing_muted then
-        mp.set_property_number("volume", saved_volume or 70); briefing_muted = false
-        briefing_spoke_once = false
+    if active and not LB.muted then
+        LB.vol = mp.get_property_number("volume") or LB.vol
+        mp.set_property_number("volume", 0); LB.muted = true
+    elseif not active and LB.muted then
+        mp.set_property_number("volume", LB.vol or 70); LB.muted = false
+        LB.spoke = false
     end
 
     -- City headline shares the bottom-center with the captions: hide it while a
     -- briefing runs, and bring it back (re-animated) once the briefing ends.
-    if active and not brief_city_hidden then
-        brief_city_hidden = true; main_shown = nil
+    if active and not LB.city_hidden then
+        LB.city_hidden = true; main_shown = nil
         lm_gen = lm_gen + 1; landmark_ov:remove()
-    elseif not active and brief_city_hidden then
-        brief_city_hidden = false
+    elseif not active and LB.city_hidden then
+        LB.city_hidden = false
         if last_city and last_city.city ~= "" then
             main_shown = last_city.city
             animate_landmark(last_city.city, last_city.cx, last_city.by,
@@ -2263,8 +2405,8 @@ local function logo_tick()
     if f then f:close() end
     s = s:gsub("%s+$", "")
     local speaking = (s ~= "" and s ~= "__HIDE__")
-    if speaking then briefing_spoke_once = true; briefing_preparing = false end
-    local show_ready = (briefing_preparing or active) and not briefing_spoke_once and not speaking
+    if speaking then LB.spoke = true; briefing_preparing = false end
+    local show_ready = (briefing_preparing or active) and not LB.spoke and not speaking
     if show_ready and (active or mp.get_time() - prepare_t0 <= 90) then
         local fs = math.floor(h * 0.024)
         logo_text_ov.res_x = w; logo_text_ov.res_y = h
