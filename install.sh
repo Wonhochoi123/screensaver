@@ -79,6 +79,15 @@ fi
 mkdir -p "$CFG" "$MEDIA_DIR" "$RES_DIR" "$RES_DIR/geo" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
          "$HOME/.config/autostart" "$HOME/.local/share/applications" "$FONT_DIR"
 
+# Music split: the slideshow plays Music/ScreenSaver, the briefing's bgm lives
+# in Music/GrokMorning. Move any loose tracks sitting directly in Music/ into
+# ScreenSaver/ (one-time), leaving these two subfolders.
+mkdir -p "$MUSIC_DIR/ScreenSaver" "$MUSIC_DIR/GrokMorning"
+find "$MUSIC_DIR" -maxdepth 1 -type f \
+    \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.ogg' \
+       -o -iname '*.opus' -o -iname '*.wav' -o -iname '*.aac' \) \
+    -exec mv {} "$MUSIC_DIR/ScreenSaver/" \; 2>/dev/null || true
+
 if [ -d "$BASE_DIR/_map" ]; then
     mv "$BASE_DIR/_map"/* "$RES_DIR/" 2>/dev/null || true
     rm -rf "$BASE_DIR/_map"
@@ -187,11 +196,32 @@ fi
 echo "▶ Installing config and app files..."
 
 # config/  → $CFG
-copy_file config/screensaver.conf "$CFG/screensaver.conf" 0644
+# screensaver.conf: on a FRESH install, lay it down. On an EXISTING install,
+# keep every value the user has edited and only APPEND keys they don't have yet
+# — so updates never clobber tunables (sleep hours, HUD sizes, …).
+if [ -f "$CFG/screensaver.conf" ]; then
+    _added=""
+    while IFS= read -r _line; do
+        case "$_line" in
+            export\ *=*)
+                _k="${_line#export }"; _k="${_k%%=*}"
+                grep -qE "^[[:space:]]*export[[:space:]]+${_k}=" "$CFG/screensaver.conf" \
+                    || _added="${_added}${_line}"$'\n'
+                ;;
+        esac
+    done < "$SRC/config/screensaver.conf"
+    if [ -n "$_added" ]; then
+        printf '\n# --- new settings added by an update (see config/screensaver.conf in the repo for docs) ---\n%s' "$_added" >> "$CFG/screensaver.conf"
+        echo "▶ Kept your screensaver.conf and appended new keys."
+    fi
+else
+    copy_file config/screensaver.conf "$CFG/screensaver.conf" 0644
+fi
 copy_file config/input.conf       "$CFG/input.conf"       0644
 sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket path
 copy_file config/photo.lua        "$CFG/photo.lua"        0644
 copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
+copy_file config/grok-briefing.sh "$CFG/grok-briefing.sh" 0755
 copy_file config/build-minimap.sh "$CFG/build-minimap.sh" 0755
 copy_file config/build-thumb.sh   "$CFG/build-thumb.sh"   0755
 copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755

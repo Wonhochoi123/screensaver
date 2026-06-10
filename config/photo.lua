@@ -107,6 +107,7 @@ local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (track)
 local top_bar_ov     = mp.create_osd_overlay("ass-events")  -- global progress, played
 local top_bar_bg_ov  = mp.create_osd_overlay("ass-events")  -- global progress, month sections
 local top_label_ov   = mp.create_osd_overlay("ass-events")  -- hovered month label
+local briefing_ov    = mp.create_osd_overlay("ass-events")  -- morning-briefing subtitles
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Shared progress-bar styling: a translucent light-gray track with a
@@ -1492,6 +1493,7 @@ mp.register_event("shutdown", function()
     top_bar_ov:remove()
     top_bar_bg_ov:remove()
     top_label_ov:remove()
+    briefing_ov:remove()
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1818,6 +1820,74 @@ mp.observe_property("mouse-pos", "native", function(_, mpos)
     if not mpos then return end
     local hv = gp_section_at(mpos.x, mpos.y)
     if hv ~= gp_hover then gp_hover = hv; draw_top_bar() end
+end)
+
+-- ----------------------------------------------------------------------------
+-- Morning briefing (xAI Grok) — subtitles + key controls.
+--   grok-briefing.sh writes the current line to /tmp/ss_briefing.txt (or
+--   "__HIDE__"); we render it centered near the bottom. Controls are sent here
+--   from input.conf and forwarded to the briefing process by signal — all of
+--   it is inert (no PID file) when no briefing is running.
+-- ----------------------------------------------------------------------------
+local BRIEF_TXT = "/tmp/ss_briefing.txt"
+local briefing_subs_hidden = false
+local briefing_paused = false
+local briefing_shown = nil
+
+local function briefing_wrap(s, maxc)
+    local lines, line = {}, ""
+    for word in s:gmatch("%S+") do
+        if line ~= "" and #line + #word + 1 > maxc then
+            lines[#lines + 1] = line; line = word
+        else
+            line = (line == "") and word or (line .. " " .. word)
+        end
+    end
+    if line ~= "" then lines[#lines + 1] = line end
+    return table.concat(lines, "\\N")
+end
+
+local function draw_briefing()
+    local f = io.open(BRIEF_TXT, "r")
+    local txt = f and (f:read("*a") or "") or ""
+    if f then f:close() end
+    txt = txt:gsub("%s+$", "")
+    if txt == briefing_shown then return end          -- only redraw on change
+    if txt ~= "" and txt ~= "__HIDE__" then briefing_paused = false end  -- new segment
+    briefing_shown = txt
+    if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
+        briefing_ov:remove(); return
+    end
+    local w, h = refresh_display_size()
+    local fs   = math.floor(h * 0.034)
+    local maxc = math.max(20, math.floor((w * 0.66) / (fs * 0.5)))
+    local wrapped = briefing_wrap(txt:gsub("[\r\n]+", " "), maxc)
+    briefing_ov.res_x = w; briefing_ov.res_y = h
+    briefing_ov.data = string.format(
+        "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&\\alpha&H10&"
+        .. "\\bord%d\\blur%d\\shad0\\3c&H000000&\\4c&H000000&}%s",
+        math.floor(w / 2), h - math.floor(h * 0.10), fs, math.floor(fs * 0.02 + 0.5),
+        math.max(2, math.floor(fs * 0.08 + 0.5)), math.max(2, math.floor(fs * 0.14 + 0.5)), wrapped)
+    briefing_ov:update()
+end
+mp.add_periodic_timer(0.3, draw_briefing)
+
+-- Forward a signal to the briefing process (skip / previous).
+local function briefing_sig(sig)
+    mp.commandv("run", "/bin/sh", "-c",
+        'p=$(cat /tmp/ss_briefing.pid 2>/dev/null); [ -n "$p" ] && kill -' .. sig .. ' "$p" 2>/dev/null')
+end
+mp.register_script_message("ss-briefing-skip", function() briefing_sig("USR1") end)
+mp.register_script_message("ss-briefing-prev", function() briefing_sig("USR2") end)
+mp.register_script_message("ss-briefing-pause", function()   -- suspend/resume the ffplay process
+    briefing_paused = not briefing_paused
+    local s = briefing_paused and "STOP" or "CONT"
+    mp.commandv("run", "/bin/sh", "-c",
+        'p=$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null); [ -n "$p" ] && kill -' .. s .. ' "$p" 2>/dev/null')
+end)
+mp.register_script_message("ss-briefing-subs", function()
+    briefing_subs_hidden = not briefing_subs_hidden
+    briefing_shown = nil; draw_briefing()
 end)
 
 -- ----------------------------------------------------------------------------

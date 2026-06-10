@@ -6,7 +6,8 @@ SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$SS_CONF" 2>/dev/null || { echo "Screensaver: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 # --- Self-healing: recreate any folder that was deleted ----------------------
-mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$RES_DIR" "$RES_DIR/geo" "$OPT_DIR" "$FONT_DIR"
+mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$MUSIC_DIR/ScreenSaver" "$MUSIC_DIR/GrokMorning" \
+         "$TITLE_DIR" "$PLAYLIST_DIR" "$RES_DIR" "$RES_DIR/geo" "$OPT_DIR" "$FONT_DIR"
 
 # Sweep away half-written title cards left behind by an interrupted build
 # (build-title.sh renames a "<card>.part.<pid>.mp4" into place; a kill leaves it).
@@ -34,6 +35,7 @@ MUSIC_PID=""
 POLICE_PID=""
 VID_PID=""
 MPV_LOAD_PID=""
+GROK_PID=""
 LOAD_SOCK=""
 
 cleanup() {
@@ -41,7 +43,10 @@ cleanup() {
     [ -n "$POLICE_PID" ]   && kill "$POLICE_PID" 2>/dev/null
     [ -n "$VID_PID" ]      && kill "$VID_PID" 2>/dev/null
     [ -n "$MPV_LOAD_PID" ] && kill "$MPV_LOAD_PID" 2>/dev/null
-    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}"
+    [ -n "$GROK_PID" ]     && kill "$GROK_PID" 2>/dev/null
+    [ -f /tmp/ss_briefing_ffplay.pid ] && kill "$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null)" 2>/dev/null
+    [ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
+    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}" /tmp/ss_briefing.txt /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid
 }
 trap cleanup EXIT INT TERM
 
@@ -53,10 +58,19 @@ POLICE_PID=$!
 "$APP_DIR/vid-daemon.sh" >/dev/null 2>&1 &
 VID_PID=$!
 
-if [ -d "$MUSIC_DIR" ] && [ -n "$(ls -A "$MUSIC_DIR" 2>/dev/null)" ]; then
-    mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" "$MUSIC_DIR" >/dev/null 2>&1 &
+# Slideshow music plays from Music/ScreenSaver (Music/GrokMorning is the
+# briefing's own bgm); fall back to the whole Music folder if that's empty.
+SS_MUSIC="$MUSIC_DIR/ScreenSaver"
+[ -n "$(ls -A "$SS_MUSIC" 2>/dev/null)" ] || SS_MUSIC="$MUSIC_DIR"
+if [ -d "$SS_MUSIC" ] && [ -n "$(ls -A "$SS_MUSIC" 2>/dev/null)" ]; then
+    mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" "$SS_MUSIC" >/dev/null 2>&1 &
     MUSIC_PID=$!
 fi
+
+# Morning briefing scheduler (exits immediately + silently unless enabled with
+# a valid XAI key; see GROK_* in screensaver.conf).
+"$CFG_DIR/grok-briefing.sh" --watch >/dev/null 2>&1 &
+GROK_PID=$!
 
 # =============================================================================
 # CHRONOLOGICAL PLAYLIST BUILDER  (sidecar-driven, rebuilt every launch)
