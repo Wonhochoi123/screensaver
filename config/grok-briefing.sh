@@ -42,6 +42,7 @@ PID_FILE="/tmp/ss_briefing.pid"
 FFPLAY_PID_FILE="/tmp/ss_briefing_ffplay.pid"
 BGM_TXT="/tmp/ss_briefing_bgm.txt"       # "Title - Artist" of the bgm (for the marquee)
 BGM_PATH_FILE="/tmp/ss_briefing_bgm_path"  # the bgm file path (for the cover thumb)
+BGM_SOCK="/tmp/ss_bgm.sock"              # bgm's own mpv IPC socket (for fading)
 SPEAK_DELAY="${GROK_SPEAK_DELAY:-5}"     # seconds of music before the first words
 SECTION_GAP="${GROK_SECTION_GAP:-2}"     # seconds of music between segments
 API="https://api.x.ai/v1"
@@ -52,7 +53,7 @@ mkdir -p "$TODAY_CACHE" 2>/dev/null
 gate_ok() {
     [ "${GROK_BRIEFING:-0}" = "1" ] || return 1
     [ -n "$API_KEY" ] || return 1
-    for c in jq curl ffplay ffmpeg socat; do command -v "$c" >/dev/null 2>&1 || return 1; done
+    for c in jq curl ffplay ffmpeg socat mpv; do command -v "$c" >/dev/null 2>&1 || return 1; done
     return 0
 }
 
@@ -139,15 +140,43 @@ ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
 sub_show()  { printf '%s' "$1" > "$SUB_FILE"; }
 sub_hide()  { printf '__HIDE__'  > "$SUB_FILE"; }
 
-CUR_FFPLAY=""; BGM_PID=""; PREP_BG=""; SKIP=0; STEP=1
+# --- soft volume fades over an mpv IPC socket --------------------------------
+jsock()   { printf '%s\n' "$2" | socat -t1 - "UNIX-CONNECT:$1" 2>/dev/null; }
+get_vol() { jsock "$1" '{"command":["get_property","volume"]}' \
+    | sed -n 's/.*"data":\([0-9.][0-9.]*\).*/\1/p' | head -1; }
+set_vol() { jsock "$1" "{\"command\":[\"set_property\",\"volume\",$2]}" >/dev/null 2>&1; }
+fade_vol() {  # sock from to seconds
+    local sock="$1" from="$2" to="$3" secs="$4" steps=20 i v st
+    st="$(awk "BEGIN{print $secs/$steps}")"
+    for i in $(seq 1 "$steps"); do
+        v="$(awk "BEGIN{printf \"%.1f\", $from + ($to-$from)*$i/$steps}")"
+        set_vol "$sock" "$v"; sleep "$st"
+    done
+}
+FADE_IN="${GROK_FADE_IN:-1.2}"      # soft-drop of the slideshow music on entry
+FADE_OUT="${GROK_FADE_OUT:-2.5}"    # longer soft-drop of the bgm on exit
+FADE_RESUME="${GROK_FADE_RESUME:-2.0}"  # soft resume of the slideshow music
+
+CUR_FFPLAY=""; BGM_PID=""; PREP_BG=""; SKIP=0; STEP=1; ENDED=0; SS_VOL=""
 on_skip() { SKIP=1; STEP=1;  [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }; }
 on_prev() { SKIP=1; STEP=-1; [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }; }
 end_play() {
+    [ "$ENDED" = 1 ] && exit 0; ENDED=1     # runs once (called directly + via EXIT trap)
     [ -n "$CUR_FFPLAY" ] && { kill -CONT "$CUR_FFPLAY" 2>/dev/null; kill "$CUR_FFPLAY" 2>/dev/null; }
-    [ -n "$BGM_PID" ] && kill "$BGM_PID" 2>/dev/null
     [ -n "$PREP_BG" ] && kill "$PREP_BG" 2>/dev/null    # stop background generation
-    sub_hide; rm -f "$PID_FILE" "$FFPLAY_PID_FILE" "$BGM_TXT" "$BGM_PATH_FILE"
-    ss_music_pause false        # resume the slideshow's own music
+    sub_hide
+    # Longer soft-drop of the grokmorning music, then stop it.
+    if [ -n "$BGM_PID" ]; then
+        fade_vol "$BGM_SOCK" "$GBGM_VOL" 0 "$FADE_OUT"
+        jsock "$BGM_SOCK" '{"command":["quit"]}' >/dev/null 2>&1
+        kill "$BGM_PID" 2>/dev/null
+    fi
+    rm -f "$PID_FILE" "$FFPLAY_PID_FILE" "$BGM_TXT" "$BGM_PATH_FILE" "$BGM_SOCK"
+    # Soft RESUME of the slideshow's own music (start silent, unpause, fade up).
+    [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
+    set_vol "$AUDIO_SOCK" 0
+    ss_music_pause false
+    fade_vol "$AUDIO_SOCK" 0 "$SS_VOL" "$FADE_RESUME"
     exit 0
 }
 
@@ -177,13 +206,20 @@ play() {
     trap on_prev SIGUSR2
     trap end_play SIGTERM SIGINT EXIT
 
-    ss_music_pause true          # duck the slideshow music
+    # Soft-drop the slideshow's own music, then pause it (remember its volume to
+    # restore on the way out).
+    SS_VOL="$(get_vol "$AUDIO_SOCK")"; [ -n "$SS_VOL" ] || SS_VOL="$VOLUME"
+    fade_vol "$AUDIO_SOCK" "$SS_VOL" 0 "$FADE_IN"
+    ss_music_pause true
 
-    # GrokMorning background music (random track, looped quietly) if any exist
+    # GrokMorning bgm via its own mpv (looped) so we can fade it out later. It
+    # starts straight at volume — no soft start needed.
     if [ -d "$GBGM_DIR" ] && [ -n "$(ls -A "$GBGM_DIR" 2>/dev/null)" ]; then
         local bgm; bgm="$(find "$GBGM_DIR" -maxdepth 1 -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.wav' \) 2>/dev/null | shuf -n1)"
         if [ -n "$bgm" ]; then
-            ffplay -nodisp -autoexit -loglevel quiet -loop 0 -volume "$GBGM_VOL" "$bgm" >/dev/null 2>&1 & BGM_PID=$!
+            rm -f "$BGM_SOCK"
+            mpv --no-config --no-video --no-terminal --idle=no --loop-file=inf \
+                --volume="$GBGM_VOL" --input-ipc-server="$BGM_SOCK" "$bgm" >/dev/null 2>&1 & BGM_PID=$!
             # Publish what's playing so the slideshow's music marquee can show it.
             local bt ba disp
             bt="$(ffprobe -v quiet -show_entries format_tags=title  -of default=nw=1:nk=1 "$bgm" 2>/dev/null | head -1)"
@@ -273,7 +309,7 @@ check() {
         || echo "  [SKIP] GROK_BRIEFING=${GROK_BRIEFING:-unset} — set it to 1 to enable"
     [ -n "$API_KEY" ] && echo "  [ok]   XAI_API_KEY present (${#API_KEY} chars)" \
         || echo "  [FAIL] XAI_API_KEY not found — add 'export XAI_API_KEY=...' to ~/.profile"
-    for c in jq curl ffplay ffmpeg socat; do
+    for c in jq curl ffplay ffmpeg socat mpv; do
         command -v "$c" >/dev/null 2>&1 && echo "  [ok]   $c" || echo "  [FAIL] $c not installed"
     done
     echo "  time:  GROK_TIME=$GROK_TIME  now=$(date '+%H:%M')  (pre-generates ~5 min before)"

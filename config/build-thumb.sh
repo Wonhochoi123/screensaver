@@ -22,7 +22,7 @@ if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
 
 MTIME="$(stat -c '%Y' "$FILE" 2>/dev/null || echo 0)"
 # Bump the version tag whenever the rendering changes, to bust stale caches.
-KEY="$(printf '%s|%s|v2|%s' "$FILE" "$SIZE" "$MTIME" | md5sum | cut -d' ' -f1)"
+KEY="$(printf '%s|%s|v3|%s' "$FILE" "$SIZE" "$MTIME" | md5sum | cut -d' ' -f1)"
 OUT="$RES_DIR/thumbs/$KEY"
 
 prune_cache() {   # keep only the 30 most-recently-used thumbs
@@ -52,7 +52,7 @@ mkdir -p "$OUT.part"
 # render ABOVE the ASS overlays, so the ring must live in the bitmap to frame
 # the art). `-alpha set` forces an alpha channel so DstIn actually makes the
 # corners transparent (covers stay opaque RGB otherwise → square thumb).
-RW=$(( SIZE / 18 )); [ "$RW" -lt 2 ] && RW=2     # ring thickness ≈ 5–6%
+RW=$(( SIZE / 32 )); [ "$RW" -lt 1 ] && RW=1     # thin ring (≈3%)
 RING=( -fill none -stroke "#C8C8C8" -strokewidth "$RW" -draw "circle $R,$R $R,$(( RW / 2 ))" )
 $IM "$TMP/sq.png" -alpha set "$TMP/mask.png" -compose DstIn -composite \
     "${RING[@]}" -depth 8 "bgra:$OUT.part/color.bgra" || exit 4

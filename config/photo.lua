@@ -181,10 +181,11 @@ local logo                    -- briefing logo geometry {x,y,w,h,...}; drawn, no
 local logo_hit                -- hit-test for the logo plaque (forward; defined later)
 local logo_menu_hit           -- hit-test for the Replay/Refresh menu (forward)
 local controls_hit            -- hit-test for the transport buttons (forward)
-local logo_menu_open = false  -- the Replay/Refresh chooser is showing
+-- Badge/menu click state in one table (Lua caps main-chunk locals at 200).
+-- menu_open = pinned open by a click; menu_vis = on screen (hover or pinned);
+-- preparing = between a click and the first spoken line; t0 = when preparing began.
+local BD = { menu_open = false, menu_vis = false, preparing = false, t0 = 0 }
 local briefing_active         -- is a briefing process running? (forward)
-local briefing_preparing = false  -- between logo click and the briefing speaking
-local prepare_t0 = 0
 local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
 local last_city    = nil       -- {city,cx,by,fs,fsp,ww,wh} — to re-show after a briefing
@@ -814,26 +815,24 @@ end)
 mp.register_script_message("handle-left-click", function()
     local mouse = mp.get_property_native("mouse-pos")
 
-    -- Morning-briefing logo (center-top). While a briefing is speaking it shows a
-    -- transport row (prev / pause / next / stop); otherwise clicking the logo opens
-    -- a Replay / Refresh chooser.
+    -- Morning-briefing badge (center-top). While speaking it shows a transport row
+    -- (prev / pause / next / stop). Otherwise the Replay/Refresh chooser appears on
+    -- hover (or when pinned by a click) — clicking a button runs it.
     if mouse then
         local active = briefing_active and briefing_active()
         if active then
             local act = controls_hit and controls_hit(mouse.x, mouse.y)
             if act then act(); return end
         else
-            if logo_menu_open then
+            if BD.menu_vis then
                 local act = logo_menu_hit and logo_menu_hit(mouse.x, mouse.y)
-                if act then act(); logo_menu_open = false; return end
-                if not (logo_hit and logo_hit(mouse.x, mouse.y)) then
-                    logo_menu_open = false; return    -- click outside closes it
-                end
+                if act then act(); BD.menu_open = false; return end
             end
             if logo_hit and logo_hit(mouse.x, mouse.y) then
-                logo_menu_open = not logo_menu_open
+                BD.menu_open = not BD.menu_open    -- pin/unpin (works without hover)
                 return
             end
+            if BD.menu_open then BD.menu_open = false; return end  -- click away unpins
         end
     end
 
@@ -1420,7 +1419,7 @@ function draw_thumb_ring()
     music_thumb_ov.res_x = t.W; music_thumb_ov.res_y = t.H
     music_thumb_ov.data = string.format(
         "{\\an7\\pos(0,0)\\p1\\1a&HFF&\\bord%d\\3c&HC8C8C8&\\3a&H00&\\shad0}%s{\\p0}",
-        math.max(1, math.floor(t.d * 0.03 + 0.5)), ass_circle(t.cx, t.cy, t.r))
+        math.max(1, math.floor(t.d * 0.018 + 0.5)), ass_circle(t.cx, t.cy, t.r))
     music_thumb_ov:update()
 end
 
@@ -2198,6 +2197,23 @@ local function sun_path(cx, cy, r)      -- a filled disc ringed by 8 rays
     return table.concat(p, " ")
 end
 
+-- A crescent moon: a full disc with an offset, opposite-wound disc punched out
+-- (opposite winding leaves a hole).
+local function moon_path(cx, cy, r)
+    local f, N = math.floor, 24
+    local function disc(dx, dy, dr, ccw)
+        local p = {}
+        for i = 0, N do
+            local a = ((ccw and (N - i) or i) / N) * 2 * math.pi
+            p[#p + 1] = string.format("%s %d %d", (i == 0) and "m" or "l",
+                f(dx + dr * math.cos(a) + 0.5), f(dy + dr * math.sin(a) + 0.5))
+        end
+        return table.concat(p, " ")
+    end
+    return disc(cx, cy, r, false) .. " "
+        .. disc(cx + f(r * 0.55), cy - f(r * 0.12), f(r * 0.82), true)
+end
+
 local function rect_path(x0, y0, x1, y1)
     return string.format("m %d %d l %d %d %d %d %d %d", x0, y0, x1, y0, x1, y1, x0, y1)
 end
@@ -2229,7 +2245,7 @@ local function compute_logo(w, h, label, mode)
         local fs = math.floor(h * 0.045)
         local tw = math.floor(#label * fs * 0.56)
         local LH = math.floor(fs * 1.25)
-        logo = { mode = "clock", x = math.floor((w - tw) / 2), y = math.floor(h * 0.03),
+        logo = { mode = "clock", x = math.floor((w - tw) / 2), y = math.floor(h * 0.05),
                  w = tw, h = LH, fs = fs, fsp = math.floor(fs * 0.04 + 0.5),
                  text = label, W = w, H = h }
         return
@@ -2242,9 +2258,23 @@ local function compute_logo(w, h, label, mode)
     local sw  = math.floor(LH * 0.95)
     local gap = math.floor(LH * 0.32)
     local LW  = pad + sw + gap + tw + pad
-    logo = { mode = "brief", x = math.floor((w - LW) / 2), y = math.floor(h * 0.025),
+    logo = { mode = "brief", x = math.floor((w - LW) / 2), y = math.floor(h * 0.045),
              w = LW, h = LH, fs = fs, fsp = fsp, text = label,
              pad = pad, sun_w = sw, gap = gap, W = w, H = h }
+end
+
+-- Badge theme by time of day: icon (sun/moon) + colours (ASS BGR).
+local function brief_theme()
+    local hr = tonumber(os.date("%H")) or 0
+    if hr >= 5 and hr < 12 then        -- morning: warm gold sun
+        return { icon = "sun",  sun = "&H3FC0FF&", bord = "&H4FB8E8&", plaque = "&H120E0A&" }
+    elseif hr >= 12 and hr < 17 then   -- afternoon: bright yellow sun, sky-blue trim
+        return { icon = "sun",  sun = "&H4FE0FF&", bord = "&HF0C87E&", plaque = "&H1A1408&" }
+    elseif hr >= 17 and hr < 21 then   -- evening: sunset orange, coral trim
+        return { icon = "sun",  sun = "&H3F7AFF&", bord = "&H6E9EFF&", plaque = "&H140A12&" }
+    else                               -- night: silver moon, purple trim
+        return { icon = "moon", sun = "&HFFD0BF&", bord = "&HE87A9E&", plaque = "&H120A14&" }
+    end
 end
 
 local function draw_logo(show)
@@ -2260,16 +2290,18 @@ local function draw_logo(show)
         logo_ov:update()
         return
     end
+    local th = brief_theme()
     local cx = L.x + L.pad + math.floor(L.sun_w / 2)
     local cy = L.y + math.floor(L.h / 2)
     local r  = math.floor(L.h * 0.19)
     local tx = L.x + L.pad + L.sun_w + L.gap
     local rad = math.floor(L.h * 0.30)
+    local icon = (th.icon == "moon") and moon_path(cx, cy, r) or sun_path(cx, cy, r)
     logo_ov.res_x = L.W; logo_ov.res_y = L.H
     logo_ov.data = table.concat({
-        "{\\an7\\pos(0,0)\\bord2\\shad0\\1c&H120E0A&\\1a&H2A&\\3c&H4FB8E8&\\3a&H20&\\p1}"
-            .. rrect_path(L.x, L.y, L.w, L.h, rad) .. "{\\p0}",
-        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H3FC0FF&\\p1}" .. sun_path(cx, cy, r) .. "{\\p0}",
+        "{\\an7\\pos(0,0)\\bord2\\shad0\\1c" .. th.plaque .. "\\1a&H2A&\\3c" .. th.bord
+            .. "\\3a&H20&\\p1}" .. rrect_path(L.x, L.y, L.w, L.h, rad) .. "{\\p0}",
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c" .. th.sun .. "\\p1}" .. icon .. "{\\p0}",
         string.format("{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0"
             .. "\\shad1\\4c&H000000&\\4a&H60&\\1c&HFFFFFF&}%s", tx, cy, L.fs, L.fsp, L.text),
     }, "\n")
@@ -2342,7 +2374,7 @@ local function draw_menu()
         menu_boxes[#menu_boxes + 1] = { x0 = x0, y0 = y0, x1 = x1, y1 = y1,
             act = (function(mode) return function()
                 mp.commandv("run", CFG_DIR .. "/grok-briefing.sh", mode)
-                briefing_preparing = true; prepare_t0 = mp.get_time(); LB.spoke = false
+                BD.preparing = true; BD.t0 = mp.get_time(); LB.spoke = false
             end end)(d.mode) }
         cursor = cursor + bw + g
     end
@@ -2377,7 +2409,7 @@ local function logo_tick()
     -- The badge shows the live clock when idle; it flips to the framed "<time of
     -- day> BRIEFING" badge (sun + click target) when the mouse is near it, the
     -- chooser menu is open, or a briefing is preparing/speaking.
-    local brief = active or briefing_preparing or logo_menu_open or LB.near
+    local brief = active or BD.preparing or BD.menu_open or LB.near
     local mode  = brief and "brief" or "clock"
     local label = brief and tod_briefing_label() or os.date("%I:%M %p"):gsub("^0", "")
     if not logo or logo.W ~= w or logo.H ~= h or label ~= LB.label or logo.mode ~= mode then
@@ -2408,14 +2440,20 @@ local function logo_tick()
         end
     end
 
-    -- The badge is always visible (a clock); under it goes transport (speaking),
-    -- the Replay/Refresh chooser, or nothing.
+    -- The badge is always visible (clock when idle). Under it: transport while
+    -- speaking; the Replay/Refresh chooser when the mouse is near (or the menu was
+    -- clicked open); nothing while preparing or fully idle.
     if active then
-        logo_menu_open = false
+        BD.menu_open = false; BD.menu_vis = false
         draw_logo(true); draw_controls(); menu_boxes = {}
-    elseif logo_menu_open then
+    elseif BD.preparing then
+        BD.menu_vis = false
+        draw_logo(true); controls_ov:remove(); control_boxes = {}; menu_boxes = {}
+    elseif LB.near or BD.menu_open then
+        BD.menu_vis = true
         draw_logo(true); draw_menu(); control_boxes = {}
     else
+        BD.menu_vis = false
         draw_logo(true)
         controls_ov:remove(); control_boxes = {}; menu_boxes = {}
     end
@@ -2427,9 +2465,9 @@ local function logo_tick()
     if f then f:close() end
     s = s:gsub("%s+$", "")
     local speaking = (s ~= "" and s ~= "__HIDE__")
-    if speaking then LB.spoke = true; briefing_preparing = false end
-    local show_ready = (briefing_preparing or active) and not LB.spoke and not speaking
-    if show_ready and (active or mp.get_time() - prepare_t0 <= 90) then
+    if speaking then LB.spoke = true; BD.preparing = false end
+    local show_ready = (BD.preparing or active) and not LB.spoke and not speaking
+    if show_ready and (active or mp.get_time() - BD.t0 <= 90) then
         local fs = math.floor(h * 0.024)
         logo_text_ov.res_x = w; logo_text_ov.res_y = h
         logo_text_ov.data = string.format(
@@ -2438,7 +2476,7 @@ local function logo_tick()
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
         logo_text_ov:update()
     else
-        if not active then briefing_preparing = false end
+        if not active then BD.preparing = false end
         logo_text_ov:remove()
     end
 end
