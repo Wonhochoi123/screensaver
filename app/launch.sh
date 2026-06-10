@@ -152,6 +152,21 @@ _ss_load_msg() {
 # Ask photo.lua to show the loading overlay with a context-specific message.
 _ss_load_msg "$_SS_TITLE" "$_SS_SUB"
 
+# Capture the REAL screen size straight from the running (fullscreen) mpv and
+# record it, so the build below — title cards especially — renders at the true
+# resolution/aspect on the very first run too, never a hardcoded 1080p.
+_w=0
+while [ $_w -lt 30 ]; do
+    _dw="$(printf '{"command":["get_property","display-width"]}\n' | socat -t1 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null | grep -o '"data":[0-9]\+' | grep -o '[0-9]\+' | head -1)"
+    _dh="$(printf '{"command":["get_property","display-height"]}\n' | socat -t1 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null | grep -o '"data":[0-9]\+' | grep -o '[0-9]\+' | head -1)"
+    if [ -n "${_dw:-}" ] && [ -n "${_dh:-}" ] && [ "$_dw" -ge 320 ] && [ "$_dh" -ge 320 ]; then
+        printf '%sx%s' "$_dw" "$_dh" > "$APP_DIR/display.conf"
+        _SS_W="$_dw"; _SS_H="$_dh"
+        break
+    fi
+    sleep 0.1; _w=$((_w+1))
+done
+
 _ss_load_msg "$_SS_TITLE" "Reading photo metadata..."
 "$POLICE" --once
 

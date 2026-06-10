@@ -42,9 +42,7 @@ local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
 local DEFAULT_ZIDX = 1
 
 local ov       = mp.create_osd_overlay("ass-events")
-local pause_ov = mp.create_osd_overlay("ass-events")
-pause_ov.res_x = 1920
-pause_ov.res_y = 1080
+local pause_ov = mp.create_osd_overlay("ass-events")  -- res set per-draw from the real display
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
 local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
@@ -140,6 +138,17 @@ local cur       = { seq = 0, path = nil, orig = nil, lat = nil, lon = nil, mdir 
 local MONTHS = {jan=1,feb=2,mar=3,apr=4,may=5,jun=6,jul=7,aug=8,sep=9,oct=10,nov=11,dec=12}
 
 local DISPLAY_W, DISPLAY_H = nil, nil
+-- Seed from the last-known ACTUAL resolution (written to display.conf on every
+-- run) so even the first frame uses the real screen shape, never a guessed
+-- ratio. mpv's real size overrides this the moment it is known.
+do
+    local f = io.open(APP_DIR .. "/display.conf", "r")
+    if f then
+        local s = f:read("*a") or ""; f:close()
+        local dw, dh = s:match("(%d+)x(%d+)")
+        if dw and dh then DISPLAY_W, DISPLAY_H = tonumber(dw), tonumber(dh) end
+    end
+end
 local BLUR_W, BLUR_H, BLUR_ROT = nil, nil, nil
 
 local function refresh_display_size()
@@ -655,10 +664,25 @@ end
 
 local function set_pause_indicator(paused)
     if paused then
-        pause_ov.data =
+        -- Two vertical bars in the top-right, sized/placed as fractions of the
+        -- ACTUAL display — adapts to any resolution or aspect ratio.
+        local w, h = refresh_display_size()
+        pause_ov.res_x = w; pause_ov.res_y = h
+        local bw    = math.floor(h * 0.018)    -- bar width
+        local bh    = math.floor(h * 0.054)    -- bar height
+        local gap   = math.floor(h * 0.015)    -- gap between the two bars
+        local right = math.floor(w * 0.025)    -- inset from the right edge
+        local y0    = math.floor(h * 0.06)     -- inset from the top
+        local y1    = y0 + bh
+        local x2    = w - right                 -- right bar's right edge
+        local x1L   = x2 - bw                    -- right bar's left edge
+        local x0L   = x1L - gap - bw             -- left bar's left edge
+        pause_ov.data = string.format(
             "{\\an7\\pos(0,0)\\bord0\\shad4\\3c&H000000&\\4c&H000000&\\1c&HFFFFFF&\\alpha&H40&\\p1}"
-            .. "m 1772 70 l 1792 70 l 1792 128 l 1772 128 "
-            .. "m 1808 70 l 1828 70 l 1828 128 l 1808 128{\\p0}"
+            .. "m %d %d l %d %d l %d %d l %d %d "
+            .. "m %d %d l %d %d l %d %d l %d %d{\\p0}",
+            x0L, y0, x0L + bw, y0, x0L + bw, y1, x0L, y1,
+            x1L, y0, x1L + bw, y0, x1L + bw, y1, x1L, y1)
         pause_ov:update()
     else
         pause_ov:remove()
