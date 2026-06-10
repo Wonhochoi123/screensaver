@@ -19,6 +19,7 @@ local RES_DIR    = env("RES_DIR",    DATA_DIR .. "/HudResources")
 
 local builder    = CFG_DIR .. "/build-minimap.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
+local BGM_SOCK   = "/tmp/ss_bgm.sock"   -- grok-briefing.sh's bgm mpv (matches that script)
 
 -- ============================================================================
 --  CONFIG IS THE SINGLE SOURCE OF TRUTH  →  screensaver.conf
@@ -188,7 +189,6 @@ local BD = { menu_open = false, menu_vis = false, preparing = false, t0 = 0 }
 local briefing_active         -- is a briefing process running? (forward)
 local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
-local last_city    = nil       -- {city,cx,by,fs,fsp,ww,wh} — to re-show after a briefing
 
 -- Strip distracting separators (comma, slash, hyphen, pipe, dot-sep, dashes…)
 -- from display labels, collapsing to single spaces. Used everywhere EXCEPT the
@@ -576,6 +576,7 @@ local function coord_tags(x, y, fs)
 end
 
 local function draw_coord_labels(L, lat, lon)
+    if briefing_active and briefing_active() then qr_coord_ov:remove(); map_coord_ov:remove(); return end
     qr_coord_ov.res_x  = L.win_w; qr_coord_ov.res_y  = L.win_h
     map_coord_ov.res_x = L.win_w; map_coord_ov.res_y = L.win_h
     qr_coord_ov.data  = coord_tags(L.qr_cx,  L.text_cy, L.fs) .. fmt_dms(lat, lon)
@@ -591,11 +592,23 @@ local function clear_hud_osd()
     map_coord_ov:remove()
 end
 
+-- While a briefing is on screen, every HUD except the music block is hidden.
+-- (Music marquee / thumb / bar stay; this clears map, QR, coords, date/region,
+-- city headline and the month bar.)
+local function clear_other_hud()
+    clear_hud_osd()           -- map (2), QR (1), both coord read-outs
+    ov:remove()               -- date / region (top-right)
+    landmark_ov:remove()      -- city headline (bottom-center)
+    top_bar_ov:remove(); top_bar_bg_ov:remove(); top_label_ov:remove()
+end
+
 local function apply_qr(bgra_path, L)
+    if briefing_active and briefing_active() then return end
     mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
 local function apply_minimap(bgra_path, L)
+    if briefing_active and briefing_active() then return end
     mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
@@ -845,15 +858,16 @@ mp.register_script_message("handle-left-click", function()
         end
     end
 
-    -- Click the album-art thumb (left of the marquee) to pause/play the MUSIC
-    -- only (independent of the slideshow). Works even with no cover art (the
-    -- empty ring is still a target).
-    if mouse and thumb and not (briefing_active and briefing_active()) then
+    -- Click the album-art thumb (left of the marquee) to pause/play the MUSIC —
+    -- exactly the same toggle, just aimed at whichever player owns the marquee:
+    -- the slideshow's music normally, or the briefing's bgm during a briefing.
+    if mouse and thumb then
         local dx = mouse.x - thumb.cx
         local dy = mouse.y - thumb.cy
         if dx * dx + dy * dy <= thumb.r * thumb.r then
+            local sock = (briefing_active and briefing_active()) and BGM_SOCK or AUDIO_SOCK
             mp.commandv("run", "/bin/sh", "-c",
-                "printf '%s\\n' '{\"command\":[\"cycle\",\"pause\"]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+                "printf '%s\\n' '{\"command\":[\"cycle\",\"pause\"]}' | socat - UNIX-CONNECT:" .. sock .. " 2>/dev/null")
             return
         end
     end
@@ -1041,6 +1055,7 @@ mp.register_event("file-loaded", function()
     prewarmed[orig_path] = true
 
     if path:find("/TitleCards/") then
+        cur.redraw = nil      -- title cards have no HUD to restore after a briefing
         return
     end
 
@@ -1070,6 +1085,11 @@ mp.register_event("file-loaded", function()
         -- shadow, white, alpha &H40&. Distracting separators are stripped from
         -- every label (the coordinate read-outs keep their punctuation).
         local function draw_text()
+            -- A briefing hides every HUD except the music block.
+            if briefing_active and briefing_active() then
+                ov:remove(); landmark_ov:remove(); main_shown = nil; lm_gen = lm_gen + 1
+                return
+            end
             local L = hud_geom()
             local m_top    = math.floor(L.win_h * 0.04)   -- top inset
             local m_right  = math.floor(L.win_h * 0.02)    -- right inset (matches the map's)
@@ -1109,14 +1129,7 @@ mp.register_event("file-loaded", function()
             local fsp  = math.floor(fs * 0.3636 + 0.5)       -- spacing scales with size
             local cx   = math.floor(L.win_w / 2)
             local by   = L.win_h - m_bottom
-            -- Remember it so the city can re-appear when a briefing ends.
-            last_city = { city = city, cx = cx, by = by, fs = fs, fsp = fsp,
-                          ww = L.win_w, wh = L.win_h }
-            if briefing_active and briefing_active() then
-                main_shown = nil           -- a briefing owns the bottom-center now
-                lm_gen = lm_gen + 1
-                landmark_ov:remove()
-            elseif city == "" then
+            if city == "" then
                 main_shown = nil
                 lm_gen = lm_gen + 1
                 landmark_ov:remove()
@@ -1134,6 +1147,22 @@ mp.register_event("file-loaded", function()
             end
         end
         draw_text()
+
+        -- How to bring this photo's HUD back when a briefing ends (the music HUD
+        -- is untouched; map/QR re-apply from their on-disk caches).
+        cur.redraw = function()
+            if briefing_active and briefing_active() then return end
+            draw_text()
+            if m.lat and m.lon then
+                local L2 = hud_geom()
+                draw_coord_labels(L2, m.lat, m.lon)
+                local z2, c2 = ZOOMS[cur.zidx], RING_COLORS[cur.zidx]
+                local qf = qr_path(mdir, m.lat, m.lon, w, h)
+                local mf = map_path(mdir, z2, m.lat, m.lon, w, h, c2)
+                if file_exists(qf) then apply_qr(qf, L2) end
+                if file_exists(mf) then apply_minimap(mf, L2) end
+            end
+        end
 
         if not (m.lat and m.lon) then
             mp.add_timeout(1.0, start_prewarm)
@@ -1480,10 +1509,22 @@ local last_music_poll = 0
 local music_poll_busy = false
 local function poll_music_pos()
     if not music_shown then return end
-    -- During a briefing the bgm (a separate ffplay) has no position feed; keep the
-    -- thumb in colour and let draw_music_bar hide the bar — don't poll the socket.
+    -- During a briefing the marquee/thumb track the bgm's own mpv: reflect ITS
+    -- pause state (so the thumb greys out when you pause it), and hide the bar
+    -- (a looping bgm has no meaningful position).
     if briefing_active and briefing_active() then
-        music_playing = true; draw_thumb(); draw_music_bar(); return
+        mp.command_native_async({ name = "subprocess", capture_stdout = true, playback_only = false,
+            args = { "/bin/sh", "-c",
+                "printf '%s\\n' '{\"command\":[\"get_property\",\"pause\"]}' "
+                .. "| socat -t1 - UNIX-CONNECT:" .. BGM_SOCK .. " 2>/dev/null" } },
+            function(ok, res)
+                if ok and res and res.stdout then
+                    local j = utils.parse_json(res.stdout)
+                    if j and j.error == "success" then music_playing = (j.data ~= true) end
+                end
+                draw_thumb()
+            end)
+        draw_music_bar(); return
     end
     local now = mp.get_time()
     if music_poll_busy or (now - last_music_poll) < 0.8 then return end
@@ -1907,6 +1948,7 @@ function gp_section_at(mx, my)
 end
 
 local function draw_top_bar()
+    if briefing_active and briefing_active() then top_bar_ov:remove(); top_bar_bg_ov:remove(); top_label_ov:remove(); return end
     if not gp_sections then top_bar_ov:remove(); top_bar_bg_ov:remove(); top_label_ov:remove(); return end
     local w, h, _, th, th_hi = gp_geom()
     local idx = (mp.get_property_number("playlist-pos") or 0) + 1
@@ -2154,7 +2196,7 @@ end)
 local control_boxes    = {}     -- {x0,y0,x1,y1,act} transport buttons (while speaking)
 local menu_boxes       = {}     -- {x0,y0,x1,y1,act} Replay/Refresh chooser
 -- Briefing/badge state (one table to stay under Lua's 200-local cap).
-local LB = { muted = false, vol = nil, spoke = false, city_hidden = false, label = nil, near = false }
+local LB = { muted = false, vol = nil, spoke = false, hud_off = false, label = nil, near = false }
 
 function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
 
@@ -2323,6 +2365,7 @@ local function draw_controls()
         { kind = "next",  msg = "ss-briefing-skip"  },
         { kind = "stop",  msg = "ss-briefing-stop"  },
     }
+    local th = brief_theme()
     local totalw = #defs * bw + (#defs - 1) * g
     local bx = L.x + math.floor((L.w - totalw) / 2)
     local by = L.y + L.h + math.floor(L.h * 0.16)
@@ -2331,8 +2374,8 @@ local function draw_controls()
         local x0 = bx + (i - 1) * (bw + g)
         local x1, y0, y1 = x0 + bw, by, by + bh
         local cx, cy = x0 + math.floor(bw / 2), y0 + math.floor(bh / 2)
-        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord1\\shad0\\1c&H1A1410&\\1a&H22&\\3c&H4FB8E8&\\3a&H40&\\p1}"
-            .. rrect_path(x0, y0, bw, bh, rad) .. "{\\p0}"
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord1\\shad0\\1c" .. th.plaque .. "\\1a&H22&\\3c"
+            .. th.bord .. "\\3a&H40&\\p1}" .. rrect_path(x0, y0, bw, bh, rad) .. "{\\p0}"
         parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\p1}"
             .. icon_path(d.kind, cx, cy, math.floor(bh * 0.23)) .. "{\\p0}"
         control_boxes[#control_boxes + 1] = { x0 = x0, y0 = y0, x1 = x1, y1 = y1,
@@ -2356,6 +2399,7 @@ local function draw_menu()
         { t = "REPLAY",  mode = "--play"  },
         { t = "REFRESH", mode = "--fresh" },
     }
+    local th = brief_theme()
     local bws = {}
     for i, d in ipairs(defs) do bws[i] = math.floor(#d.t * fs * 0.66 + fs * 1.6) end
     local totalw = bws[1] + bws[2] + g
@@ -2366,8 +2410,8 @@ local function draw_menu()
     for i, d in ipairs(defs) do
         local bw = bws[i]
         local x0, x1, y0, y1 = cursor, cursor + bw, by, by + bh
-        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord1\\shad0\\1c&H120E0A&\\1a&H1A&\\3c&H4FB8E8&\\3a&H30&\\p1}"
-            .. rrect_path(x0, y0, bw, bh, rad) .. "{\\p0}"
+        parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord1\\shad0\\1c" .. th.plaque .. "\\1a&H1A&\\3c"
+            .. th.bord .. "\\3a&H30&\\p1}" .. rrect_path(x0, y0, bw, bh, rad) .. "{\\p0}"
         parts[#parts + 1] = string.format("{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d"
             .. "\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
             x0 + math.floor(bw / 2), y0 + math.floor(bh / 2), fs, math.floor(fs * 0.05 + 0.5), d.t)
@@ -2426,18 +2470,15 @@ local function logo_tick()
         LB.spoke = false
     end
 
-    -- City headline shares the bottom-center with the captions: hide it while a
-    -- briefing runs, and bring it back (re-animated) once the briefing ends.
-    if active and not LB.city_hidden then
-        LB.city_hidden = true; main_shown = nil
-        lm_gen = lm_gen + 1; landmark_ov:remove()
-    elseif not active and LB.city_hidden then
-        LB.city_hidden = false
-        if last_city and last_city.city ~= "" then
-            main_shown = last_city.city
-            animate_landmark(last_city.city, last_city.cx, last_city.by,
-                             last_city.fs, last_city.fsp, last_city.ww, last_city.wh)
-        end
+    -- Hide every non-music HUD while a briefing is on screen; restore the current
+    -- photo's HUD (and the month bar) once it ends.
+    if active and not LB.hud_off then
+        LB.hud_off = true
+        clear_other_hud()
+    elseif not active and LB.hud_off then
+        LB.hud_off = false
+        if cur.redraw then cur.redraw() end
+        draw_top_bar()
     end
 
     -- The badge is always visible (clock when idle). Under it: transport while

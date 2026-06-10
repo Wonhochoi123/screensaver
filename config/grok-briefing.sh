@@ -32,7 +32,7 @@ LOCATION="${GROK_LOCATION:-}"
 TICKERS="${GROK_TICKERS:-}"
 
 GBGM_DIR="$MUSIC_DIR/GrokMorning"
-GBGM_VOL="${GROK_BGM_VOLUME:-30}"
+GBGM_VOL="${GROK_BGM_VOLUME:-100}"       # bgm plays at full by default (not ducked)
 WELCOME_DIR="$CFG_DIR/welcome"           # premade greeting clips (play instantly)
 CACHE_DIR="$DATA_DIR/Briefing"
 TODAY="$(date '+%Y-%m-%d')"
@@ -279,7 +279,7 @@ play() {
 to_min() { case "$1" in *:*) echo $(( 10#${1%%:*} * 60 + 10#${1##*:} ));; *) echo $(( 10#$1 * 60 ));; esac; }
 
 watch_loop() {
-    local target prep_at last_prep="" last_play="" today now t
+    local target prep_at last_prep="" last_play="" last_clean="" today now t
     while true; do
         # Re-read GROK_TIME from the conf each pass so editing it takes effect
         # within ~30s without restarting the screensaver. Keying last_prep/last_play
@@ -288,6 +288,12 @@ watch_loop() {
         target="$(to_min "$t")"; prep_at=$(( target - 5 )); [ "$prep_at" -lt 0 ] && prep_at=0
         today="$(date '+%Y-%m-%d')"
         now=$(( 10#$(date +%H) * 60 + 10#$(date +%M) ))
+        # Once a day, drop stale cache dirs (briefings that were never used).
+        if [ "$last_clean" != "$today" ]; then
+            find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "$today" -mtime +1 \
+                -exec rm -rf {} + 2>/dev/null
+            last_clean="$today"
+        fi
         if [ "$last_prep" != "$today/$target" ] && [ "$now" -ge "$prep_at" ] && [ "$now" -lt "$target" ]; then
             TODAY="$today"; TODAY_CACHE="$CACHE_DIR/$today"; mkdir -p "$TODAY_CACHE"
             prep >/dev/null 2>&1; last_prep="$today/$target"
