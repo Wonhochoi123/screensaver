@@ -46,6 +46,7 @@ local map_coord_ov = mp.create_osd_overlay("ass-events")
 local music_ov     = mp.create_osd_overlay("ass-events")
 local music_bar_ov    = mp.create_osd_overlay("ass-events")  -- music played
 local music_bar_bg_ov = mp.create_osd_overlay("ass-events")  -- music track
+local music_measure_ov = mp.create_osd_overlay("ass-events") -- hidden; measures text width
 local landmark_ov  = mp.create_osd_overlay("ass-events")
 local progress_ov    = mp.create_osd_overlay("ass-events")  -- played
 local progress_bg_ov = mp.create_osd_overlay("ass-events")  -- remaining (track)
@@ -982,7 +983,7 @@ local music_scroll_gen = 0  -- bumped on each new track; cancels the old scrolle
 
 local function set_music(text)
     if not text or text == "" then return end
-    text = clean_text(text):sub(1, 160)        -- drop ·, commas, hyphens, etc.
+    text = text:sub(1, 160)                     -- caller already cleaned it
     if text == "" then return end
     if text == music_shown then return end
     music_shown = text
@@ -995,7 +996,6 @@ local function set_music(text)
     local fsp  = math.floor(h * 0.003 + 0.5)
     local px   = math.floor(w * 0.025)
     local py   = math.floor(h * 0.04)
-    local gw   = fs * 0.60 + fsp                 -- estimated per-glyph advance (px)
     local win_px = math.floor(w * MUSIC_WIN_FRAC)
     local y_top  = py - math.floor(fs * 0.25)
     local y_bot  = py + math.floor(fs * 1.30)
@@ -1005,11 +1005,26 @@ local function set_music(text)
     music_ov.res_x = w
     music_ov.res_y = h
 
-    local label   = "\xe2\x99\xaa  " .. text      -- ♪ + title
-    local glyphs  = utf8_split(label)
-    local text_px = math.floor(gw * #glyphs)
+    local label   = text
     local style   = string.format(
         "\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&", fs, fsp, glow(fs))
+
+    -- Measure the real rendered width (a hidden compute-bounds overlay), so the
+    -- scroll stops exactly when the last glyph reaches the window edge — no
+    -- per-glyph estimate, no over-scroll past the end. Falls back to an estimate
+    -- if the measurement is unavailable.
+    local text_px
+    music_measure_ov.res_x = w; music_measure_ov.res_y = h
+    music_measure_ov.hidden = true
+    music_measure_ov.compute_bounds = true
+    music_measure_ov.data = string.format("{\\an7\\pos(0,0)%s}%s", style, label)
+    local mb = music_measure_ov:update()
+    music_measure_ov:remove()
+    if mb and mb.x0 and mb.x1 and mb.x1 > mb.x0 then
+        text_px = math.ceil(mb.x1 - mb.x0)
+    else
+        text_px = math.floor((fs * 0.60 + fsp) * #utf8_split(label))
+    end
 
     if text_px <= win_px then
         -- Fits: static, no scroll, no clip. Hit box + bar hug the text width.
@@ -1094,14 +1109,15 @@ local function poll_music_pos()
         args = { "/bin/sh", "-c",
             "printf '%s\\n' '{\"command\":[\"get_property\",\"percent-pos\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
     }, function(ok, res)
-        local pct
+        -- Only update on a successful read; never clear on a slow/empty poll, so
+        -- the bar holds its position instead of flickering off (this is what made
+        -- it look broken on some mp3/flac files). set_music resets it per track.
         if ok and res and res.stdout and res.stdout ~= "" then
             local j = utils.parse_json(res.stdout)
             if j and j.error == "success" and type(j.data) == "number" then
-                pct = j.data
+                music_pct = j.data
             end
         end
-        music_pct = pct
         draw_music_bar()
     end)
 end
@@ -1124,8 +1140,11 @@ function poll_music()
             end
         end
         if title and title ~= "" then
-            local line = title
-            if artist and artist ~= "" then line = line .. "  \xc2\xb7  " .. artist end
+            local line = clean_text(title)
+            if artist and artist ~= "" then
+                local a = clean_text(artist)
+                if a ~= "" then line = line .. " - " .. a end   -- title - artist
+            end
             set_music(line)
             return
         end
@@ -1138,7 +1157,7 @@ function poll_music()
             if ok2 and res2 and res2.stdout and res2.stdout ~= "" then
                 local j2 = utils.parse_json(res2.stdout)
                 if j2 and j2.data and j2.error == "success" then
-                    set_music(tostring(j2.data):gsub("%.[^%.]+$", ""))
+                    set_music(clean_text(tostring(j2.data):gsub("%.[^%.]+$", "")))
                 end
             end
         end)
@@ -1171,6 +1190,7 @@ mp.register_event("shutdown", function()
     music_ov:remove()
     music_bar_ov:remove()
     music_bar_bg_ov:remove()
+    music_measure_ov:remove()
     landmark_ov:remove()
     loading_ov:remove()
     progress_ov:remove()
