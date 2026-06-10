@@ -143,6 +143,8 @@ end_play() {
 }
 
 play() {
+    # single instance — don't start if a briefing is already playing
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null && return 0
     build_segments
     have_net || return 1
 

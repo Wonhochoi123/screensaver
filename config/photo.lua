@@ -82,7 +82,11 @@ local HUD_TEXT_GLOW  = cfgnum("HUD_TEXT_GLOW")    -- text shadow strength (×fon
 local MUSIC_SCROLL_SPEED = cfgnum("MUSIC_SCROLL_SPEED")  -- marquee px/frame factor (×font size)
 local MUSIC_SCROLL_DWELL = cfgnum("MUSIC_SCROLL_DWELL")  -- marquee end pause (frames)
 
+local GROK_ENABLED = cfgraw("GROK_BRIEFING") == "1"
+local GROK_LOGO    = cfgstr("GROK_LOGO") or ""    -- click-to-run briefing logo (optional)
+
 local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap); internal
+local LOGO_ID      = 4      -- mpv overlay id for the briefing logo
 
 -- Minimap zoom levels + ring colours (emergency arrays only if the conf can't
 -- be read — arrays can't degrade to 0; the real values live in the conf).
@@ -108,6 +112,7 @@ local top_bar_ov     = mp.create_osd_overlay("ass-events")  -- global progress, 
 local top_bar_bg_ov  = mp.create_osd_overlay("ass-events")  -- global progress, month sections
 local top_label_ov   = mp.create_osd_overlay("ass-events")  -- hovered month label
 local briefing_ov    = mp.create_osd_overlay("ass-events")  -- morning-briefing subtitles
+local logo_text_ov   = mp.create_osd_overlay("ass-events")  -- "getting ready" under the logo
 local loading_ov   = mp.create_osd_overlay("ass-events")
 
 -- Shared progress-bar styling: a translucent light-gray track with a
@@ -164,6 +169,11 @@ local draw_thumb_ring          -- assigned later
 local load_thumb_for           -- assigned later
 local gp_sections              -- global month sections (forward; built later)
 local gp_section_at            -- hit-test for the month bar (forward; defined later)
+local logo                    -- briefing logo geometry {bgra,w,h,x,y}; nil until prepared
+local logo_hit                -- hit-test for the logo (forward; defined later)
+local briefing_active         -- is a briefing process running? (forward)
+local briefing_preparing = false  -- between logo click and the briefing speaking
+local prepare_t0 = 0
 local progress_is_active       -- assigned later; true only for seekable videos
 local main_shown   = nil       -- city currently shown center-bottom (skip re-animating if unchanged)
 
@@ -788,6 +798,14 @@ end)
 
 mp.register_script_message("handle-left-click", function()
     local mouse = mp.get_property_native("mouse-pos")
+
+    -- Click the morning-briefing logo (center-top) to run the briefing now.
+    if mouse and logo_hit and logo_hit(mouse.x, mouse.y)
+       and not (briefing_active and briefing_active()) then
+        mp.commandv("run", CFG_DIR .. "/grok-briefing.sh", "--play")
+        briefing_preparing = true; prepare_t0 = mp.get_time()
+        return
+    end
 
     -- Click a month on the top global bar to jump straight to it.
     if mouse and gp_section_at then
@@ -1494,6 +1512,8 @@ mp.register_event("shutdown", function()
     top_bar_bg_ov:remove()
     top_label_ov:remove()
     briefing_ov:remove()
+    logo_text_ov:remove()
+    pcall(mp.command_native, {"overlay-remove", LOGO_ID})
 end)
 
 -- ----------------------------------------------------------------------------
@@ -1888,6 +1908,98 @@ end)
 mp.register_script_message("ss-briefing-subs", function()
     briefing_subs_hidden = not briefing_subs_hidden
     briefing_shown = nil; draw_briefing()
+end)
+
+-- ----------------------------------------------------------------------------
+-- Morning-briefing logo button (center-top). Hidden until the mouse is near it;
+-- click it (handled above) to run the briefing now. "GETTING READY…" shows
+-- under it while the first segment generates, then the briefing speaks and the
+-- subtitles take over. Only present when GROK_BRIEFING=1 and GROK_LOGO is set.
+-- ----------------------------------------------------------------------------
+local logo_shown    = false
+local mouse_near_logo = false
+
+function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
+
+function logo_hit(mx, my)
+    return (logo ~= nil) and mx >= logo.x and mx <= logo.x + logo.w
+       and my >= logo.y and my <= logo.y + logo.h
+end
+
+local function logo_zone(mx, my)        -- generous reveal area around the logo
+    if not logo then return false end
+    local mar = math.floor(logo.h * 0.6)
+    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar and my <= logo.y + logo.h + mar
+end
+
+local function logo_set(show)
+    if not logo or show == logo_shown then return end
+    logo_shown = show
+    if show then
+        mp.command_native({"overlay-add", LOGO_ID, logo.x, logo.y, logo.bgra,
+            0, "bgra", logo.w, logo.h, logo.w * 4})
+    else
+        mp.command_native({"overlay-remove", LOGO_ID})
+    end
+end
+
+local function logo_tick()
+    if not logo then return end
+    logo_set(mouse_near_logo or briefing_preparing)
+    if briefing_preparing then
+        local f = io.open("/tmp/ss_briefing.txt", "r")
+        local s = f and (f:read("*a") or "") or ""
+        if f then f:close() end
+        s = s:gsub("%s+$", "")
+        -- Done once the briefing starts speaking, or after a timeout (fail quietly).
+        if (s ~= "" and s ~= "__HIDE__") or (mp.get_time() - prepare_t0 > 90) then
+            briefing_preparing = false
+            logo_text_ov:remove()
+            logo_set(mouse_near_logo)
+            return
+        end
+        local w, h = refresh_display_size()
+        local fs = math.floor(h * 0.026)
+        logo_text_ov.res_x = w; logo_text_ov.res_y = h
+        logo_text_ov.data = string.format(
+            "{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H30&}GETTING READY…",
+            math.floor(w / 2), logo.y + logo.h + math.floor(h * 0.012),
+            fs, math.floor(fs * 0.05 + 0.5), glow(fs))
+        logo_text_ov:update()
+    else
+        logo_text_ov:remove()
+    end
+end
+mp.add_periodic_timer(0.3, logo_tick)
+
+local function prepare_logo()
+    if logo or not GROK_ENABLED or GROK_LOGO == "" or not file_exists(GROK_LOGO) then return end
+    local w, h = refresh_display_size()
+    local lh = math.floor(h * 0.11)
+    local out = RES_DIR .. "/briefing-logo.bgra"
+    mp.command_native_async({ name = "subprocess", capture_stdout = true, playback_only = false,
+        args = { "/bin/sh", "-c",
+            'command -v magick >/dev/null 2>&1 && IM=magick || IM=convert; '
+            .. 't="$(mktemp --suffix=.png)"; '
+            .. '"$IM" "' .. GROK_LOGO .. '" -resize x' .. lh .. ' "$t" 2>/dev/null && '
+            .. '"$IM" identify -format "%wx%h" "$t" 2>/dev/null && '
+            .. '"$IM" "$t" -depth 8 "bgra:' .. out .. '" 2>/dev/null; rm -f "$t"' } },
+        function(ok, res)
+            local lw, lhh = ((ok and res and res.stdout) or ""):match("(%d+)x(%d+)")
+            if lw and lhh and file_exists(out) then
+                lw, lhh = tonumber(lw), tonumber(lhh)
+                local W, Hd = refresh_display_size()
+                logo = { bgra = out, w = lw, h = lhh,
+                         x = math.floor((W - lw) / 2), y = math.floor(Hd * 0.02) }
+            end
+        end)
+end
+
+-- Reveal/hide with the mouse; prepare the logo lazily on the first move.
+mp.observe_property("mouse-pos", "native", function(_, m)
+    if not GROK_ENABLED then return end
+    if not logo then prepare_logo(); return end
+    if m then mouse_near_logo = logo_zone(m.x, m.y) end
 end)
 
 -- ----------------------------------------------------------------------------
