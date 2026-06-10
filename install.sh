@@ -70,11 +70,17 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
-mkdir -p "$CFG" "$MEDIA_DIR" "$MAP_DIR" "$MAP_DIR/geo" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
+# Migrate the old "Maps" cache dir to its clearer name (preserves the ~390MB
+# GeoNames DB, the minimap/QR caches, and the album-art thumbs — no re-download).
+if [ -d "$DATA_DIR/Maps" ] && [ ! -e "$RES_DIR" ]; then
+    mv "$DATA_DIR/Maps" "$RES_DIR"
+fi
+
+mkdir -p "$CFG" "$MEDIA_DIR" "$RES_DIR" "$RES_DIR/geo" "$OPT_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" \
          "$HOME/.config/autostart" "$HOME/.local/share/applications" "$FONT_DIR"
 
 if [ -d "$BASE_DIR/_map" ]; then
-    mv "$BASE_DIR/_map"/* "$MAP_DIR/" 2>/dev/null || true
+    mv "$BASE_DIR/_map"/* "$RES_DIR/" 2>/dev/null || true
     rm -rf "$BASE_DIR/_map"
 fi
 if [ -d "$BASE_DIR/optimized_vids" ]; then
@@ -244,7 +250,7 @@ echo "Your structure is:"
 echo "   App Code   : $APP_DIR"
 echo "   Config     : $CFG/screensaver.conf  (edit this to change any setting)"
 echo "   Media      : $MEDIA_DIR"
-echo "   Caches     : $MAP_DIR & $OPT_DIR"
+echo "   Caches     : $RES_DIR & $OPT_DIR"
 echo "   Place DB   : $GEODB  (offline; rebuild with $CFG/build-geodb.sh)"
 echo "                Place data © GeoNames, CC-BY 4.0 (https://www.geonames.org)"
 if [ "${#MISSING[@]}" -gt 0 ]; then

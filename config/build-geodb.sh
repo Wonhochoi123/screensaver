@@ -7,7 +7,7 @@ command -v curl  >/dev/null 2>&1 || { echo "build-geodb: curl not found."  >&2; 
 command -v unzip >/dev/null 2>&1 || { echo "build-geodb: unzip not found." >&2; exit 1; }
 
 BASE="https://download.geonames.org/export/dump"
-WORK="$MAP_DIR/geo"; mkdir -p "$WORK"
+WORK="$RES_DIR/geo"; mkdir -p "$WORK"
 CACHE="$WORK/cache"; mkdir -p "$CACHE"     # persistent: raw downloads live here
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 

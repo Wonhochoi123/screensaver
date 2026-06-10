@@ -15,7 +15,7 @@ local DATA_DIR   = env("DATA_DIR",   APP_DIR .. "/Data")
 local CFG_DIR    = env("CFG_DIR",    APP_DIR .. "/config")
 local MEDIA_DIR  = env("MEDIA_DIR",  DATA_DIR .. "/Media")
 local OPT_DIR    = env("OPT_DIR",    DATA_DIR .. "/Optimized_Vids")
-local MAP_DIR    = env("MAP_DIR",    DATA_DIR .. "/Maps")
+local RES_DIR    = env("RES_DIR",    DATA_DIR .. "/HudResources")
 
 local builder    = CFG_DIR .. "/build-minimap.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
@@ -682,11 +682,11 @@ local function resolve_meta(orig_path, cb)
     if lon and (lon < -180 or lon > 180) then lon = nil end
 
     -- HUD map/QR images are sized from the screen HEIGHT, so they are kept in a
-    -- per-height folder (…/Maps/h_<height>). Switching to a screen of a height
+    -- per-height folder (…/HudResources/h_<height>). Switching to a screen of a height
     -- already seen reuses its folder instead of rebuilding every tile.
     local _, disp_h = refresh_display_size()
     cb({ date = date, city = city, general = general, lat = lat, lon = lon,
-         mdir = MAP_DIR .. "/h_" .. tostring(disp_h) })
+         mdir = RES_DIR .. "/h_" .. tostring(disp_h) })
 end
 
 local pq        = {}

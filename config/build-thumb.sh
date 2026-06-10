@@ -8,7 +8,7 @@
 #  Prints:  the output directory (containing color.bgra, gray.bgra, .thumb) on
 #           success. Exits non-zero and prints nothing when there is no cover.
 #
-#  Output is cached under $MAP_DIR/thumbs keyed by file path + size + mtime, and
+#  Output is cached under $RES_DIR/thumbs keyed by file path + size + mtime, and
 #  the cache is bounded to the 30 most-recently-used thumbs.
 # =============================================================================
 set -u
@@ -22,10 +22,10 @@ if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
 
 MTIME="$(stat -c '%Y' "$FILE" 2>/dev/null || echo 0)"
 KEY="$(printf '%s|%s|%s' "$FILE" "$SIZE" "$MTIME" | md5sum | cut -d' ' -f1)"
-OUT="$MAP_DIR/thumbs/$KEY"
+OUT="$RES_DIR/thumbs/$KEY"
 
 prune_cache() {   # keep only the 30 most-recently-used thumbs
-    ls -1dt "$MAP_DIR/thumbs"/*/ 2>/dev/null | tail -n +31 | tr '\n' '\0' | xargs -0r rm -rf
+    ls -1dt "$RES_DIR/thumbs"/*/ 2>/dev/null | tail -n +31 | tr '\n' '\0' | xargs -0r rm -rf
 }
 
 if [ -f "$OUT/.thumb" ]; then

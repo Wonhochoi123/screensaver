@@ -6,7 +6,7 @@ SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$SS_CONF" 2>/dev/null || { echo "Screensaver: missing config $SS_CONF — run the installer." >&2; exit 1; }
 
 # --- Self-healing: recreate any folder that was deleted ----------------------
-mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$MAP_DIR" "$MAP_DIR/geo" "$OPT_DIR" "$FONT_DIR"
+mkdir -p "$MEDIA_DIR" "$MUSIC_DIR" "$TITLE_DIR" "$PLAYLIST_DIR" "$RES_DIR" "$RES_DIR/geo" "$OPT_DIR" "$FONT_DIR"
 
 # Sweep away half-written title cards left behind by an interrupted build
 # (build-title.sh renames a "<card>.part.<pid>.mp4" into place; a kill leaves it).

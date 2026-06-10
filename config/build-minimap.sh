@@ -5,9 +5,9 @@ LAT="$1"; LON="$2"; Z="$3"; OUT_MAP="$4"; OUT_QR="$5"; OUTDIR="$6"
 HUD_W="${7:-552}"; HUD_H="${8:-616}"; MAP_RING_COLOR="${9:-#FFFFFF}"
 
 UA="Screensaver-App/1.0"
-# OUTDIR is the screen-height-specific folder (…/Maps/h_<height>) that holds the
+# OUTDIR is the screen-height-specific folder (…/HudResources/h_<height>) that holds the
 # composited HUD images. Raw map tiles look identical at every screen size, so
-# they are cached once in a shared sibling folder (…/Maps/tiles) and reused
+# they are cached once in a shared sibling folder (…/HudResources/tiles) and reused
 # across every resolution instead of being re-downloaded per height.
 CACHE="$(dirname "$OUTDIR")/tiles"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
