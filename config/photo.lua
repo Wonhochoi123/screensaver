@@ -1286,7 +1286,7 @@ function load_thumb_for(path)
     }, function(ok, res)
         if music_path ~= path or not thumb then return end   -- track moved on
         local dir = (ok and res and res.stdout or ""):gsub("%s+$", "")
-        if dir ~= "" and file_exists(dir .. "/.thumb") then
+        if dir ~= "" and file_exists(dir .. "/color.bgra") then   -- non-empty art file
             thumb_color = dir .. "/color.bgra"
             thumb_gray  = dir .. "/gray.bgra"
             thumb_shown = nil
