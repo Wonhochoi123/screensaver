@@ -2051,14 +2051,17 @@ local function wrap_words(s, maxc, into)
 end
 
 -- Measure a caption line's real rendered width (hidden compute-bounds overlay).
-local function measure_px(w, h, fs, text)
+-- Measure a caption line's real rendered width. It MUST use the exact same font,
+-- size AND letter-spacing (\fsp) as the rendered text, or the box comes out too
+-- short for the text (the \fsp adds up across a line).
+local function measure_px(w, h, fs, fsp, text)
     music_measure_ov.res_x = w; music_measure_ov.res_y = h
     music_measure_ov.hidden = true; music_measure_ov.compute_bounds = true
     music_measure_ov.data = string.format(
-        "{\\an7\\pos(0,0)\\fnMontserrat ExtraBold\\fs%d\\bord0\\shad0}%s", fs, text)
+        "{\\an7\\pos(0,0)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0}%s", fs, fsp, text)
     local mb = music_measure_ov:update(); music_measure_ov:remove()
     if mb and mb.x0 and mb.x1 and mb.x1 > mb.x0 then return math.ceil(mb.x1 - mb.x0) end
-    return math.floor(#text * fs * 0.55)
+    return math.floor(#text * (fs * 0.55 + fsp))
 end
 
 local function draw_briefing()
@@ -2075,6 +2078,7 @@ local function draw_briefing()
 
     local w, h = refresh_display_size()
     local fs   = math.floor(h * 0.030)
+    local fsp  = math.floor(fs * 0.02 + 0.5)
     local maxc = math.max(18, math.floor((w * 0.66) / (fs * 0.50)))
 
     -- Build the wrapped lines, flagging the first line of each new sentence so we
@@ -2089,7 +2093,7 @@ local function draw_briefing()
 
     local lineH = math.floor(fs * 1.55)
     local sgap  = math.floor(fs * 0.65)
-    local padx  = math.floor(fs * 0.70)
+    local padx  = math.floor(fs * 0.85)
     local rad   = math.floor(lineH * 0.20)
 
     local totalH = 0
@@ -2099,14 +2103,14 @@ local function draw_briefing()
     local boxes, texts = {}, {}
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
-        local tw = measure_px(w, h, fs, L.text)
+        local tw = measure_px(w, h, fs, fsp, L.text)
         local bw = tw + 2 * padx
         local bx = math.floor(w / 2 - bw / 2)
         boxes[#boxes + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H38&\\p1}"
             .. rrect_path(bx, y, bw, lineH, rad) .. "{\\p0}"
         texts[#texts + 1] = string.format(
             "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
-            math.floor(w / 2), y + math.floor(lineH / 2), fs, math.floor(fs * 0.02 + 0.5), L.text)
+            math.floor(w / 2), y + math.floor(lineH / 2), fs, fsp, L.text)
         y = y + lineH
     end
 
@@ -2151,7 +2155,7 @@ end)
 local control_boxes    = {}     -- {x0,y0,x1,y1,act} transport buttons (while speaking)
 local menu_boxes       = {}     -- {x0,y0,x1,y1,act} Replay/Refresh chooser
 -- Briefing/badge state (one table to stay under Lua's 200-local cap).
-local LB = { muted = false, vol = nil, spoke = false, city_hidden = false, label = nil }
+local LB = { muted = false, vol = nil, spoke = false, city_hidden = false, label = nil, near = false }
 
 function briefing_active() return file_exists("/tmp/ss_briefing.pid") end
 
@@ -2247,12 +2251,12 @@ local function draw_logo(show)
     if not show or not logo then logo_ov:remove(); return end
     local L  = logo
     if L.mode == "clock" then
-        -- Frameless clock: thin SemiBold time with a soft drop shadow.
+        -- Frameless clock: thinner (SemiBold), bigger, styled exactly like the
+        -- rest of the HUD text (soft glow + semi-transparent), no drop shadow.
         logo_ov.res_x = L.W; logo_ov.res_y = L.H
         logo_ov.data = string.format(
-            "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\bord0\\shad2"
-            .. "\\4c&H000000&\\4a&H30&\\1c&HFFFFFF&\\alpha&H18&}%s",
-            math.floor(L.W / 2), L.y, L.fs, L.fsp, L.text)
+            "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&}%s",
+            math.floor(L.W / 2), L.y, L.fs, L.fsp, glow(L.fs), L.text)
         logo_ov:update()
         return
     end
@@ -2347,17 +2351,35 @@ local function draw_menu()
     controls_ov:update()
 end
 
+-- "<time of day> BRIEFING" for the framed badge.
+local function tod_briefing_label()
+    local hr = tonumber(os.date("%H")) or 0
+    local part = (hr >= 5 and hr < 12 and "MORNING")
+        or (hr >= 12 and hr < 17 and "AFTERNOON")
+        or (hr >= 17 and hr < 21 and "EVENING") or "NIGHT"
+    return part .. " BRIEFING"
+end
+
+-- Generous reveal area around the badge (so the clock flips to the briefing
+-- badge as the mouse approaches it).
+local function logo_zone(mx, my)
+    if not logo then return false end
+    local mar = logo.h
+    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar and my <= logo.y + logo.h + mar
+end
+
 local function logo_tick()
     if not GROK_ENABLED then return end
     local w, h = refresh_display_size()
     if w <= 0 then return end
     local active = briefing_active()
 
-    -- The badge shows the live clock when idle, and the briefing title (framed,
-    -- with the sun) while a briefing is preparing or speaking.
-    local brief = active or briefing_preparing
+    -- The badge shows the live clock when idle; it flips to the framed "<time of
+    -- day> BRIEFING" badge (sun + click target) when the mouse is near it, the
+    -- chooser menu is open, or a briefing is preparing/speaking.
+    local brief = active or briefing_preparing or logo_menu_open or LB.near
     local mode  = brief and "brief" or "clock"
-    local label = brief and "MORNING BRIEFING" or os.date("%I:%M %p"):gsub("^0", "")
+    local label = brief and tod_briefing_label() or os.date("%I:%M %p"):gsub("^0", "")
     if not logo or logo.W ~= w or logo.H ~= h or label ~= LB.label or logo.mode ~= mode then
         compute_logo(w, h, label, mode); LB.label = label
     end
@@ -2421,6 +2443,12 @@ local function logo_tick()
     end
 end
 mp.add_periodic_timer(0.3, logo_tick)
+
+-- Reveal the briefing badge as the mouse approaches the clock.
+mp.observe_property("mouse-pos", "native", function(_, m)
+    if not GROK_ENABLED then return end
+    LB.near = (m ~= nil) and logo_zone(m.x, m.y) or false
+end)
 
 -- ----------------------------------------------------------------------------
 -- Delete the current media (DEL key)
