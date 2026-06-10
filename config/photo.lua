@@ -1326,8 +1326,18 @@ end
 
 -- Poll the audio player (separate mpv on AUDIO_SOCK): position for the bar, file
 -- path for the thumb, and pause state for the spin. One round-trip for all three.
+-- Throttled to ~1 Hz with an in-flight guard, and driven from BOTH a periodic
+-- timer and the percent-pos observer: on a heavy (e.g. 4K) machine, video decode
+-- starves the periodic timer, so the observer — which fires every presented
+-- frame, the same signal that keeps the bottom bar alive — keeps the poll going.
+local last_music_poll = 0
+local music_poll_busy = false
 local function poll_music_pos()
     if not music_shown then return end
+    local now = mp.get_time()
+    if music_poll_busy or (now - last_music_poll) < 0.8 then return end
+    last_music_poll = now
+    music_poll_busy = true
     mp.command_native_async({
         name = "subprocess", capture_stdout = true, playback_only = false,
         args = { "/bin/sh", "-c",
@@ -1337,6 +1347,7 @@ local function poll_music_pos()
             .. "'{\"command\":[\"get_property\",\"pause\"],\"request_id\":3}' "
             .. "| socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
     }, function(ok, res)
+        music_poll_busy = false
         -- Each property only updates on a successful read; nothing is cleared on
         -- a slow/empty poll, so the bar holds its position instead of flickering
         -- off (this is what made it look broken on some mp3/flac files).
@@ -1360,7 +1371,8 @@ local function poll_music_pos()
         draw_music_bar()
     end)
 end
-mp.add_periodic_timer(1, poll_music_pos)
+mp.add_periodic_timer(1, poll_music_pos)                       -- stills / idle
+mp.observe_property("percent-pos", "number", poll_music_pos)  -- videos (decode-proof)
 
 -- Poll the audio player; only rebuild the marquee when the track changes.
 function poll_music()
