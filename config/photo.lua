@@ -1301,9 +1301,10 @@ end
 local function draw_thumb()
     if not thumb then thumb_shown = nil; return end
     local want = music_playing and thumb_color or thumb_gray
-    if not want then return end          -- no cover art yet → just the empty ring
+    if not want then return end          -- no cover art yet → just the empty ASS ring
     if want == thumb_shown then return end
     thumb_shown = want
+    music_thumb_ov:remove()              -- the bitmap has its own baked ring on top
     mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
         want, 0, "bgra", thumb.d, thumb.d, thumb.d * 4})
 end
@@ -1338,6 +1339,7 @@ local function on_music_path(p)
     music_path = p
     thumb_color = nil; thumb_gray = nil; thumb_shown = nil
     mp.command_native({"overlay-remove", THUMB_ID})
+    draw_thumb_ring()        -- empty ring while the new art is generated
     load_thumb_for(p)
 end
 
