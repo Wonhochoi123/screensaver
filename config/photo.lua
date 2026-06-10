@@ -894,7 +894,7 @@ math.randomseed(os.time())
 local LM_FINAL_ALPHA = 0x40
 local lm_gen = 0
 
-local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
+local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h, is_video)
     lm_gen = lm_gen + 1
     local gen = lm_gen
     local glyphs = utf8_split(text)
@@ -910,9 +910,42 @@ local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
         if st > last then last = st end
     end
     local total = last + FADE
-    local t0 = mp.get_time()
     landmark_ov.res_x = win_w
     landmark_ov.res_y = win_h
+
+    -- Helper: the finished line (every glyph at its final alpha).
+    local function final_line()
+        local parts = { header }
+        for i = 1, n do parts[#parts + 1] = string.format("{\\alpha&H%02X&}%s", LM_FINAL_ALPHA, glyphs[i]) end
+        return table.concat(parts)
+    end
+
+    if is_video then
+        -- Over video, driving the fade from a 30 Hz Lua timer doesn't keep up
+        -- (the reveal stalls until you pause). Let libass animate it with \t —
+        -- it renders smoothly in step with the video frames. Set it once.
+        local parts = { header }
+        for i = 1, n do
+            local s_ms = math.floor(start_t[i] * 1000)
+            local e_ms = s_ms + math.floor(FADE * 1000)
+            parts[#parts + 1] = string.format(
+                "{\\alpha&HFF&\\t(%d,%d,\\alpha&H%02X&)}%s", s_ms, e_ms, LM_FINAL_ALPHA, glyphs[i])
+        end
+        landmark_ov.data = table.concat(parts)
+        landmark_ov:update()
+        -- Safety net: once the reveal should be done, pin the final state, so
+        -- the name is guaranteed visible even if \t didn't advance.
+        mp.add_timeout(total + 0.15, function()
+            if gen ~= lm_gen then return end
+            landmark_ov.data = final_line()
+            landmark_ov:update()
+        end)
+        return
+    end
+
+    -- Stills: per-frame Lua reveal (the OSD redraws on each overlay change since
+    -- there is no video presenting frames).
+    local t0 = mp.get_time()
     local function frame()
         if gen ~= lm_gen then return end
         local el = mp.get_time() - t0
@@ -1033,7 +1066,8 @@ mp.register_event("file-loaded", function()
                 landmark_ov:remove()
             elseif city ~= main_shown then
                 main_shown = city
-                animate_landmark(city, cx, by, fs, fsp, L.win_w, L.win_h)
+                local vid = is_video[(path:match("%.([^%.]+)$") or ""):lower()] or false
+                animate_landmark(city, cx, by, fs, fsp, L.win_w, L.win_h, vid)
             else
                 lm_gen = lm_gen + 1   -- cancel any stray animation; show statically
                 landmark_ov.res_x = L.win_w
