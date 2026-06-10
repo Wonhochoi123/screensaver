@@ -20,7 +20,7 @@ command -v ffmpeg >/dev/null 2>&1 || exit 1
 if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
 
 MTIME="$(stat -c '%Y' "$FILE" 2>/dev/null || echo 0)"
-KEY="$(printf '%s|%s|%s' "$FILE" "$SIZE" "$MTIME" | md5sum | cut -d' ' -f1)"
+KEY="$(printf '%s|%s|%s|%s' "$FILE" "$SIZE" "$FRAMES" "$MTIME" | md5sum | cut -d' ' -f1)"
 OUT="$MAP_DIR/thumbs/$KEY"
 
 # Cached already? (a complete run leaves .frames last)

@@ -35,7 +35,7 @@ local MUSIC_WIN_FRAC = envn("MUSIC_WIN_FRAC", 0.30) -- marquee width (frac of wi
 local HUD_THUMB_FRAC = envn("HUD_THUMB_FRAC", 0.07) -- album-art thumb size (frac of height)
 
 local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = minimap)
-local THUMB_FRAMES = 24     -- rotation frames build-thumb.sh renders
+local THUMB_FRAMES = 72     -- rotation frames build-thumb.sh renders (5° each, smooth)
 
 local ZOOMS        = {11, 14, 16}
 local RING_COLORS  = {"#FFFFFF", "#B3E5FC", "#4FC3F7"}
@@ -1046,11 +1046,12 @@ local function set_music(text)
     local py   = math.floor(h * 0.04)
     local y_top  = py - math.floor(fs * 0.25)
     local y_bot  = py + math.floor(fs * 1.30)
-    local bar_th = math.max(2, math.floor(h * 0.0035 + 0.5))
+    local bar_th = math.max(1, math.floor(h * 0.00117 + 0.5))   -- thin (≈1/3 of old)
     local bar_y  = py + math.floor(fs * 1.45)    -- just under the text
 
     -- Album-art thumb sits at the left margin; the text starts to its right.
-    local left_x  = math.floor(w * 0.025)
+    -- Left inset matches the QR/minimap's (hud_geom pad = win_h * 0.02).
+    local left_x  = math.floor(h * 0.02)
     local thumb_d = math.floor(h * HUD_THUMB_FRAC)
     local px      = left_x
     if thumb_d > 0 then
@@ -1183,9 +1184,10 @@ end
 function draw_thumb_ring()
     if not thumb then music_thumb_ov:remove(); return end
     local t = thumb
+    -- Opaque light-grey ring (no alpha), transparent fill so the art shows through.
     music_thumb_ov.res_x = t.W; music_thumb_ov.res_y = t.H
     music_thumb_ov.data = string.format(
-        "{\\an7\\pos(0,0)\\p1\\1a&HFF&\\bord%d\\3c&HFFFFFF&\\3a&H90&\\shad0}%s{\\p0}",
+        "{\\an7\\pos(0,0)\\p1\\1a&HFF&\\bord%d\\3c&HC8C8C8&\\3a&H00&\\shad0}%s{\\p0}",
         math.max(1, math.floor(t.d * 0.03 + 0.5)), ass_circle(t.cx, t.cy, t.r))
     music_thumb_ov:update()
 end
@@ -1222,15 +1224,16 @@ local function on_music_path(p)
     load_thumb_for(p)
 end
 
--- Spin the thumb while the music plays (freeze on the current frame when paused).
+-- Spin the thumb like a vinyl record while the music plays (freeze on the
+-- current frame when paused). Reversed direction, ~7.2s per revolution.
 local function thumb_tick()
     if thumb and thumb_dir and music_playing then
-        thumb_idx = (thumb_idx + 1) % THUMB_FRAMES
+        thumb_idx = (thumb_idx - 1) % THUMB_FRAMES   -- reverse spin
         mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
             string.format("%s/f%03d.bgra", thumb_dir, thumb_idx),
             0, "bgra", thumb.d, thumb.d, thumb.d * 4})
     end
-    mp.add_timeout(0.06, thumb_tick)
+    mp.add_timeout(0.10, thumb_tick)
 end
 thumb_tick()
 
