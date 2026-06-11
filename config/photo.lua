@@ -1714,6 +1714,10 @@ end
 -- frame, the same signal that keeps the bottom bar alive — keeps the poll going.
 local function poll_music_pos()
     if not music_shown then return end
+    if BO and BO.on then return end   -- blacked out: nothing visible to update
+    local now = mp.get_time()
+    if MQ.poll_busy or (now - MQ.poll_t) < 0.8 then return end
+    MQ.poll_t = now
     -- During a briefing the marquee/thumb track the bgm's own mpv: reflect ITS
     -- pause state (so the thumb greys out when you pause it), and hide the bar
     -- (a looping bgm has no meaningful position).
@@ -1731,9 +1735,6 @@ local function poll_music_pos()
             end)
         draw_music_bar(); return
     end
-    local now = mp.get_time()
-    if MQ.poll_busy or (now - MQ.poll_t) < 0.8 then return end
-    MQ.poll_t = now
     MQ.poll_busy = true
     mp.command_native_async({
         name = "subprocess", capture_stdout = true, playback_only = false,
@@ -1773,6 +1774,7 @@ mp.observe_property("percent-pos", "number", poll_music_pos)  -- videos (decode-
 
 -- Poll the audio player; only rebuild the marquee when the track changes.
 function poll_music()
+    if BO and BO.on then return end   -- blacked out: nothing visible to update
     -- During a briefing the slideshow's own music is paused; show the GrokMorning
     -- background track instead (grok-briefing.sh publishes its title/path to /tmp).
     if briefing_active and briefing_active() then
@@ -2550,7 +2552,17 @@ local LB = { muted = false, vol = nil, spoke = false, hud_off = false, label = n
 -- "Active" = actually playing (mute, hide-HUD, bgm marquee key off this). The
 -- PID file exists earlier, during the "getting ready" phase, when the screensaver
 -- must stay normal — so this keys off the LIVE marker, written once it starts.
-function briefing_active() return file_exists("/tmp/ss_briefing_live") end
+-- Stat of the live-marker cached briefly: briefing_active() sits on per-frame
+-- paths (percent-pos observers), so don't hit the filesystem every frame.
+-- (Globals, not locals — the main chunk is at Lua's 200-local cap.)
+BA_T, BA_V = -1, false
+function briefing_active()
+    local now = mp.get_time()
+    if now - BA_T > 0.25 then
+        BA_T = now; BA_V = file_exists("/tmp/ss_briefing_live")
+    end
+    return BA_V
+end
 
 function logo_hit(mx, my)
     return (logo ~= nil) and mx >= logo.x and mx <= logo.x + logo.w
@@ -2835,6 +2847,9 @@ local function logo_tick()
     local w, h = refresh_display_size()
     if w <= 0 then return end
     local active = briefing_active()
+    -- A scheduled briefing lifts the quiet-hours blackout immediately (don't
+    -- wait for bo_check's slower tick — its audio is already starting).
+    if active and BO and BO.on then bo_hide() end
 
     -- The badge shows the live clock when idle; it flips to the framed "<time of
     -- day> BRIEFING" badge (sun + click target) when the mouse is near it, the

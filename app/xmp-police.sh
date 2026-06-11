@@ -28,8 +28,17 @@ MEDIA_EXTS=( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.we
              -o -iname '*.webm' )
 
 run_pass() {
-    local STALE JSON
-    STALE="$(mktemp)"; JSON="$(mktemp)"
+    local STALE JSON RES_SIG RES_CHANGED SIG_FILE PASS_OK
+    STALE="$(mktemp)"; JSON="$(mktemp)"; PASS_OK=0
+
+    # Detect resolver changes by CONTENT (hash), not mtime: every reinstall
+    # rewrites geo-resolve.sh even when nothing changed, and an mtime test would
+    # re-resolve the entire library on every update. Only a real logic change
+    # invalidates the sidecars now. The sig is recorded only after a clean pass.
+    SIG_FILE="$APP_DIR/.resolver_sig"
+    RES_SIG="$(md5sum "$GEO_RESOLVE" 2>/dev/null | cut -d' ' -f1)"
+    RES_CHANGED=0
+    [ -n "$RES_SIG" ] && [ "$RES_SIG" != "$(cat "$SIG_FILE" 2>/dev/null)" ] && RES_CHANGED=1
 
     find "$MEDIA_DIR" -maxdepth 1 -type f \( "${MEDIA_EXTS[@]}" \) -print0 |
     while IFS= read -r -d '' m; do
@@ -44,7 +53,7 @@ run_pass() {
         elif [ "$m" -nt "$xmp" ];                    then stale=1
         elif [ -n "$txt" ] && [ "$txt" -nt "$xmp" ]; then stale=1
         elif [ -n "${GEODB:-}" ] && [ -s "$GEODB" ] && [ "$GEODB" -nt "$xmp" ]; then stale=1
-        elif [ -s "$GEO_RESOLVE" ] && [ "$GEO_RESOLVE" -nt "$xmp" ]; then stale=1   # resolver changed
+        elif [ "$RES_CHANGED" = 1 ]; then stale=1   # resolver logic changed (by content)
         fi
         [ "$stale" = 1 ] && printf '%s\n' "$m"
     done > "$STALE"
@@ -58,14 +67,15 @@ run_pass() {
             -@ "$STALE" > "$JSON" 2>/dev/null
 
         if [ -s "$JSON" ]; then
-            python3 - "$JSON" <<'PY'
+            python3 - "$JSON" <<'PY' && PASS_OK=1
 import sys, json, os, re, subprocess
 from xml.sax.saxutils import escape
 
 GEO_RESOLVE = os.environ.get("GEO_RESOLVE", "")
 
 def resolve_geo(lat, lon):
-    """Offline GeoNames lookup -> (landmark, city, state, country); blanks on miss."""
+    """Offline GeoNames lookup -> (landmark, city, state, country); blanks on miss.
+    Single-shot fallback — the normal path is one batch_resolve() call per pass."""
     if not GEO_RESOLVE or lat is None or lon is None:
         return "", None, None, None
     try:
@@ -77,6 +87,28 @@ def resolve_geo(lat, lon):
     except Exception:
         pass
     return "", None, None, None
+
+def batch_resolve(pairs):
+    """Resolve every unique coordinate in ONE geo-resolve.sh --batch call (the
+    GeoNames DB is opened once, not once per photo). Returns {key: result};
+    empty dict on total failure, and the caller falls back to resolve_geo()."""
+    if not GEO_RESOLVE or not pairs:
+        return {}
+    keys = sorted(pairs)
+    inp = "".join("%s %s\n" % k for k in keys)
+    try:
+        r = subprocess.run([GEO_RESOLVE, "--batch"], input=inp,
+                           capture_output=True, text=True,
+                           timeout=60 + 2 * len(keys))
+        if r.returncode != 0:
+            return {}
+        memo = {}
+        for k, line in zip(keys, r.stdout.split("\n")):
+            p = (line.split("\t") + ["", "", "", ""])[:4]
+            memo[k] = (p[0], p[1] or None, p[2] or None, p[3] or None)
+        return memo
+    except Exception:
+        return {}
 
 def parse_coord(s):
     s = re.sub(r'\(.*?\)', '', str(s)).upper()
@@ -205,23 +237,38 @@ try:
 except Exception:
     data = []
 
+def _f(v):
+    try:    return float(v) if v not in (None, "") else None
+    except Exception: return None
+
+# Pre-pass: collect every entry's coordinates so the whole library resolves in
+# one batch (deduped — a trip yields clusters of near-identical GPS points).
+prep, pairs = [], set()
 for e in data:
     media = e.get("SourceFile")
     if not media or not os.path.exists(media):
         continue
+    lat = _f(e.get("GPSLatitude"))
+    lon = _f(e.get("GPSLongitude"))
+    prep.append((e, media, lat, lon))
+    if lat is not None and lon is not None:
+        pairs.add(("%.6f" % lat, "%.6f" % lon))
+geo_memo = batch_resolve(pairs)
 
+for e, media, lat, lon in prep:
     date_raw = (e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate")
                 or e.get("MediaCreateDate") or e.get("DateTimeCreated") or "")
 
-    def _f(v):
-        try:    return float(v) if v not in (None, "") else None
-        except Exception: return None
-    lat = _f(e.get("GPSLatitude"))
-    lon = _f(e.get("GPSLongitude"))
-
     # GeoNames (offline DB) is the PRIMARY geocoder; ExifTool's Geolocation and
     # any embedded EXIF/IPTC tags are only fallbacks when GeoNames has no match.
-    landmark, gcity, gstate, gcountry = resolve_geo(lat, lon)
+    if lat is not None and lon is not None:
+        key = ("%.6f" % lat, "%.6f" % lon)
+        if key in geo_memo:
+            landmark, gcity, gstate, gcountry = geo_memo[key]
+        else:   # batch unavailable/failed -> old per-photo path
+            landmark, gcity, gstate, gcountry = resolve_geo(lat, lon)
+    else:
+        landmark, gcity, gstate, gcountry = "", None, None, None
     city    = gcity    or e.get("GeolocationCity")    or e.get("City") or ""
     state   = gstate   or e.get("GeolocationRegion")  or e.get("State") or e.get("Province-State") or ""
     country = gcountry or e.get("GeolocationCountry") or e.get("Country") or ""
@@ -254,7 +301,12 @@ for e in data:
         sys.stderr.write("xmp-police: failed on %s: %s\n" % (media, ex))
 PY
         fi
+    else
+        PASS_OK=1    # nothing stale — the recorded sig is (or becomes) current
     fi
+    # Record the resolver sig only after a clean pass, so a failed/partial pass
+    # is retried in full next time.
+    [ "$PASS_OK" = 1 ] && [ -n "$RES_SIG" ] && printf '%s' "$RES_SIG" > "$SIG_FILE"
 
     find "$MEDIA_DIR" -maxdepth 1 -type f -name '*.xmp' -print0 |
     while IFS= read -r -d '' x; do

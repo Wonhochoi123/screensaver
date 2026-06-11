@@ -185,24 +185,37 @@ done
 _ss_load_msg "$_SS_TITLE" "Reading photo metadata..."
 "$POLICE" --once
 
-exiftool -q -m -j -d "%Y%m%d%H%M%S" \
-    -DateTimeOriginal -CreateDate -CreationDate \
-    -ext xmp "$MEDIA_DIR" > "$PLAYLIST.json" 2>/dev/null
-
-python3 - "$PLAYLIST.json" <<'PY' > "$PLAYLIST.raw"
-import sys, json, os
+# The sidecars are tiny XML files xmp-police just wrote in a fixed format, so
+# read the dates straight out of them — no second full exiftool pass over the
+# library (the police already ran exiftool on everything that needed it).
+python3 - "$MEDIA_DIR" <<'PY' > "$PLAYLIST.raw"
+import sys, os, re
+mdir = sys.argv[1]
+pats = [re.compile(r"<%s>([^<]*)</%s>" % (t, t)) for t in
+        ("exif:DateTimeOriginal", "xmp:CreateDate", "photoshop:DateCreated")]
 try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    names = os.listdir(mdir)
 except Exception:
-    data = []
+    names = []
 rows = []
-for e in data:
-    sf = e.get("SourceFile", "")
-    media = sf[:-4] if sf.lower().endswith(".xmp") else sf
-    if not media or not os.path.exists(media):
+for n in names:
+    if not n.lower().endswith(".xmp"):
         continue
-    d = e.get("DateTimeOriginal") or e.get("CreateDate") or e.get("CreationDate") or ""
-    d = "".join(c for c in str(d) if c.isdigit())
+    xmp = os.path.join(mdir, n)
+    media = xmp[:-4]
+    if not os.path.isfile(xmp) or not os.path.exists(media):
+        continue
+    try:
+        txt = open(xmp, encoding="utf-8", errors="ignore").read()
+    except Exception:
+        continue
+    d = ""
+    for p in pats:
+        m = p.search(txt)
+        if m:
+            d = m.group(1)
+            break
+    d = "".join(c for c in d if c.isdigit())
     if len(d) < 6:
         d = "99999999999999"
     rows.append((d, media))
@@ -210,7 +223,6 @@ rows.sort()
 for d, m in rows:
     print(d + "|" + m)
 PY
-rm -f "$PLAYLIST.json"
 
 # --- Pick each month's "hero" for the title-card background. Videos win when a
 #     month has one (used only for the card's ~4s); otherwise the largest still.

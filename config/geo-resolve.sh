@@ -1,15 +1,28 @@
 #!/bin/bash
 # geo-resolve.sh LAT LON -> "landmark<TAB>city<TAB>state<TAB>country"  (offline)
+# geo-resolve.sh --batch -> read one "LAT LON" pair per stdin line and print one
+#                           result line per input line (same format). The DB is
+#                           opened ONCE for the whole batch — this is what
+#                           xmp-police.sh uses to resolve a library efficiently.
 set -u
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$SS_CONF" 2>/dev/null || true
-LAT="${1:-}"; LON="${2:-}"
-[ -z "$LAT" ] || [ -z "$LON" ] && exit 0
+BATCH=0; COORDS=""
+if [ "${1:-}" = "--batch" ]; then
+    # The python program itself rides on stdin (python3 - <<heredoc), so spool
+    # the piped-in coordinate lines to a temp file and pass its path instead.
+    BATCH=1; LAT=0; LON=0
+    COORDS="$(mktemp)"; trap 'rm -f "$COORDS"' EXIT
+    cat > "$COORDS"
+else
+    LAT="${1:-}"; LON="${2:-}"
+    [ -z "$LAT" ] || [ -z "$LON" ] && exit 0
+fi
 [ -s "${GEODB:-}" ] || exit 0          # DB not built yet -> no enrichment
 command -v python3 >/dev/null 2>&1 || exit 0
-python3 - "$GEODB" "$LAT" "$LON" <<'PY'
+python3 - "$GEODB" "$BATCH" "$LAT" "$LON" "$COORDS" <<'PY'
 import sys, sqlite3, math, unicodedata
-DB = sys.argv[1]; lat = float(sys.argv[2]); lon = float(sys.argv[3])
+DB = sys.argv[1]; BATCH = sys.argv[2] == "1"
 
 def ascii_(s):
     # Fold accents to plain ASCII and drop apostrophes (regular English alphabet).
@@ -27,44 +40,57 @@ def hav(a, b, c, d):
 
 con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True); cur = con.cursor()
 
-def win(r):
-    dla = r / 111.0
-    dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
-    return lat - dla, lat + dla, lon - dlo, lon + dlo
+def resolve(lat, lon):
+    def win(r):
+        dla = r / 111.0
+        dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
+        return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: the nearest named features within a wide window — NO radius
-#     filter at all. Closest first, up to 5, joined with "|" to cycle through. ---
-la0, la1, lo0, lo1 = win(100)
-cands = []
-for name, flat, flon, fcode, elev, w, mk in cur.execute(
-        "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
-        "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
-    cands.append((hav(lat, lon, flat, flon), name))
-cands.sort(key=lambda x: x[0])
-names, seen = [], set()
-for d, name in cands:
-    n = ascii_(name)
-    if n and n.lower() not in seen:
-        seen.add(n.lower()); names.append(n)
-    if len(names) >= 5:
-        break
-landmark = "|".join(names)
+    # --- landmark: the nearest named features within a wide window — NO radius
+    #     filter at all. Closest first, up to 5, joined with "|" to cycle through. ---
+    la0, la1, lo0, lo1 = win(100)
+    cands = []
+    for name, flat, flon, fcode, elev, w, mk in cur.execute(
+            "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
+            "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+        cands.append((hav(lat, lon, flat, flon), name))
+    cands.sort(key=lambda x: x[0])
+    names, seen = [], set()
+    for d, name in cands:
+        n = ascii_(name)
+        if n and n.lower() not in seen:
+            seen.add(n.lower()); names.append(n)
+        if len(names) >= 5:
+            break
+    landmark = "|".join(names)
 
-# --- city: nearest sizable populated place (population-aware) ----------------
-la0, la1, lo0, lo1 = win(30)
-bc = None
-for name, plat, plon, pop, state, country in cur.execute(
-        "SELECT name,lat,lon,pop,state,country FROM place "
-        "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
-    d = hav(lat, lon, plat, plon)
-    if d > 30:
-        continue
-    s = math.log10(pop + 10) - d / 10.0
-    if bc is None or s > bc[0]:
-        bc = (s, name, state, country)
-city    = bc[1] if bc else ""
-state   = bc[2] if bc else ""
-country = bc[3] if bc else ""
+    # --- city: nearest sizable populated place (population-aware) ----------------
+    la0, la1, lo0, lo1 = win(30)
+    bc = None
+    for name, plat, plon, pop, state, country in cur.execute(
+            "SELECT name,lat,lon,pop,state,country FROM place "
+            "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+        d = hav(lat, lon, plat, plon)
+        if d > 30:
+            continue
+        s = math.log10(pop + 10) - d / 10.0
+        if bc is None or s > bc[0]:
+            bc = (s, name, state, country)
+    city    = bc[1] if bc else ""
+    state   = bc[2] if bc else ""
+    country = bc[3] if bc else ""
 
-print("\t".join([landmark, ascii_(city), ascii_(state), ascii_(country)]))
+    return "\t".join([landmark, ascii_(city), ascii_(state), ascii_(country)])
+
+if BATCH:
+    # One result line per input line (blank on a bad pair), so the caller can
+    # zip inputs to outputs by position.
+    for line in open(sys.argv[5]):
+        try:
+            p = line.split()
+            print(resolve(float(p[0]), float(p[1])), flush=True)
+        except Exception:
+            print("", flush=True)
+else:
+    print(resolve(float(sys.argv[3]), float(sys.argv[4])))
 PY
