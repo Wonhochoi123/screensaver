@@ -855,8 +855,8 @@ mp.register_script_message("handle-left-click", function()
 
     -- Left-click the month bar: jump to the EXACT media under the cursor (the
     -- horizontal position within the month maps to its item). (Right-click jumps
-    -- to the month's start — see handle-right-click.)
-    if mouse and gp_section_at then
+    -- to the month's start — see handle-right-click.) Inert during a briefing.
+    if mouse and gp_section_at and not (briefing_active and briefing_active()) then
         local hv = gp_section_at(mouse.x, mouse.y)
         if hv and gp_sections and gp_sections[hv] then
             local s = gp_sections[hv]
@@ -1033,7 +1033,15 @@ local function lm_render()
 
     local el = mp.get_time() - a.t0
     local parts = { a.header }
+    -- Optional first line (the landmark, smaller) above the main line (the city),
+    -- with a \N break between them. Per-letter reveal across both.
+    parts[#parts + 1] = (a.lm_n > 0)
+        and string.format("{\\fs%d\\fsp%d}", a.lm_fs, a.lm_fsp)
+        or  string.format("{\\fs%d\\fsp%d}", a.fs, a.fsp)
     for i = 1, #a.glyphs do
+        if a.lm_n > 0 and i == a.lm_n + 1 then
+            parts[#parts + 1] = string.format("\\N{\\fs%d\\fsp%d}", a.fs, a.fsp)
+        end
         local st, alpha = a.start_t[i], nil
         if el <= st then alpha = 0xFF
         elseif el >= st + a.fade then alpha = LM_FINAL_ALPHA
@@ -1046,13 +1054,19 @@ local function lm_render()
     if el >= a.total then lm_anim = nil end   -- finished (final state just drawn)
 end
 
-local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
+local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h, top)
     lm_gen = lm_gen + 1
     local gen = lm_gen
-    local glyphs = utf8_split(text)
+    -- Optional landmark line (smaller) revealed above the city line.
+    local lm_glyphs = (top and top ~= "") and utf8_split(top) or {}
+    local glyphs = {}
+    for _, g in ipairs(lm_glyphs) do glyphs[#glyphs + 1] = g end
+    for _, g in ipairs(utf8_split(text)) do glyphs[#glyphs + 1] = g end
+    local lm_fs  = math.floor(fs * 0.6)
+    local lm_fsp = math.floor(lm_fs * 0.3636 + 0.5)
+    -- Header carries everything except \fs/\fsp (set per line in lm_render).
     local header = string.format(
-        "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s}",
-        cx, by, fs, fsp, glow(fs))
+        "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\1c&HFFFFFF&%s}", cx, by, glow(fs))
     local FADE, last = 0.55, 0
     local start_t = {}
     for i = 1, #glyphs do
@@ -1061,7 +1075,8 @@ local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h)
         if st > last then last = st end
     end
     lm_anim = { glyphs = glyphs, start_t = start_t, t0 = mp.get_time(), header = header,
-                total = last + FADE, gen = gen, W = win_w, H = win_h, fade = FADE }
+                total = last + FADE, gen = gen, W = win_w, H = win_h, fade = FADE,
+                lm_n = #lm_glyphs, fs = fs, fsp = fsp, lm_fs = lm_fs, lm_fsp = lm_fsp }
     lm_render()
     local function tick()
         if not lm_anim or lm_anim.gen ~= gen then return end
@@ -1182,7 +1197,7 @@ mp.register_event("file-loaded", function()
                 return
             end
             local L = hud_geom()
-            local m_top    = math.floor(L.win_h * 0.04)   -- top inset
+            local m_top    = math.floor(L.win_h * 0.055)  -- top inset (a bit lower)
             local m_right  = math.floor(L.win_h * 0.02)    -- right inset (matches the map's)
             local m_bottom = math.floor(L.win_h * 0.07)    -- bottom inset
 
@@ -1212,10 +1227,12 @@ mp.register_event("file-loaded", function()
                 ov:update()
             end
 
-            -- Bottom-center headline: the CITY name, or the LANDMARK if this media
-            -- is toggled to it ('l' key). The glyph reveal plays only on change.
-            local use_lm = LP[cur.orig] and m.landmark and m.landmark ~= ""
-            local city = clean_text(use_lm and m.landmark or (m.city or "")):upper()
+            -- Bottom-center headline: the CITY name. When this media is toggled to
+            -- its landmark ('l' key), the LANDMARK shows on a smaller line ABOVE it.
+            -- The glyph reveal plays only when the headline actually changes.
+            local city = clean_text(m.city or ""):upper()
+            local lm   = clean_text(m.landmark or ""):upper()
+            local top  = (LP[cur.orig] and lm ~= "") and lm or nil
             local fs   = math.floor(L.win_h * HUD_CITY_FS)   -- bigger headline
             local fsp  = math.floor(fs * 0.3636 + 0.5)       -- spacing scales with size
             local cx   = math.floor(L.win_w / 2)
@@ -1223,20 +1240,25 @@ mp.register_event("file-loaded", function()
             -- Stash what the 'l' toggle needs to redraw this headline.
             cur.city = m.city or ""; cur.landmark = m.landmark or ""
             cur.head = { cx = cx, by = by, fs = fs, fsp = fsp, ww = L.win_w, wh = L.win_h }
-            if city == "" then
+            local key = city .. "|" .. (top or "")
+            if city == "" and not top then
                 main_shown = nil
                 lm_gen = lm_gen + 1
                 landmark_ov:remove()
-            elseif city ~= main_shown then
-                main_shown = city
-                animate_landmark(city, cx, by, fs, fsp, L.win_w, L.win_h)
+            elseif key ~= main_shown then
+                main_shown = key
+                animate_landmark(city, cx, by, fs, fsp, L.win_w, L.win_h, top)
             else
                 lm_gen = lm_gen + 1   -- cancel any stray animation; show statically
                 landmark_ov.res_x = L.win_w
                 landmark_ov.res_y = L.win_h
-                landmark_ov.data = string.format(
-                    "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&}%s",
-                    cx, by, fs, fsp, glow(fs), city)
+                local s = string.format(
+                    "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\1c&HFFFFFF&%s\\alpha&H40&}", cx, by, glow(fs))
+                if top then
+                    local lf = math.floor(fs * 0.6)
+                    s = s .. string.format("{\\fs%d\\fsp%d}%s\\N", lf, math.floor(lf * 0.3636 + 0.5), top)
+                end
+                landmark_ov.data = s .. string.format("{\\fs%d\\fsp%d}%s", fs, fsp, city)
                 landmark_ov:update()
             end
         end
@@ -1334,7 +1356,7 @@ local function set_music(text)
     local w, h = refresh_display_size()
     local fs   = math.floor(h * HUD_MUSIC_FS)
     local fsp  = math.floor(h * 0.003 + 0.5)
-    local py   = math.floor(h * 0.04)
+    local py   = math.floor(h * 0.055)   -- a bit lower
     local y_top  = py - math.floor(fs * 0.25)
     local y_bot  = py + math.floor(fs * 1.30)
     local bar_th = math.max(1, math.floor(h * 0.00117 + 0.5))   -- thin (≈1/3 of old)
@@ -1540,14 +1562,24 @@ function open_chooser()
         end)
 end
 
--- Mouse wheel: scroll the open song chooser; otherwise step the slideshow.
+-- Mouse wheel: scroll the open song chooser; otherwise step the slideshow (only
+-- between photos during a briefing, so it never reaches a video).
 mp.register_script_message("ss-wheel", function(dir)
     if MQ.chooser then
         MQ.scroll = MQ.scroll + (dir == "up" and -2 or 2)
         draw_chooser()
     else
-        mp.command(dir == "up" and "playlist-prev" or "playlist-next")
+        local d = (dir == "up") and -1 or 1
+        if backdrop_step and backdrop_step(d) then return end
+        mp.command(d < 0 and "playlist-prev" or "playlist-next")
     end
+end)
+
+-- Slideshow prev/next (arrow keys). Photo-only during a briefing.
+mp.register_script_message("ss-nav", function(dir)
+    local d = (dir == "next") and 1 or -1
+    if backdrop_step and backdrop_step(d) then return end
+    mp.command(d > 0 and "playlist-next" or "playlist-prev")
 end)
 
 -- A circle as an ASS vector path (4 cubic beziers), for the thumb's ring and
@@ -1889,14 +1921,14 @@ local function jump_month(direction)
     end
 end
 
-mp.register_script_message("month-next", function() jump_month(1) end)
-mp.register_script_message("month-prev", function() jump_month(-1) end)
+mp.register_script_message("month-next", function() if not briefing_active() then jump_month(1) end end)
+mp.register_script_message("month-prev", function() if not briefing_active() then jump_month(-1) end end)
 
 -- Right-click the month bar → jump to that month's START; right-click anywhere
 -- else still quits the screensaver.
 mp.register_script_message("handle-right-click", function()
     local mouse = mp.get_property_native("mouse-pos")
-    if mouse and gp_section_at then
+    if mouse and gp_section_at and not (briefing_active and briefing_active()) then
         local hv = gp_section_at(mouse.x, mouse.y)
         if hv and gp_sections and gp_sections[hv] then
             mp.set_property_number("playlist-pos", gp_sections[hv].start - 1)
@@ -1915,10 +1947,12 @@ mp.register_script_message("ss-toggle-landmark", function()
     LP[cur.orig] = (not LP[cur.orig]) and true or nil
     save_landmark_prefs()
     main_shown = nil; lm_gen = lm_gen + 1
-    local text = clean_text(LP[cur.orig] and lm or (cur.city or "")):upper()
-    if cur.head and text ~= "" then
-        main_shown = text
-        animate_landmark(text, cur.head.cx, cur.head.by, cur.head.fs, cur.head.fsp, cur.head.ww, cur.head.wh)
+    local city = clean_text(cur.city or ""):upper()
+    local top  = (LP[cur.orig] and lm ~= "") and clean_text(lm):upper() or nil
+    if cur.head and (city ~= "" or top) then
+        main_shown = city .. "|" .. (top or "")
+        animate_landmark(city, cur.head.cx, cur.head.by, cur.head.fs, cur.head.fsp,
+                         cur.head.ww, cur.head.wh, top)
     else
         landmark_ov:remove()
     end
@@ -1985,8 +2019,8 @@ local function jump_year(direction)
     end
 end
 
-mp.register_script_message("year-next", function() jump_year(1) end)
-mp.register_script_message("year-prev", function() jump_year(-1) end)
+mp.register_script_message("year-next", function() if not briefing_active() then jump_year(1) end end)
+mp.register_script_message("year-prev", function() if not briefing_active() then jump_year(-1) end end)
 
 -- ----------------------------------------------------------------------------
 -- ----------------------------------------------------------------------------
@@ -2590,14 +2624,15 @@ local function tod_word()
 end
 local function tod_briefing_label() return tod_word() .. " BRIEFING" end
 
--- Reveal area around the badge (so the clock flips to the briefing badge as the
--- mouse approaches it). Bounded ABOVE as well, so it doesn't cover the month bar
--- at the very top of the screen.
+-- Reveal area around the badge. Bounded ABOVE (so it doesn't cover the month bar
+-- at the very top), but extends well BELOW to cover the controls / Replay-Refresh
+-- buttons that sit under the badge — so the mouse can travel down to them.
 local function logo_zone(mx, my)
     if not logo then return false end
-    local mar = math.floor(logo.h * 0.6)
+    local mar = math.floor(logo.h * 1.2)
     return mx >= logo.x - mar and mx <= logo.x + logo.w + mar
-       and my >= logo.y - mar and my <= logo.y + logo.h + mar
+       and my >= logo.y - math.floor(logo.h * 0.5)
+       and my <= logo.y + logo.h + math.floor(logo.h * 1.8)
 end
 
 -- Advance the briefing backdrop to the next PHOTO every ~10s (self-rescheduling
@@ -2608,6 +2643,18 @@ function backdrop_tick()
     LB.pidx = (LB.pidx % #LB.photos) + 1
     mp.set_property_number("playlist-pos", LB.photos[LB.pidx])
     mp.add_timeout(10, backdrop_tick)
+end
+
+-- Manual photo step during a briefing (so RIGHT/LEFT/wheel never reach a video).
+-- Returns true if it handled it (i.e. a briefing is live).
+function backdrop_step(d)
+    if not LB.hud_off then return false end
+    if LB.photos and #LB.photos > 0 then
+        LB.pidx = LB.pidx + d
+        if LB.pidx < 1 then LB.pidx = #LB.photos elseif LB.pidx > #LB.photos then LB.pidx = 1 end
+        mp.set_property_number("playlist-pos", LB.photos[LB.pidx])
+    end
+    return true
 end
 
 local function logo_tick()
@@ -2730,6 +2777,7 @@ end)
 --   from the playlist, and immediately advances to the next item.
 -- ----------------------------------------------------------------------------
 mp.register_script_message("ss-delete-current", function()
+    if briefing_active and briefing_active() then return end   -- not during a briefing
     local pos = mp.get_property_number("playlist-pos")
     if not pos then return end
     local path = mp.get_property("playlist/" .. pos .. "/filename")
