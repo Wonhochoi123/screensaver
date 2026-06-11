@@ -826,6 +826,7 @@ end
 mp.observe_property("pause", "bool", function(_, v) set_pause_indicator(v or false) end)
 
 mp.register_script_message("ss-toggle-pause", function()
+    if bo_wake() then return end
     -- During a briefing OR quiet hours the music is held silent and must not be
     -- (re)started by space / clicks.
     if (briefing_active and briefing_active()) or (is_sleep_time and is_sleep_time()) then return end
@@ -849,6 +850,7 @@ local function show_current_zoom()
 end
 
 mp.register_script_message("hud-zoom-in", function()
+    if bo_wake() then return end
     cur.auto = false
     if not cur.lat then return end
     local ni = math.min(#ZOOMS, cur.zidx + 1)
@@ -858,6 +860,7 @@ mp.register_script_message("hud-zoom-in", function()
 end)
 
 mp.register_script_message("hud-zoom-out", function()
+    if bo_wake() then return end
     cur.auto = false
     if not cur.lat then return end
     local ni = math.max(1, cur.zidx - 1)
@@ -867,6 +870,7 @@ mp.register_script_message("hud-zoom-out", function()
 end)
 
 mp.register_script_message("handle-left-click", function()
+    if bo_wake() then return end
     local mouse = mp.get_property_native("mouse-pos")
 
     -- Morning-briefing badge (center-top). While speaking it shows a transport row
@@ -1606,6 +1610,7 @@ end
 -- Mouse wheel: scroll the open song chooser; otherwise step the slideshow (only
 -- between photos during a briefing, so it never reaches a video).
 mp.register_script_message("ss-wheel", function(dir)
+    if bo_wake() then return end
     if MQ.chooser then
         MQ.scroll = MQ.scroll + (dir == "up" and -2 or 2)
         draw_chooser()
@@ -1618,6 +1623,7 @@ end)
 
 -- Slideshow prev/next (arrow keys). Photo-only during a briefing.
 mp.register_script_message("ss-nav", function(dir)
+    if bo_wake() then return end
     local d = (dir == "next") and 1 or -1
     if backdrop_step and backdrop_step(d) then return end
     mp.command(d > 0 and "playlist-next" or "playlist-prev")
@@ -1886,6 +1892,63 @@ end
 mp.add_periodic_timer(15, check_sleep)
 check_sleep()
 
+-- ----------------------------------------------------------------------------
+-- Quiet-hours blackout: during the sleep window only, after BLACKOUT_IDLE_MIN
+-- minutes with no input (mouse move / key / click) paint the whole screen black
+-- so it looks "off". Crucially we keep mpv rendering a black frame rather than
+-- using DPMS / display-off, so the HDMI signal never drops and the TV doesn't
+-- lose the source. Any activity, or a scheduled briefing, wakes it instantly.
+-- ----------------------------------------------------------------------------
+local blackout_ov = mp.create_osd_overlay("ass-events")
+blackout_ov.z = 2000        -- above every other overlay
+local BO = {
+    on      = false,
+    last    = mp.get_time(),
+    enable  = ((cfgstr("BLACKOUT_ENABLE") or "yes"):lower() ~= "no"),
+    idle    = (function() local m = cfgnum("BLACKOUT_IDLE_MIN"); if m <= 0 then m = 15 end; return m * 60 end)(),
+}
+local function bo_show()
+    if BO.on then return end
+    BO.on = true
+    BO.was_paused = mp.get_property_bool("pause")
+    mp.set_property_bool("pause", true)          -- stop decoding behind the black
+    local W, H = 1280, 720
+    blackout_ov.res_x = W; blackout_ov.res_y = H
+    blackout_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H00&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}",
+        W, W, H, H)
+    blackout_ov:update()
+end
+local function bo_hide()
+    if not BO.on then return end
+    BO.on = false
+    blackout_ov:remove()
+    if not BO.was_paused then mp.set_property_bool("pause", false) end
+end
+-- Reset the idle clock; if we were blacked out, wake and report it (so the input
+-- that woke us is swallowed instead of also triggering its action, like a phone).
+function bo_wake()
+    BO.last = mp.get_time()
+    if BO.on then bo_hide(); return true end
+    return false
+end
+local function bo_check()
+    if not BO.enable then return end
+    if (briefing_active and briefing_active()) or not is_sleep_time() then
+        bo_hide(); return                         -- never black during a briefing / awake hours
+    end
+    if not BO.on and (mp.get_time() - BO.last) >= BO.idle then bo_show() end
+end
+mp.add_periodic_timer(5, bo_check)
+-- Mouse movement is activity: reset the timer (and wake) whenever the pointer moves.
+do
+    local px, py
+    mp.observe_property("mouse-pos", "native", function(_, m)
+        if not m then return end
+        if m.x ~= px or m.y ~= py then px, py = m.x, m.y; bo_wake() end
+    end)
+end
+
 -- The loading screen, with a stylish fade-in on first appearance.
 local LC = { gen = 0 }
 function loading_render(frac)
@@ -1997,12 +2060,13 @@ local function jump_month(direction)
     end
 end
 
-mp.register_script_message("month-next", function() if not briefing_active() then jump_month(1) end end)
-mp.register_script_message("month-prev", function() if not briefing_active() then jump_month(-1) end end)
+mp.register_script_message("month-next", function() if bo_wake() then return end; if not briefing_active() then jump_month(1) end end)
+mp.register_script_message("month-prev", function() if bo_wake() then return end; if not briefing_active() then jump_month(-1) end end)
 
 -- Right-click the month bar → jump to that month's START; right-click anywhere
 -- else still quits the screensaver.
 mp.register_script_message("handle-right-click", function()
+    if bo_wake() then return end
     local mouse = mp.get_property_native("mouse-pos")
     if mouse and gp_section_at and not (briefing_active and briefing_active()) then
         local hv = gp_section_at(mouse.x, mouse.y)
@@ -2017,6 +2081,7 @@ end)
 -- 'l' toggles whether THIS media shows its landmark (e.g. "Eiffel Tower") instead
 -- of its city ("Paris") in the bottom-center headline; the choice is remembered.
 mp.register_script_message("ss-toggle-landmark", function()
+    if bo_wake() then return end
     if briefing_active and briefing_active() then return end
     local cands = cur.landmarks or {}
     if #cands == 0 then mp.osd_message("No landmarks for this one", 1.5); return end
@@ -2099,8 +2164,8 @@ local function jump_year(direction)
     end
 end
 
-mp.register_script_message("year-next", function() if not briefing_active() then jump_year(1) end end)
-mp.register_script_message("year-prev", function() if not briefing_active() then jump_year(-1) end end)
+mp.register_script_message("year-next", function() if bo_wake() then return end; if not briefing_active() then jump_year(1) end end)
+mp.register_script_message("year-prev", function() if bo_wake() then return end; if not briefing_active() then jump_year(-1) end end)
 
 -- ----------------------------------------------------------------------------
 -- ----------------------------------------------------------------------------
@@ -2903,6 +2968,7 @@ end)
 --   from the playlist, and immediately advances to the next item.
 -- ----------------------------------------------------------------------------
 mp.register_script_message("ss-delete-current", function()
+    if bo_wake() then return end
     if briefing_active and briefing_active() then return end   -- not during a briefing
     local pos = mp.get_property_number("playlist-pos")
     if not pos then return end
