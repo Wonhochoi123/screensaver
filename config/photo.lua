@@ -1832,22 +1832,44 @@ end
 mp.add_periodic_timer(15, check_sleep)
 check_sleep()
 
-mp.register_script_message("ss-show-loading", function(title, subtitle)
-    lock_loading_input()   -- defensive: stay non-interactive while loading
-    title    = (title    and title    ~= "") and title    or "LOADING"
-    subtitle = (subtitle and subtitle ~= "") and subtitle or "Please wait..."
-    local w, h = refresh_display_size()
+-- The loading screen, with a stylish fade-in on first appearance.
+local LC = { gen = 0 }
+function loading_render(frac)
+    local w, h = LC.w, LC.h
     local fs   = math.floor(h * 0.066)
     local fsp  = math.floor(h * 0.024 + 0.5)
     local fs2  = math.floor(h * 0.040)
     local fsp2 = math.floor(h * 0.016 + 0.5)
+    local ta = math.floor(0xFF + (0x00 - 0xFF) * frac + 0.5)   -- title    FF -> 00
+    local sa = math.floor(0xFF + (0x80 - 0xFF) * frac + 0.5)   -- subtitle FF -> 80
     loading_ov.res_x = w; loading_ov.res_y = h
     loading_ov.data = string.format(
-        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H00&}%s"
-        .. "\\N\\N{\\fnMontserrat SemiBold\\fs%d\\fsp%d\\alpha&H80&}%s",
+        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H%02X&}%s"
+        .. "\\N\\N{\\fnMontserrat SemiBold\\fs%d\\fsp%d\\alpha&H%02X&}%s",
         math.floor(w / 2), math.floor(h / 2) - math.floor(fs * 0.5),
-        fs, fsp, glow(fs), title, fs2, fsp2, subtitle)
+        fs, fsp, glow(fs), ta, LC.title, fs2, fsp2, sa, LC.subtitle)
     loading_ov:update()
+end
+mp.register_script_message("ss-show-loading", function(title, subtitle)
+    lock_loading_input()   -- defensive: stay non-interactive while loading
+    title    = (title    and title    ~= "") and title    or "LOADING"
+    subtitle = (subtitle and subtitle ~= "") and subtitle or "Please wait..."
+    local new_title = (title ~= LC.title)
+    LC.title, LC.subtitle = title, subtitle
+    LC.w, LC.h = refresh_display_size()
+    if new_title then                       -- first time / new heading → fade in
+        LC.t0 = mp.get_time(); LC.gen = LC.gen + 1
+        local gen = LC.gen
+        local function tick()
+            if gen ~= LC.gen then return end
+            local frac = math.min(1, (mp.get_time() - LC.t0) / 0.6)
+            loading_render(frac)
+            if frac < 1 then mp.add_timeout(0.033, tick) end
+        end
+        tick()
+    else
+        loading_render(1)                   -- subtitle updates: no re-fade
+    end
 end)
 
 mp.register_event("shutdown", function()
@@ -2283,7 +2305,29 @@ local function wrap_words(s, maxc, into)
     if line ~= "" then into[#into + 1] = { text = line } end
 end
 
--- Measure a caption line's real rendered width (hidden compute-bounds overlay).
+-- Caption "fancy appear": each line fades in (staggered), like the rest of the
+-- stylish text. (Backdrop is photos-only during a briefing, so add_timeout isn't
+-- starved by video decode.)
+local BC = { lines = {}, w = 0, h = 0, t0 = 0, gen = 0 }
+function briefing_fade()
+    local gen = BC.gen
+    local el  = mp.get_time() - BC.t0
+    local parts = {}
+    for i, L in ipairs(BC.lines) do
+        local p = (el - (i - 1) * 0.06) / 0.35           -- 0.35s fade, 0.06s/line stagger
+        local a = (p <= 0) and 0xFF or (p >= 1) and 0x12
+            or math.floor(0xFF + (0x12 - 0xFF) * p + 0.5)
+        parts[#parts + 1] = string.format(
+            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
+            L.cx, L.cy, L.fs, L.fsp, glow(L.fs), a, L.text)
+    end
+    briefing_ov.res_x = BC.w; briefing_ov.res_y = BC.h
+    briefing_ov.data = table.concat(parts, "\n")
+    briefing_ov:update()
+    if el < (#BC.lines - 1) * 0.06 + 0.36 then
+        mp.add_timeout(0.033, function() if gen == BC.gen then briefing_fade() end end)
+    end
+end
 
 local function draw_briefing()
     local f = io.open(BRIEF_TXT, "r")
@@ -2294,6 +2338,7 @@ local function draw_briefing()
     if txt ~= "" and txt ~= "__HIDE__" then briefing_paused = false end  -- new segment
     briefing_shown = txt
     if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
+        BC.gen = BC.gen + 1   -- cancel any in-flight fade
         briefing_ov:remove(); return
     end
 
@@ -2331,18 +2376,17 @@ local function draw_briefing()
     end
     if #lines == 0 then briefing_ov:remove(); return end
 
-    local y, texts = regionTop + math.floor((regionH - totalH) / 2), {}   -- centered below the top
+    -- Stash the positioned lines; briefing_fade animates them in.
+    local y = regionTop + math.floor((regionH - totalH) / 2)   -- centered below the top
+    BC.lines, BC.w, BC.h = {}, w, h
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
-        texts[#texts + 1] = string.format(
-            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H12&}%s",
-            math.floor(w / 2), y + math.floor(lineH / 2), fs, fsp, glow(fs), L.text)
+        BC.lines[#BC.lines + 1] = { text = L.text, cx = math.floor(w / 2),
+                                    cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
         y = y + lineH
     end
-
-    briefing_ov.res_x = w; briefing_ov.res_y = h
-    briefing_ov.data = table.concat(texts, "\n")
-    briefing_ov:update()
+    BC.t0 = mp.get_time(); BC.gen = BC.gen + 1
+    briefing_fade()
 end
 mp.add_periodic_timer(0.3, draw_briefing)
 
@@ -2574,7 +2618,15 @@ local function draw_controls()
     controls_ov:update()
 end
 
--- Replay / Refresh chooser (idle, after clicking the logo).
+-- True if today's briefing is already generated (has cached audio).
+function briefing_has_cache()
+    local files = utils.readdir(DATA_DIR .. "/Briefing/" .. os.date("%Y-%m-%d"), "files")
+    if files then for _, f in ipairs(files) do if f:match("%.mp3$") then return true end end end
+    return false
+end
+
+-- Idle chooser: Replay/Refresh once today's briefing exists, else a single
+-- GENERATE (there's nothing to replay yet).
 local function draw_menu()
     menu_boxes = {}
     if not logo then controls_ov:remove(); return end
@@ -2583,14 +2635,15 @@ local function draw_menu()
     local bh = math.floor(L.h * 0.66)
     local g  = math.floor(L.h * 0.22)
     local rad = math.floor(bh * 0.32)
-    local defs = {
-        { t = "REPLAY",  mode = "--play"  },
-        { t = "REFRESH", mode = "--fresh" },
-    }
+    local defs = briefing_has_cache()
+        and { { t = "REPLAY", mode = "--play" }, { t = "REFRESH", mode = "--fresh" } }
+        or  { { t = "GENERATE", mode = "--play" } }
     local th = brief_theme()
-    local bws = {}
-    for i, d in ipairs(defs) do bws[i] = math.floor(#d.t * fs * 0.66 + fs * 1.6) end
-    local totalw = bws[1] + bws[2] + g
+    local bws, totalw = {}, 0
+    for i, d in ipairs(defs) do
+        bws[i] = math.floor(#d.t * fs * 0.66 + fs * 1.6); totalw = totalw + bws[i]
+    end
+    totalw = totalw + (#defs - 1) * g
     local bx = L.x + math.floor((L.w - totalw) / 2)
     local by = L.y + L.h + math.floor(L.h * 0.16)
     local parts = {}

@@ -262,6 +262,7 @@ Terminal=false
 Name=Start Screensaver
 Comment=Launch the photo screensaver now
 Categories=Utility;
+StartupWMClass=mpv
 EOF
 
 # =============================================================================

@@ -44,6 +44,7 @@ run_pass() {
         elif [ "$m" -nt "$xmp" ];                    then stale=1
         elif [ -n "$txt" ] && [ "$txt" -nt "$xmp" ]; then stale=1
         elif [ -n "${GEODB:-}" ] && [ -s "$GEODB" ] && [ "$GEODB" -nt "$xmp" ]; then stale=1
+        elif [ -s "$GEO_RESOLVE" ] && [ "$GEO_RESOLVE" -nt "$xmp" ]; then stale=1   # resolver changed
         fi
         [ "$stale" = 1 ] && printf '%s\n' "$m"
     done > "$STALE"

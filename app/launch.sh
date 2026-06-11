@@ -145,6 +145,7 @@ LOAD_SOCK="/tmp/ss_load_$$.sock"
 rm -f "$LOAD_SOCK"
 mpv --config-dir="$CFG_DIR" \
     --sub-fonts-dir="$FONT_DIR" \
+    --title="Start Screensaver" --x11-name="StartScreensaver" \
     --image-display-duration="$PHOTO_DURATION" \
     --volume=0 \
     --input-ipc-server="$LOAD_SOCK" \
@@ -296,6 +297,7 @@ else
     # Fallback: IPC socket never appeared (mpv failed to start).
     mpv --config-dir="$CFG_DIR" \
         --sub-fonts-dir="$FONT_DIR" \
+        --title="Start Screensaver" --x11-name="StartScreensaver" \
         --image-display-duration="$PHOTO_DURATION" \
         --volume="$VOLUME" \
         --playlist="$PLAYLIST"

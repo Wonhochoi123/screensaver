@@ -23,12 +23,9 @@ def win(r):
     dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: score within each feature's own radius, with a minimum score so
-#     that when nothing relevant is close we show NO landmark rather than a
-#     far-fetched guess. (Interim heuristic; the real prominence fix comes in the
-#     OSM/Wikidata rework.) ---
+# --- landmark: RAW nearest named feature within its own radius (no weighting,
+#     no minimum-score filter) — just the closest one. ---
 la0, la1, lo0, lo1 = win(35)
-MIN_SCORE = 4.0
 best = None
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
         "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
@@ -36,12 +33,9 @@ for name, flat, flon, fcode, elev, w, mk in cur.execute(
     d = hav(lat, lon, flat, flon)
     if d > mk:
         continue
-    s = w - 7.0 * (d / mk)
-    if fcode in ("PK", "MT", "VLC", "CNYN", "CRTR") and elev:
-        s += min(elev / 2000.0, 2.0)
-    if best is None or s > best[0]:
-        best = (s, name)
-landmark = best[1] if (best and best[0] >= MIN_SCORE) else ""
+    if best is None or d < best[0]:
+        best = (d, name)
+landmark = best[1] if best else ""
 
 # --- city: nearest sizable populated place (population-aware) ----------------
 la0, la1, lo0, lo1 = win(30)
