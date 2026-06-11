@@ -1899,30 +1899,30 @@ check_sleep()
 -- using DPMS / display-off, so the HDMI signal never drops and the TV doesn't
 -- lose the source. Any activity, or a scheduled briefing, wakes it instantly.
 -- ----------------------------------------------------------------------------
-local blackout_ov = mp.create_osd_overlay("ass-events")
-blackout_ov.z = 2000        -- above every other overlay
-local BO = {
-    on      = false,
-    last    = mp.get_time(),
-    enable  = ((cfgstr("BLACKOUT_ENABLE") or "yes"):lower() ~= "no"),
-    idle    = (function() local m = cfgnum("BLACKOUT_IDLE_MIN"); if m <= 0 then m = 15 end; return m * 60 end)(),
+-- NOTE: photo.lua sits at Lua's 200-local-per-chunk cap, so everything here
+-- lives in the global BO table and the helpers are GLOBAL functions — adding new
+-- top-level `local`s overflows the cap and stops the whole script from loading.
+BO = {
+    ov     = mp.create_osd_overlay("ass-events"),
+    on     = false,
+    last   = mp.get_time(),
+    enable = ((cfgstr("BLACKOUT_ENABLE") or "yes"):lower() ~= "no"),
+    idle   = (function() local m = cfgnum("BLACKOUT_IDLE_MIN"); if m <= 0 then m = 15 end; return m * 60 end)(),
 }
-local function bo_show()
+BO.ov.z = 2000        -- above every other overlay
+function bo_show()
     if BO.on then return end
     BO.on = true
     BO.was_paused = mp.get_property_bool("pause")
     mp.set_property_bool("pause", true)          -- stop decoding behind the black
-    local W, H = 1280, 720
-    blackout_ov.res_x = W; blackout_ov.res_y = H
-    blackout_ov.data = string.format(
-        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H00&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}",
-        W, W, H, H)
-    blackout_ov:update()
+    BO.ov.res_x = 1280; BO.ov.res_y = 720
+    BO.ov.data = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H00&\\p1}m 0 0 l 1280 0 1280 720 0 720{\\p0}"
+    BO.ov:update()
 end
-local function bo_hide()
+function bo_hide()
     if not BO.on then return end
     BO.on = false
-    blackout_ov:remove()
+    BO.ov:remove()
     if not BO.was_paused then mp.set_property_bool("pause", false) end
 end
 -- Reset the idle clock; if we were blacked out, wake and report it (so the input
@@ -1932,7 +1932,7 @@ function bo_wake()
     if BO.on then bo_hide(); return true end
     return false
 end
-local function bo_check()
+function bo_check()
     if not BO.enable then return end
     if (briefing_active and briefing_active()) or not is_sleep_time() then
         bo_hide(); return                         -- never black during a briefing / awake hours
@@ -1941,13 +1941,10 @@ local function bo_check()
 end
 mp.add_periodic_timer(5, bo_check)
 -- Mouse movement is activity: reset the timer (and wake) whenever the pointer moves.
-do
-    local px, py
-    mp.observe_property("mouse-pos", "native", function(_, m)
-        if not m then return end
-        if m.x ~= px or m.y ~= py then px, py = m.x, m.y; bo_wake() end
-    end)
-end
+mp.observe_property("mouse-pos", "native", function(_, m)
+    if not m then return end
+    if m.x ~= BO.px or m.y ~= BO.py then BO.px, BO.py = m.x, m.y; bo_wake() end
+end)
 
 -- The loading screen, with a stylish fade-in on first appearance.
 local LC = { gen = 0 }
