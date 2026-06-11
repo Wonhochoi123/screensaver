@@ -826,9 +826,9 @@ end
 mp.observe_property("pause", "bool", function(_, v) set_pause_indicator(v or false) end)
 
 mp.register_script_message("ss-toggle-pause", function()
-    -- While a briefing speaks the whole screensaver is held muted/paused; don't
-    -- let space / clicks resume the slideshow's own music underneath it.
-    if briefing_active and briefing_active() then return end
+    -- During a briefing OR quiet hours the music is held silent and must not be
+    -- (re)started by space / clicks.
+    if (briefing_active and briefing_active()) or (is_sleep_time and is_sleep_time()) then return end
     local newp = not mp.get_property_bool("pause")
     mp.set_property_bool("pause", newp)
     local v = newp and "true" or "false"
@@ -912,7 +912,10 @@ mp.register_script_message("handle-left-click", function()
         local dx = mouse.x - thumb.cx
         local dy = mouse.y - thumb.cy
         if dx * dx + dy * dy <= thumb.r * thumb.r then
-            local sock = (briefing_active and briefing_active()) and BGM_SOCK or AUDIO_SOCK
+            local brief = briefing_active and briefing_active()
+            -- Quiet hours: the slideshow music can't be (re)started from the thumb.
+            if not brief and is_sleep_time and is_sleep_time() then return end
+            local sock = brief and BGM_SOCK or AUDIO_SOCK
             mp.commandv("run", "/bin/sh", "-c",
                 "printf '%s\\n' '{\"command\":[\"cycle\",\"pause\"]}' | socat - UNIX-CONNECT:" .. sock .. " 2>/dev/null")
             return
@@ -1843,7 +1846,7 @@ local function parse_hm(s)
     return hh and math.floor(hh * 60) or nil
 end
 
-local function is_sleep_time()
+function is_sleep_time()      -- global: the click handler (defined earlier) uses it
     local a = parse_hm(cfgstr("MUSIC_SLEEP_START"))
     local b = parse_hm(cfgstr("MUSIC_SLEEP_END"))
     if not a or not b or a == b then return false end     -- disabled
@@ -1859,12 +1862,25 @@ local function set_audio_pause(p)
         "]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
 end
 
+-- Quiet hours: pause the music AND mute the slideshow's own (video) volume, and
+-- keep it that way (re-applied each check so it can't be nudged back on). Restore
+-- the volume on the way out.
 local music_asleep = nil
+local SLEEP_VOL = nil
 local function check_sleep()
     local s = is_sleep_time()
-    if s ~= music_asleep then
-        music_asleep = s
-        set_audio_pause(s)        -- pause entering the window, resume leaving it
+    if s then
+        if not music_asleep then
+            music_asleep = true
+            local v = mp.get_property_number("volume")
+            if v and v > 0 then SLEEP_VOL = v end       -- remember the real volume
+        end
+        set_audio_pause(true)
+        mp.set_property_number("volume", 0)
+    elseif music_asleep then
+        music_asleep = false
+        set_audio_pause(false)
+        mp.set_property_number("volume", SLEEP_VOL or 70)
     end
 end
 mp.add_periodic_timer(15, check_sleep)
@@ -2856,21 +2872,17 @@ local function logo_tick()
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
         logo_text_ov:update()
     elseif idle and hh then
-        -- Under the idle clock: a small countdown to the next briefing.
-        local nowt  = os.time()
-        local lt    = os.date("*t", nowt)
-        local target = os.time{ year = lt.year, month = lt.month, day = lt.day,
-                                hour = tonumber(hh), min = tonumber(mm), sec = 0 }
-        if target <= nowt then target = target + 86400 end
-        local d  = target - nowt
-        local fs = math.floor(h * 0.018)
+        -- Under the idle clock: when the next briefing is scheduled.
+        local H, M = tonumber(hh), tonumber(mm)
+        local h12  = H % 12; if h12 == 0 then h12 = 12 end
+        local when = string.format("%d:%02d %s", h12, M, (H < 12) and "AM" or "PM")
+        local fs   = math.floor(h * 0.018)
         logo_text_ov.res_x = w; logo_text_ov.res_y = h
         logo_text_ov.data = string.format(
             "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H50&}"
-            .. "BRIEFING STARTS IN  %02d:%02d:%02d",
-            math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.45),
-            fs, math.floor(fs * 0.05 + 0.5), glow(fs),
-            math.floor(d / 3600), math.floor(d % 3600 / 60), d % 60)
+            .. "BRIEFING SCHEDULED AT: %s",
+            math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.12),
+            fs, math.floor(fs * 0.05 + 0.5), glow(fs), when)
         logo_text_ov:update()
     else
         logo_text_ov:remove()

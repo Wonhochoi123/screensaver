@@ -33,7 +33,7 @@ def win(r):
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
 # --- landmark: the nearest few named features (each within its own radius),
-#     closest first, up to 3. Joined with "|" so the app can cycle through them. ---
+#     closest first, up to 5. Joined with "|" so the app can cycle through them. ---
 la0, la1, lo0, lo1 = win(35)
 cands = []
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
@@ -49,7 +49,7 @@ for d, name in cands:
     n = ascii_(name)
     if n and n.lower() not in seen:
         seen.add(n.lower()); names.append(n)
-    if len(names) >= 3:
+    if len(names) >= 5:
         break
 landmark = "|".join(names)
 
