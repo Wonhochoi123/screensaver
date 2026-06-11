@@ -610,13 +610,23 @@ local function clear_other_hud()
     top_bar_ov:remove(); top_bar_bg_ov:remove(); top_label_ov:remove()
 end
 
+-- SIGBUS guard for all bitmap overlays: overlay-add mmaps the file at the size
+-- we claim, and mpv crashes (bus error) reading past EOF if the file is shorter
+-- (half-written, or rendered for a different size). Verify before every blit.
+function bgra_complete(path, S)   -- GLOBAL: main chunk is at the 200-local cap
+    local fi = utils.file_info(path)
+    return fi and fi.size and fi.size >= S * S * 4
+end
+
 local function apply_qr(bgra_path, L)
     if briefing_active and briefing_active() then return end
+    if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
 local function apply_minimap(bgra_path, L)
     if briefing_active and briefing_active() then return end
+    if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
@@ -1661,7 +1671,18 @@ local function draw_thumb()
     if not thumb then TH.shown = nil; return end
     local want = music_playing and TH.color or TH.gray
     if not want then return end          -- no cover art yet → just the empty ASS ring
+    -- SIGBUS guard: overlay-add mmaps the file at the size WE claim, and mpv
+    -- crashes (bus error) reading past EOF if the file is smaller. Never blit
+    -- art rendered for a different diameter (window resized since the build) —
+    -- re-render at the current size instead.
+    if TH.d ~= thumb.d then
+        TH.shown = nil
+        if TH.path and not TH.busy then load_thumb_for(TH.path) end
+        return
+    end
     if want == TH.shown then return end
+    local fi = utils.file_info(want)
+    if not (fi and fi.size and fi.size >= thumb.d * thumb.d * 4) then return end
     TH.shown = want
     music_thumb_ov:remove()              -- the bitmap has its own baked ring on top
     mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
@@ -1674,19 +1695,22 @@ end
 function load_thumb_for(path)
     if not thumb or path == nil or path == "" then return end
     local d = thumb.d
+    TH.busy = true
     mp.command_native_async({
         name = "subprocess", capture_stdout = true, playback_only = false,
         args = { CFG_DIR .. "/build-thumb.sh", path, tostring(d) },
     }, function(ok, res)
+        TH.busy = false
         if TH.path ~= path or not thumb then return end   -- track moved on
         local dir = (ok and res and res.stdout or ""):gsub("%s+$", "")
         if dir ~= "" and file_exists(dir .. "/color.bgra") then   -- non-empty art file
             TH.color = dir .. "/color.bgra"
             TH.gray  = dir .. "/gray.bgra"
+            TH.d     = d         -- the diameter this art was actually rendered at
             TH.shown = nil
             draw_thumb()
         else
-            TH.color = nil; TH.gray = nil; TH.shown = nil
+            TH.color = nil; TH.gray = nil; TH.shown = nil; TH.d = nil
             mp.command_native({"overlay-remove", THUMB_ID})
         end
     end)
@@ -1696,7 +1720,7 @@ end
 local function on_music_path(p)
     if p == TH.path then return end
     TH.path = p
-    TH.color = nil; TH.gray = nil; TH.shown = nil
+    TH.color = nil; TH.gray = nil; TH.shown = nil; TH.d = nil
     mp.command_native({"overlay-remove", THUMB_ID})
     draw_thumb_ring()        -- empty ring while the new art is generated
     load_thumb_for(p)

@@ -140,7 +140,10 @@ PY
         "$TMP/QR_shadow.png" -composite "$TMP/QR_disc.png" -composite \
         "$TMP/QR_ringglow.png" -composite "$TMP/QR_final.png" || exit 5
 
-    $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR" || exit 7
+    # Write-then-rename: mpv mmaps these files (overlay-add); publishing a
+    # half-written file can SIGBUS it.
+    $IM "$TMP/QR_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_QR.part" || exit 7
+    mv "$OUT_QR.part" "$OUT_QR"
 fi
 
 if [ "$need_map" = 1 ]; then
@@ -224,7 +227,8 @@ PY
         "$TMP/M_shadow.png" -composite "$TMP/M_disc.png" -composite \
         "$TMP/M_ringglow.png" -composite "$TMP/M_marker.png" -composite "$TMP/M_final.png" || exit 5
     
-    $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP" || exit 7
+    $IM "$TMP/M_final.png" -resize ${HUD_W}x${HUD_H}\! -depth 8 bgra:"$OUT_MAP.part" || exit 7
+    mv "$OUT_MAP.part" "$OUT_MAP"
 fi
 
 exit 0
