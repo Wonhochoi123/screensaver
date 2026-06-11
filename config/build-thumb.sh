@@ -22,7 +22,7 @@ if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
 
 MTIME="$(stat -c '%Y' "$FILE" 2>/dev/null || echo 0)"
 # Bump the version tag whenever the rendering changes, to bust stale caches.
-KEY="$(printf '%s|%s|v3|%s' "$FILE" "$SIZE" "$MTIME" | md5sum | cut -d' ' -f1)"
+KEY="$(printf '%s|%s|v4|%s' "$FILE" "$SIZE" "$MTIME" | md5sum | cut -d' ' -f1)"
 OUT="$RES_DIR/thumbs/$KEY"
 
 prune_cache() {   # keep only the 30 most-recently-used thumbs
@@ -43,17 +43,20 @@ ffmpeg -v error -y -i "$FILE" -an -map 0:v:0 -frames:v 1 "$TMP/cover.png" 2>/dev
 [ -s "$TMP/cover.png" ] || exit 2
 
 # Square the cover (center-crop, no distortion, no black bars) and a circle mask.
+# The circle is inset by a small margin so the ring (and its anti-aliasing) has
+# room and isn't clipped flat at the bitmap's top/bottom/left/right edges.
 $IM "$TMP/cover.png" -resize "${SIZE}x${SIZE}^" -gravity center -extent "${SIZE}x${SIZE}" "$TMP/sq.png" || exit 3
 R=$(( SIZE / 2 ))
-$IM -size "${SIZE}x${SIZE}" xc:none -fill white -draw "circle $R,$R $R,0" "$TMP/mask.png" || exit 3
+RW=$(( SIZE / 32 )); [ "$RW" -lt 1 ] && RW=1     # thin ring (≈3%)
+M=$(( RW + 2 ))                                  # margin: keeps the ring off the edge
+$IM -size "${SIZE}x${SIZE}" xc:none -fill white -draw "circle $R,$R $R,$M" "$TMP/mask.png" || exit 3
 
 mkdir -p "$OUT.part"
 # Circular thumbnail with a light-grey ring baked on top (overlay-add bitmaps
 # render ABOVE the ASS overlays, so the ring must live in the bitmap to frame
 # the art). `-alpha set` forces an alpha channel so DstIn actually makes the
 # corners transparent (covers stay opaque RGB otherwise → square thumb).
-RW=$(( SIZE / 32 )); [ "$RW" -lt 1 ] && RW=1     # thin ring (≈3%)
-RING=( -fill none -stroke "#C8C8C8" -strokewidth "$RW" -draw "circle $R,$R $R,$(( RW / 2 ))" )
+RING=( -fill none -stroke "#C8C8C8" -strokewidth "$RW" -draw "circle $R,$R $R,$M" )
 $IM "$TMP/sq.png" -alpha set "$TMP/mask.png" -compose DstIn -composite \
     "${RING[@]}" -depth 8 "bgra:$OUT.part/color.bgra" || exit 4
 $IM "$TMP/sq.png" -modulate 100,0 -alpha set "$TMP/mask.png" -compose DstIn -composite \

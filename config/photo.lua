@@ -486,32 +486,9 @@ local COUNTRY_ABBR = {
     ["japan"]="JP",["china"]="CN",["taiwan"]="TW",["france"]="FR",["germany"]="DE",
     ["italy"]="IT",["spain"]="ES",["portugal"]="PT",["netherlands"]="NL",["belgium"]="BE",
 }
-local SUBDIV_ABBR = {
-    ["alabama"]="AL",["alaska"]="AK",["arizona"]="AZ",["arkansas"]="AR",["california"]="CA",
-    ["colorado"]="CO",["connecticut"]="CT",["delaware"]="DE",["florida"]="FL",["georgia"]="GA",
-    ["hawaii"]="HI",["idaho"]="ID",["illinois"]="IL",["indiana"]="IN",["iowa"]="IA",
-    ["kansas"]="KS",["kentucky"]="KY",["louisiana"]="LA",["maine"]="ME",["maryland"]="MD",
-    ["massachusetts"]="MA",["michigan"]="MI",["minnesota"]="MN",["mississippi"]="MS",
-    ["missouri"]="MO",["montana"]="MT",["nebraska"]="NE",["nevada"]="NV",["new hampshire"]="NH",
-    ["new jersey"]="NJ",["new mexico"]="NM",["new york"]="NY",["north carolina"]="NC",
-    ["north dakota"]="ND",["ohio"]="OH",["oklahoma"]="OK",["oregon"]="OR",["pennsylvania"]="PA",
-    ["rhode island"]="RI",["south carolina"]="SC",["south dakota"]="SD",["tennessee"]="TN",
-    ["texas"]="TX",["utah"]="UT",["vermont"]="VT",["virginia"]="VA",["washington"]="WA",
-    ["west virginia"]="WV",["wisconsin"]="WI",["wyoming"]="WY",["district of columbia"]="DC",
-    ["ontario"]="ON",["quebec"]="QC",["québec"]="QC",["british columbia"]="BC",["alberta"]="AB",
-}
-
 local function abbr_country(name, code)
     if code and code ~= "" then return code:upper() end
     if name and name ~= "" then return COUNTRY_ABBR[name:lower()] or name end
-    return name
-end
-local function abbr_subdiv(name, iso)
-    if iso then
-        local c = iso:match("%-(%a%a%a?)$")
-        if c then return c end
-    end
-    if name and name ~= "" then return SUBDIV_ABBR[name:lower()] or name end
     return name
 end
 
@@ -696,19 +673,33 @@ local function iso_to_display(iso)
     return t and os.date("%b %d, %Y", t) or nil
 end
 
+-- Per-media "show the landmark instead of the city" preferences (toggled by the
+-- 'l' key, remembered across sessions in a tiny text file of media paths).
+local LP = {}
+do
+    local f = io.open(DATA_DIR .. "/landmark_prefs.txt", "r")
+    if f then for line in f:lines() do if line ~= "" then LP[line] = true end end; f:close() end
+end
+local function save_landmark_prefs()
+    local f = io.open(DATA_DIR .. "/landmark_prefs.txt", "w")
+    if not f then return end
+    for k in pairs(LP) do f:write(k, "\n") end
+    f:close()
+end
+
 local function resolve_meta(orig_path, cb)
-    -- Simple by design: the bottom-center headline is just the CITY name, and
-    -- the top-right line is the date + the broader region (state / country).
-    -- No detailed-landmark lookup any more.
-    local date, city, general, lat, lon = nil, "", "", nil, nil
+    -- The bottom-center headline is the CITY name by default, or the LANDMARK when
+    -- this media is toggled to it ('l' key). Top-right is the date + region.
+    local date, city, general, lat, lon, landmark = nil, "", "", nil, nil, ""
 
     -- 1) Base values straight from the sidecar (a tiny file read, no subprocess).
     local x = read_xmp(orig_path .. ".xmp")
     if x then
         date     = iso_to_display(x.date_iso)
         lat, lon = x.lat, x.lon
+        landmark = x.landmark or ""
         local _, c, region, country =
-            niagara_fix(nil, x.city, abbr_subdiv(x.state, nil), abbr_country(x.country, nil))
+            niagara_fix(nil, x.city, x.state, abbr_country(x.country, nil))   -- full state name
         city    = c or ""
         general = join_loc(nil, nil, region, country)   -- state + country only
     end
@@ -736,7 +727,7 @@ local function resolve_meta(orig_path, cb)
     -- already seen reuses its folder instead of rebuilding every tile.
     local _, disp_h = refresh_display_size()
     cb({ date = date, city = city, general = general, lat = lat, lon = lon,
-         mdir = RES_DIR .. "/h_" .. tostring(disp_h) })
+         landmark = landmark, mdir = RES_DIR .. "/h_" .. tostring(disp_h) })
 end
 
 local pq        = {}
@@ -770,30 +761,30 @@ local function start_prewarm()
 end
 
 local function set_pause_indicator(paused)
-    if paused then
-        -- Two vertical bars in the top-right, sized/placed as fractions of the
-        -- ACTUAL display — adapts to any resolution or aspect ratio.
-        local w, h = refresh_display_size()
-        pause_ov.res_x = w; pause_ov.res_y = h
-        local bw    = math.floor(h * 0.018)    -- bar width
-        local bh    = math.floor(h * 0.054)    -- bar height
-        local gap   = math.floor(h * 0.015)    -- gap between the two bars
-        local right = math.floor(w * 0.025)    -- inset from the right edge
-        local y0    = math.floor(h * 0.06)     -- inset from the top
-        local y1    = y0 + bh
-        local x2    = w - right                 -- right bar's right edge
-        local x1L   = x2 - bw                    -- right bar's left edge
-        local x0L   = x1L - gap - bw             -- left bar's left edge
-        pause_ov.data = string.format(
-            "{\\an7\\pos(0,0)\\bord0\\shad4\\3c&H000000&\\4c&H000000&\\1c&HFFFFFF&\\alpha&H40&\\p1}"
-            .. "m %d %d l %d %d l %d %d l %d %d "
-            .. "m %d %d l %d %d l %d %d l %d %d{\\p0}",
-            x0L, y0, x0L + bw, y0, x0L + bw, y1, x0L, y1,
-            x1L, y0, x1L + bw, y0, x1L + bw, y1, x1L, y1)
-        pause_ov:update()
-    else
-        pause_ov:remove()
-    end
+    if not paused then pause_ov:remove(); return end
+    -- Draw in the OSD's OWN pixel space (osd-width/height) so the bars are never
+    -- stretched on odd aspect ratios — and size both dimensions off h so the bar
+    -- shape stays constant. No shadow; soft translucent white like the rest of
+    -- the HUD. Sits a bit lower than before.
+    local w = mp.get_property_number("osd-width") or 0
+    local h = mp.get_property_number("osd-height") or 0
+    if w < 1 or h < 1 then w, h = refresh_display_size() end
+    pause_ov.res_x = w; pause_ov.res_y = h
+    local bw    = math.floor(h * 0.016)    -- bar width
+    local bh    = math.floor(h * 0.050)    -- bar height (≈3× width)
+    local gap   = math.floor(h * 0.014)    -- gap between the two bars
+    local right = math.floor(w * 0.020)    -- inset from the right edge
+    local y0    = math.floor(h * 0.11)     -- lower inset from the top
+    local y1    = y0 + bh
+    local x1L   = w - right - bw            -- right bar's left edge
+    local x0L   = x1L - gap - bw            -- left bar's left edge
+    pause_ov.data = string.format(
+        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H30&\\p1}"
+        .. "m %d %d l %d %d l %d %d l %d %d "
+        .. "m %d %d l %d %d l %d %d l %d %d{\\p0}",
+        x0L, y0, x0L + bw, y0, x0L + bw, y1, x0L, y1,
+        x1L, y0, x1L + bw, y0, x1L + bw, y1, x1L, y1)
+    pause_ov:update()
 end
 mp.observe_property("pause", "bool", function(_, v) set_pause_indicator(v or false) end)
 
@@ -862,11 +853,17 @@ mp.register_script_message("handle-left-click", function()
         end
     end
 
-    -- Click a month on the top global bar to jump straight to it.
+    -- Left-click the month bar: jump to the EXACT media under the cursor (the
+    -- horizontal position within the month maps to its item). (Right-click jumps
+    -- to the month's start — see handle-right-click.)
     if mouse and gp_section_at then
         local hv = gp_section_at(mouse.x, mouse.y)
         if hv and gp_sections and gp_sections[hv] then
-            mp.set_property_number("playlist-pos", gp_sections[hv].start - 1)
+            local s = gp_sections[hv]
+            local frac = (mouse.x - s.x0) / math.max(1, s.w)
+            frac = math.max(0, math.min(0.999, frac))
+            local item = math.min(s.start + math.floor(frac * s.count), s.start + s.count - 1)
+            mp.set_property_number("playlist-pos", item - 1)
             return
         end
     end
@@ -1215,14 +1212,17 @@ mp.register_event("file-loaded", function()
                 ov:update()
             end
 
-            -- Bottom-center headline: just the CITY name. Doubled letter spacing.
-            -- The glyph-by-glyph reveal only plays when the city actually CHANGES
-            -- — repeated same-city photos just show it (no rebuild animation).
-            local city = clean_text(m.city or ""):upper()
+            -- Bottom-center headline: the CITY name, or the LANDMARK if this media
+            -- is toggled to it ('l' key). The glyph reveal plays only on change.
+            local use_lm = LP[cur.orig] and m.landmark and m.landmark ~= ""
+            local city = clean_text(use_lm and m.landmark or (m.city or "")):upper()
             local fs   = math.floor(L.win_h * HUD_CITY_FS)   -- bigger headline
             local fsp  = math.floor(fs * 0.3636 + 0.5)       -- spacing scales with size
             local cx   = math.floor(L.win_w / 2)
             local by   = L.win_h - m_bottom
+            -- Stash what the 'l' toggle needs to redraw this headline.
+            cur.city = m.city or ""; cur.landmark = m.landmark or ""
+            cur.head = { cx = cx, by = by, fs = fs, fsp = fsp, ww = L.win_w, wh = L.win_h }
             if city == "" then
                 main_shown = nil
                 lm_gen = lm_gen + 1
@@ -1621,6 +1621,10 @@ local function on_music_path(p)
     mp.command_native({"overlay-remove", THUMB_ID})
     draw_thumb_ring()        -- empty ring while the new art is generated
     load_thumb_for(p)
+    -- The metadata poll runs on a 3s timer that video decode starves, so the song
+    -- name lags on track changes during video. The path poll IS decode-proof (it's
+    -- driven by percent-pos), so refresh the marquee text here too.
+    if poll_music then poll_music() end
 end
 
 -- Poll the audio player (separate mpv on AUDIO_SOCK): position for the bar, file
@@ -1887,6 +1891,38 @@ end
 
 mp.register_script_message("month-next", function() jump_month(1) end)
 mp.register_script_message("month-prev", function() jump_month(-1) end)
+
+-- Right-click the month bar → jump to that month's START; right-click anywhere
+-- else still quits the screensaver.
+mp.register_script_message("handle-right-click", function()
+    local mouse = mp.get_property_native("mouse-pos")
+    if mouse and gp_section_at then
+        local hv = gp_section_at(mouse.x, mouse.y)
+        if hv and gp_sections and gp_sections[hv] then
+            mp.set_property_number("playlist-pos", gp_sections[hv].start - 1)
+            return
+        end
+    end
+    mp.command("quit")
+end)
+
+-- 'l' toggles whether THIS media shows its landmark (e.g. "Eiffel Tower") instead
+-- of its city ("Paris") in the bottom-center headline; the choice is remembered.
+mp.register_script_message("ss-toggle-landmark", function()
+    if briefing_active and briefing_active() then return end
+    local lm = cur.landmark
+    if not lm or lm == "" then mp.osd_message("No landmark tagged for this one", 1.5); return end
+    LP[cur.orig] = (not LP[cur.orig]) and true or nil
+    save_landmark_prefs()
+    main_shown = nil; lm_gen = lm_gen + 1
+    local text = clean_text(LP[cur.orig] and lm or (cur.city or "")):upper()
+    if cur.head and text ~= "" then
+        main_shown = text
+        animate_landmark(text, cur.head.cx, cur.head.by, cur.head.fs, cur.head.fsp, cur.head.ww, cur.head.wh)
+    else
+        landmark_ov:remove()
+    end
+end)
 
 -- ----------------------------------------------------------------------------
 -- Playlist Chapters (Jump by Year)
@@ -2214,18 +2250,6 @@ local function wrap_words(s, maxc, into)
 end
 
 -- Measure a caption line's real rendered width (hidden compute-bounds overlay).
--- Measure a caption line's real rendered width. It MUST use the exact same font,
--- size AND letter-spacing (\fsp) as the rendered text, or the box comes out too
--- short for the text (the \fsp adds up across a line).
-local function measure_px(w, h, fs, fsp, text)
-    music_measure_ov.res_x = w; music_measure_ov.res_y = h
-    music_measure_ov.hidden = true; music_measure_ov.compute_bounds = true
-    music_measure_ov.data = string.format(
-        "{\\an7\\pos(0,0)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0}%s", fs, fsp, text)
-    local mb = music_measure_ov:update(); music_measure_ov:remove()
-    if mb and mb.x0 and mb.x1 and mb.x1 > mb.x0 then return math.ceil(mb.x1 - mb.x0) end
-    return math.floor(#text * (fs * 0.55 + fsp))
-end
 
 local function draw_briefing()
     local f = io.open(BRIEF_TXT, "r")
@@ -2240,45 +2264,50 @@ local function draw_briefing()
     end
 
     local w, h = refresh_display_size()
-    local fs   = math.floor(h * 0.030)
-    local fsp  = math.floor(fs * 0.02 + 0.5)
-    local maxc = math.max(18, math.floor((w * 0.66) / (fs * 0.50)))
+    local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
+    -- Fill the screen below the badge/controls at the top.
+    local regionTop = math.floor(h * 0.20)
+    local regionH   = h - regionTop - math.floor(h * 0.04)
+    local maxH, maxW = regionH, w * 0.88
 
-    -- Build the wrapped lines, flagging the first line of each new sentence so we
-    -- can leave a little breathing room between sentences.
-    local lines = {}
-    for si, sent in ipairs(split_sentences(txt:gsub("[\r\n]+", " "))) do
-        local mark = #lines + 1
-        wrap_words(sent, maxc, lines)
-        if si > 1 and lines[mark] then lines[mark].gap_before = true end
+    -- Captions are the main content while a briefing plays: no background (they
+    -- sit on the blurred backdrop), centered, and auto-sized as BIG as will fit.
+    local function layout(fs)
+        local fsp  = math.floor(fs * 0.02 + 0.5)
+        local maxc = math.max(10, math.floor(maxW / (fs * 0.52)))
+        local lines = {}
+        for si, sent in ipairs(sentences) do
+            local mark = #lines + 1
+            wrap_words(sent, maxc, lines)
+            if si > 1 and lines[mark] then lines[mark].gap_before = true end
+        end
+        local lineH = math.floor(fs * 1.42)
+        local sgap  = math.floor(fs * 0.55)
+        local totalH = 0
+        for _, L in ipairs(lines) do totalH = totalH + lineH + (L.gap_before and sgap or 0) end
+        return lines, lineH, sgap, fsp, totalH
+    end
+
+    local fs = math.floor(h * 0.060)
+    local lines, lineH, sgap, fsp, totalH
+    for _ = 1, 9 do
+        lines, lineH, sgap, fsp, totalH = layout(fs)
+        if totalH <= maxH or fs <= math.floor(h * 0.020) then break end
+        fs = math.floor(fs * 0.88)
     end
     if #lines == 0 then briefing_ov:remove(); return end
 
-    local lineH = math.floor(fs * 1.55)
-    local sgap  = math.floor(fs * 0.65)
-    local padx  = math.floor(fs * 0.85)
-    local rad   = math.floor(lineH * 0.20)
-
-    local totalH = 0
-    for _, L in ipairs(lines) do totalH = totalH + lineH + (L.gap_before and sgap or 0) end
-    local y = h - math.floor(h * 0.055) - totalH      -- bottom-anchored block
-
-    local boxes, texts = {}, {}
+    local y, texts = regionTop + math.floor((regionH - totalH) / 2), {}   -- centered below the top
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
-        local tw = measure_px(w, h, fs, fsp, L.text)
-        local bw = tw + 2 * padx
-        local bx = math.floor(w / 2 - bw / 2)
-        boxes[#boxes + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H38&\\p1}"
-            .. rrect_path(bx, y, bw, lineH, rad) .. "{\\p0}"
         texts[#texts + 1] = string.format(
-            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&}%s",
-            math.floor(w / 2), y + math.floor(lineH / 2), fs, fsp, L.text)
+            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H12&}%s",
+            math.floor(w / 2), y + math.floor(lineH / 2), fs, fsp, glow(fs), L.text)
         y = y + lineH
     end
 
     briefing_ov.res_x = w; briefing_ov.res_y = h
-    briefing_ov.data = table.concat(boxes, "\n") .. "\n" .. table.concat(texts, "\n")
+    briefing_ov.data = table.concat(texts, "\n")
     briefing_ov:update()
 end
 mp.add_periodic_timer(0.3, draw_briefing)
@@ -2561,12 +2590,24 @@ local function tod_word()
 end
 local function tod_briefing_label() return tod_word() .. " BRIEFING" end
 
--- Generous reveal area around the badge (so the clock flips to the briefing
--- badge as the mouse approaches it).
+-- Reveal area around the badge (so the clock flips to the briefing badge as the
+-- mouse approaches it). Bounded ABOVE as well, so it doesn't cover the month bar
+-- at the very top of the screen.
 local function logo_zone(mx, my)
     if not logo then return false end
-    local mar = logo.h
-    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar and my <= logo.y + logo.h + mar
+    local mar = math.floor(logo.h * 0.6)
+    return mx >= logo.x - mar and mx <= logo.x + logo.w + mar
+       and my >= logo.y - mar and my <= logo.y + logo.h + mar
+end
+
+-- Advance the briefing backdrop to the next PHOTO every ~10s (self-rescheduling
+-- while the briefing is live). Only photo indices are ever selected, so videos
+-- never load.
+function backdrop_tick()
+    if not LB.hud_off or not LB.photos or #LB.photos == 0 then return end
+    LB.pidx = (LB.pidx % #LB.photos) + 1
+    mp.set_property_number("playlist-pos", LB.photos[LB.pidx])
+    mp.add_timeout(10, backdrop_tick)
 end
 
 local function logo_tick()
@@ -2595,27 +2636,39 @@ local function logo_tick()
         LB.spoke = false
     end
 
-    -- Hide every non-music HUD while a briefing is on screen; restore the current
-    -- photo's HUD (and the month bar) once it ends.
+    -- Hide every non-music HUD while a briefing is on screen, and turn the
+    -- slideshow into a calm blurred-PHOTO backdrop; restore normal once it ends.
     if active and not LB.hud_off then
         LB.hud_off = true
         clear_other_hud()
         animate_gtitle("GROK " .. tod_word(), w, h)   -- "GROK MORNING/…" build-up
-        -- Calm blurred backdrop: slow the photo cycle and skip videos.
-        LB.idd = mp.get_property_number("image-display-duration")
-        mp.set_property("image-display-duration", 10)
-        local p = cur.path or ""
-        local ext = (p:match("%.([^%.]+)$") or ""):lower()
-        if p == "" then                               -- nothing loaded yet; next load handles it
-            -- (no-op)
-        elseif is_video[ext] or p:find("/Optimized_Vids/", 1, true) or p:find("/TitleCards/", 1, true) then
-            mp.command("playlist-next")               -- skip the current video
-        else
-            apply_image_blur_vf(p)                    -- full-blur the current photo now
+        -- Backdrop: only ever load PHOTO playlist entries (so videos/title cards
+        -- never decode or flash through), advanced slowly by backdrop_tick.
+        LB.idd = mp.get_property("image-display-duration")
+        mp.set_property("image-display-duration", "inf")   -- stop auto-advance; we drive it
+        LB.photos = {}
+        local pl = mp.get_property_native("playlist") or {}
+        for i, e in ipairs(pl) do
+            local ex = ((e.filename or ""):match("%.([^%.]+)$") or ""):lower()
+            if image_ext[ex] then LB.photos[#LB.photos + 1] = i - 1 end
+        end
+        if #LB.photos > 0 then
+            local pos = mp.get_property_number("playlist-pos") or 0
+            LB.pidx = 1
+            for k, idx in ipairs(LB.photos) do if idx >= pos then LB.pidx = k; break end end
+            mp.set_property_number("playlist-pos", LB.photos[LB.pidx])
+            mp.add_timeout(10, backdrop_tick)
+        end
+        -- Blur the photo on screen right now (if the position didn't change, the
+        -- file won't reload, so the full-blur vf wouldn't get applied otherwise).
+        local cp = cur.path or ""
+        if cp ~= "" and image_ext[(cp:match("%.([^%.]+)$") or ""):lower()] then
+            apply_image_blur_vf(cp)
         end
     elseif not active and LB.hud_off then
         LB.hud_off = false
         if LB.idd then mp.set_property("image-display-duration", LB.idd); LB.idd = nil end
+        LB.photos = nil
         draw_top_bar()
         mp.command("playlist-next")                   -- resume a fresh normal photo (sharp + HUD)
     end
