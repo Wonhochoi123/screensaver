@@ -83,6 +83,7 @@ local HUD_TEXT_GLOW  = cfgnum("HUD_TEXT_GLOW")    -- text shadow strength (×fon
 -- (MUSIC_SCROLL_SPEED / MUSIC_SCROLL_DWELL retired — the marquee no longer scrolls.)
 
 local GROK_ENABLED = cfgraw("GROK_BRIEFING") == "1"
+local GROK_TIME    = cfgstr("GROK_TIME") or ""    -- "HH:MM" — for the clock countdown
 -- The briefing logo is now drawn (vector ASS), not a PNG — see the briefing
 -- section at the bottom. GROK_LOGO in the conf is no longer used.
 
@@ -198,8 +199,25 @@ local main_shown   = nil       -- city currently shown center-bottom (skip re-an
 -- Strip distracting separators (comma, slash, hyphen, pipe, dot-sep, dashes…)
 -- from display labels, collapsing to single spaces. Used everywhere EXCEPT the
 -- coordinate read-outs (which keep their °, ', " punctuation).
+-- Fold accented/foreign Latin letters to plain ASCII, and drop apostrophes, so
+-- place/song names read in the regular English alphabet (é→e, ñ→n, "d'Azur"→dAzur).
+TRANSLIT = {
+    ["à"]="a",["á"]="a",["â"]="a",["ã"]="a",["ä"]="a",["å"]="a",["ā"]="a",["ą"]="a",
+    ["è"]="e",["é"]="e",["ê"]="e",["ë"]="e",["ē"]="e",["ė"]="e",["ę"]="e",
+    ["ì"]="i",["í"]="i",["î"]="i",["ï"]="i",["ī"]="i",["į"]="i",
+    ["ò"]="o",["ó"]="o",["ô"]="o",["õ"]="o",["ö"]="o",["ø"]="o",["ō"]="o",
+    ["ù"]="u",["ú"]="u",["û"]="u",["ü"]="u",["ū"]="u",["ů"]="u",
+    ["ñ"]="n",["ń"]="n",["ç"]="c",["ć"]="c",["č"]="c",["ž"]="z",["ź"]="z",["ż"]="z",
+    ["š"]="s",["ś"]="s",["ý"]="y",["ÿ"]="y",["ß"]="ss",["ł"]="l",["đ"]="d",["ð"]="d",["þ"]="th",["æ"]="ae",["œ"]="oe",
+    ["À"]="A",["Á"]="A",["Â"]="A",["Ã"]="A",["Ä"]="A",["Å"]="A",
+    ["È"]="E",["É"]="E",["Ê"]="E",["Ë"]="E",["Ì"]="I",["Í"]="I",["Î"]="I",["Ï"]="I",
+    ["Ò"]="O",["Ó"]="O",["Ô"]="O",["Õ"]="O",["Ö"]="O",["Ø"]="O",
+    ["Ù"]="U",["Ú"]="U",["Û"]="U",["Ü"]="U",["Ñ"]="N",["Ç"]="C",["Ž"]="Z",["Š"]="S",
+    ["'"]="",["`"]="",["´"]="",["’"]="",["‘"]="",   -- apostrophes / quotes removed
+}
 local function clean_text(s)
     if not s then return s end
+    for k, v in pairs(TRANSLIT) do s = s:gsub(k, v) end
     s = s:gsub("[,/\\|;:_]", " ")
     s = s:gsub("%-", " ")
     s = s:gsub("\xc2\xb7", " ")          -- · middle dot
@@ -2803,6 +2821,8 @@ local function logo_tick()
     -- give it a few seconds after the click for that PID file to appear.
     local proc = file_exists("/tmp/ss_briefing.pid")
     if speaking or active or (not proc and mp.get_time() - BD.t0 > 3) then BD.preparing = false end
+    local idle = not (active or BD.preparing or LB.near or BD.menu_open)
+    local hh, mm = GROK_TIME:match("(%d+):(%d+)")
     if BD.preparing and not LB.spoke and (mp.get_time() - BD.t0 <= 185) then
         local fs = math.floor(h * 0.024)
         logo_text_ov.res_x = w; logo_text_ov.res_y = h
@@ -2810,6 +2830,23 @@ local function logo_tick()
             "{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H30&}GETTING READY…",
             math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.95),
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
+        logo_text_ov:update()
+    elseif idle and hh then
+        -- Under the idle clock: a small countdown to the next briefing.
+        local nowt  = os.time()
+        local lt    = os.date("*t", nowt)
+        local target = os.time{ year = lt.year, month = lt.month, day = lt.day,
+                                hour = tonumber(hh), min = tonumber(mm), sec = 0 }
+        if target <= nowt then target = target + 86400 end
+        local d  = target - nowt
+        local fs = math.floor(h * 0.018)
+        logo_text_ov.res_x = w; logo_text_ov.res_y = h
+        logo_text_ov.data = string.format(
+            "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H50&}"
+            .. "BRIEFING STARTS IN  %02d:%02d:%02d",
+            math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.45),
+            fs, math.floor(fs * 0.05 + 0.5), glow(fs),
+            math.floor(d / 3600), math.floor(d % 3600 / 60), d % 60)
         logo_text_ov:update()
     else
         logo_text_ov:remove()

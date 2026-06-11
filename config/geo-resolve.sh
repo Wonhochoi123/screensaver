@@ -8,8 +8,17 @@ LAT="${1:-}"; LON="${2:-}"
 [ -s "${GEODB:-}" ] || exit 0          # DB not built yet -> no enrichment
 command -v python3 >/dev/null 2>&1 || exit 0
 python3 - "$GEODB" "$LAT" "$LON" <<'PY'
-import sys, sqlite3, math
+import sys, sqlite3, math, unicodedata
 DB = sys.argv[1]; lat = float(sys.argv[2]); lon = float(sys.argv[3])
+
+def ascii_(s):
+    # Fold accents to plain ASCII and drop apostrophes (regular English alphabet).
+    if not s: return s
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    for ch in ("'", "’", "‘", "`", "´"):
+        s = s.replace(ch, "")
+    return s.encode("ascii", "ignore").decode("ascii").strip()
 
 def hav(a, b, c, d):
     p1, p2 = math.radians(a), math.radians(c)
@@ -53,5 +62,5 @@ city    = bc[1] if bc else ""
 state   = bc[2] if bc else ""
 country = bc[3] if bc else ""
 
-print("\t".join([landmark, city, state, country]))
+print("\t".join([ascii_(landmark), ascii_(city), ascii_(state), ascii_(country)]))
 PY
