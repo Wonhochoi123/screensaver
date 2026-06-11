@@ -32,17 +32,14 @@ def win(r):
     dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: the nearest few named features (each within its own radius),
-#     closest first, up to 5. Joined with "|" so the app can cycle through them. ---
-la0, la1, lo0, lo1 = win(35)
+# --- landmark: the nearest named features within a wide window — NO radius
+#     filter at all. Closest first, up to 5, joined with "|" to cycle through. ---
+la0, la1, lo0, lo1 = win(100)
 cands = []
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
         "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
         "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
-    d = hav(lat, lon, flat, flon)
-    if d > mk:
-        continue
-    cands.append((d, name))
+    cands.append((hav(lat, lon, flat, flon), name))
 cands.sort(key=lambda x: x[0])
 names, seen = [], set()
 for d, name in cands:

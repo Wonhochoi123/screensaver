@@ -1239,7 +1239,7 @@ mp.register_event("file-loaded", function()
             local L = hud_geom()
             local m_top    = math.floor(L.win_h * 0.055)  -- top inset (a bit lower)
             local m_right  = math.floor(L.win_h * 0.02)    -- right inset (matches the map's)
-            local m_bottom = math.floor(L.win_h * 0.07)    -- bottom inset
+            local m_bottom = math.floor(L.win_h * 0.10)    -- bottom inset (lifted higher)
 
             -- Top-right: date over the broader region (state / country). Each
             -- line carries its own \fs so HUD_DATE_FS and HUD_REGION_FS tune
@@ -2574,7 +2574,7 @@ local function compute_logo(w, h, label, mode)
     label = label or "MORNING BRIEFING"
     if mode == "clock" then
         -- Just the time: thinner (SemiBold), bigger, no frame.
-        local fs = math.floor(h * 0.045)
+        local fs = math.floor(h * 0.052)
         local tw = math.floor(#label * fs * 0.56)
         local LH = math.floor(fs * 1.25)
         logo = { mode = "clock", x = math.floor((w - tw) / 2), y = math.floor(h * 0.05),
