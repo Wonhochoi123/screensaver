@@ -691,18 +691,37 @@ local function iso_to_display(iso)
     return t and os.date("%b %d, %Y", t) or nil
 end
 
--- Per-media "show the landmark instead of the city" preferences (toggled by the
--- 'l' key, remembered across sessions in a tiny text file of media paths).
+-- Per-media landmark choice (which of the candidate landmarks to show above the
+-- city, cycled by the 'l' key). LP[path] = 1..N, or nil for "city only".
+-- Remembered across sessions as "path<TAB>index" lines.
 local LP = {}
 do
     local f = io.open(DATA_DIR .. "/landmark_prefs.txt", "r")
-    if f then for line in f:lines() do if line ~= "" then LP[line] = true end end; f:close() end
+    if f then
+        for line in f:lines() do
+            local p, i = line:match("^(.-)\t(%d+)$")
+            if p and i then LP[p] = tonumber(i) end
+        end
+        f:close()
+    end
 end
 local function save_landmark_prefs()
     local f = io.open(DATA_DIR .. "/landmark_prefs.txt", "w")
     if not f then return end
-    for k in pairs(LP) do f:write(k, "\n") end
+    for k, v in pairs(LP) do f:write(k, "\t", tostring(v), "\n") end
     f:close()
+end
+
+-- "A|B|C" (from the xmp) → cleaned candidate list {"A","B","C"}.
+function split_landmarks(s)
+    local out = {}
+    if s and s ~= "" then
+        for part in (s .. "|"):gmatch("([^|]*)|") do
+            part = clean_text(part)
+            if part and part ~= "" then out[#out + 1] = part end
+        end
+    end
+    return out
 end
 
 local function resolve_meta(orig_path, cb)
@@ -1245,18 +1264,19 @@ mp.register_event("file-loaded", function()
                 ov:update()
             end
 
-            -- Bottom-center headline: the CITY name. When this media is toggled to
-            -- its landmark ('l' key), the LANDMARK shows on a smaller line ABOVE it.
-            -- The glyph reveal plays only when the headline actually changes.
-            local city = clean_text(m.city or ""):upper()
-            local lm   = clean_text(m.landmark or ""):upper()
-            local top  = (LP[cur.orig] and lm ~= "") and lm or nil
+            -- Bottom-center headline: the CITY name. The 'l' key cycles through the
+            -- candidate LANDMARKS — the chosen one shows on a smaller line ABOVE the
+            -- city. The glyph reveal plays only when the headline actually changes.
+            local city  = clean_text(m.city or ""):upper()
+            local cands = split_landmarks(m.landmark)
+            local idx   = LP[cur.orig]
+            local top   = (idx and cands[idx]) and cands[idx]:upper() or nil
             local fs   = math.floor(L.win_h * HUD_CITY_FS)   -- bigger headline
             local fsp  = math.floor(fs * 0.3636 + 0.5)       -- spacing scales with size
             local cx   = math.floor(L.win_w / 2)
             local by   = L.win_h - m_bottom
-            -- Stash what the 'l' toggle needs to redraw this headline.
-            cur.city = m.city or ""; cur.landmark = m.landmark or ""
+            -- Stash what the 'l' cycle needs to redraw this headline.
+            cur.city = m.city or ""; cur.landmarks = cands
             cur.head = { cx = cx, by = by, fs = fs, fsp = fsp, ww = L.win_w, wh = L.win_h }
             local key = city .. "|" .. (top or "")
             if city == "" and not top then
@@ -1982,13 +2002,16 @@ end)
 -- of its city ("Paris") in the bottom-center headline; the choice is remembered.
 mp.register_script_message("ss-toggle-landmark", function()
     if briefing_active and briefing_active() then return end
-    local lm = cur.landmark
-    if not lm or lm == "" then mp.osd_message("No landmark tagged for this one", 1.5); return end
-    LP[cur.orig] = (not LP[cur.orig]) and true or nil
+    local cands = cur.landmarks or {}
+    if #cands == 0 then mp.osd_message("No landmarks for this one", 1.5); return end
+    -- Cycle: city only → 1 → 2 → … → N → city only.
+    local idx = (LP[cur.orig] or 0) + 1
+    if idx > #cands then idx = 0 end
+    LP[cur.orig] = (idx > 0) and idx or nil
     save_landmark_prefs()
-    main_shown = nil; lm_gen = lm_gen + 1
     local city = clean_text(cur.city or ""):upper()
-    local top  = (LP[cur.orig] and lm ~= "") and clean_text(lm):upper() or nil
+    local top  = (idx > 0) and cands[idx]:upper() or nil
+    main_shown = nil; lm_gen = lm_gen + 1
     if cur.head and (city ~= "" or top) then
         main_shown = city .. "|" .. (top or "")
         animate_landmark(city, cur.head.cx, cur.head.by, cur.head.fs, cur.head.fsp,
@@ -1996,6 +2019,7 @@ mp.register_script_message("ss-toggle-landmark", function()
     else
         landmark_ov:remove()
     end
+    mp.osd_message(top and ("Landmark: " .. cands[idx]) or "Landmark: off", 1.2)
 end)
 
 -- ----------------------------------------------------------------------------

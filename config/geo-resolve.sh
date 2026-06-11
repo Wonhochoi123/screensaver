@@ -32,19 +32,26 @@ def win(r):
     dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
     return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-# --- landmark: RAW nearest named feature within its own radius (no weighting,
-#     no minimum-score filter) — just the closest one. ---
+# --- landmark: the nearest few named features (each within its own radius),
+#     closest first, up to 3. Joined with "|" so the app can cycle through them. ---
 la0, la1, lo0, lo1 = win(35)
-best = None
+cands = []
 for name, flat, flon, fcode, elev, w, mk in cur.execute(
         "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
         "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
     d = hav(lat, lon, flat, flon)
     if d > mk:
         continue
-    if best is None or d < best[0]:
-        best = (d, name)
-landmark = best[1] if best else ""
+    cands.append((d, name))
+cands.sort(key=lambda x: x[0])
+names, seen = [], set()
+for d, name in cands:
+    n = ascii_(name)
+    if n and n.lower() not in seen:
+        seen.add(n.lower()); names.append(n)
+    if len(names) >= 3:
+        break
+landmark = "|".join(names)
 
 # --- city: nearest sizable populated place (population-aware) ----------------
 la0, la1, lo0, lo1 = win(30)
@@ -62,5 +69,5 @@ city    = bc[1] if bc else ""
 state   = bc[2] if bc else ""
 country = bc[3] if bc else ""
 
-print("\t".join([ascii_(landmark), ascii_(city), ascii_(state), ascii_(country)]))
+print("\t".join([landmark, ascii_(city), ascii_(state), ascii_(country)]))
 PY
