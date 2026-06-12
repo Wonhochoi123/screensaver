@@ -3093,7 +3093,7 @@ function help_show()
         "SCROLL\\h\\hbrowse\\h\\h\\h•\\h\\h\\hSPACE\\h\\hplay / pause music",
         "\\h↑\\h\\h↓\\h\\h\\hzoom the minimap",
         "PGUP / PGDN\\h\\hmonth\\h\\h\\h•\\h\\h\\hHOME / END\\h\\hyear",
-        "L\\h\\hcycle landmark names",
+        "L\\h\\hcycle landmark names\\h\\h\\h•\\h\\h\\hS\\h\\hsettings menu",
         "DEL\\h\\hmove photo to trash",
         "=\\h/\\h−\\h\\hvolume\\h\\h\\h•\\h\\h\\hESC / Q\\h\\hquit",
         "",
@@ -3126,4 +3126,446 @@ end
 mp.register_script_message("ss-help", function()
     if bo_wake() then return end
     if HELP.on then help_hide() else help_show() end
+end)
+
+
+-- ----------------------------------------------------------------------------
+-- Settings menu ('s'): every screensaver.conf knob, editable from the screen.
+-- ↑/↓ selects, ←/→ adjusts, ENTER types a value (text fields use mpv's input
+-- line), ESC closes. Every change is written straight into screensaver.conf
+-- (comments and layout preserved, atomic .part+rename). Knobs the running
+-- script can re-read apply instantly; the rest take effect next launch — R
+-- quits and relaunches right away. (Globals — main chunk is at the local cap.)
+-- ----------------------------------------------------------------------------
+SET = {
+    ov   = mp.create_osd_overlay("ass-events"),
+    on   = false, sel = 2, top = 1, gen = 0,
+    vals = {}, over = {}, note = "",
+}
+SET.ov.z = 1500
+
+-- Edited values must win over the stale environment launch.sh exported, so
+-- knobs the script re-reads at runtime (the quiet-hours window) go live the
+-- moment they're saved. Wrap cfgraw with an override table checked first.
+SET.cfg_orig = cfgraw
+cfgraw = function(name)
+    local o = SET.over[name]
+    if o ~= nil then return o end
+    return SET.cfg_orig(name)
+end
+
+-- One entry per knob. typ: int | num | bool | time | str.  live: true when the
+-- conf override alone is enough, or a function to push the change into running
+-- state; absent = takes effect next launch.
+SET.schema = {
+    { head = "PLAYBACK" },
+    { key = "PHOTO_DURATION", label = "Photo duration", typ = "int", min = 2, max = 60, step = 1, unit = "s",
+      live = function(v) mp.set_property_number("image-display-duration", tonumber(v)) end,
+      desc = "Seconds each photo stays up — videos always play in full." },
+    { key = "VOLUME", label = "Volume", typ = "int", min = 0, max = 100, step = 5,
+      live = function(v) if not briefing_active() then mp.set_property_number("volume", tonumber(v)) end end,
+      desc = "Playback volume for the screensaver (music and video sound)." },
+    { key = "IDLE_TIMEOUT_MS", label = "Start after idle", typ = "int", min = 60000, max = 3600000, step = 60000,
+      fmt = function(v) return string.format("%d min", math.floor((tonumber(v) or 0) / 60000 + 0.5)) end,
+      desc = "How long the computer sits untouched before the screensaver starts." },
+    { key = "MIN_LOAD_SECS", label = "Loading screen minimum", typ = "int", min = 0, max = 10, step = 1, unit = "s",
+      desc = "Shortest time the loading screen stays visible." },
+    { key = "VID_RESCAN_SECS", label = "Video rescan every", typ = "int", min = 60, max = 3600, step = 60,
+      fmt = function(v) return string.format("%d min", math.floor((tonumber(v) or 0) / 60 + 0.5)) end,
+      desc = "How often new videos dropped into Media are found and optimized." },
+
+    { head = "HUD TEXT" },
+    { key = "HUD_CITY_FS", label = "City headline size", typ = "num", min = 0.020, max = 0.150, step = 0.004, dec = 3,
+      live = function(v) HUD_CITY_FS = tonumber(v) end,
+      desc = "All sizes are a share of screen height, so they fit any display." },
+    { key = "HUD_DATE_FS", label = "Date size", typ = "num", min = 0.010, max = 0.080, step = 0.002, dec = 3,
+      live = function(v) HUD_DATE_FS = tonumber(v) end,
+      desc = "The date in the top-right corner." },
+    { key = "HUD_REGION_FS", label = "Region size", typ = "num", min = 0.010, max = 0.080, step = 0.002, dec = 3,
+      live = function(v) HUD_REGION_FS = tonumber(v) end,
+      desc = "The state / country line under the date." },
+    { key = "HUD_MUSIC_FS", label = "Music text size", typ = "num", min = 0.010, max = 0.080, step = 0.002, dec = 3,
+      live = function(v) HUD_MUSIC_FS = tonumber(v) end,
+      desc = "The now-playing song title and artist, top-left." },
+    { key = "HUD_COORD_FS", label = "Coordinates size", typ = "num", min = 0.010, max = 0.080, step = 0.002, dec = 3,
+      live = function(v) HUD_COORD_FS = tonumber(v) end,
+      desc = "The GPS coordinates under the QR code and minimap." },
+    { key = "HUD_TEXT_BLUR", label = "Text shadow softness", typ = "num", min = 0, max = 0.50, step = 0.02, dec = 2,
+      live = function(v) HUD_TEXT_BLUR = tonumber(v) end,
+      desc = "Bigger = softer, wider dark halo behind HUD text." },
+    { key = "HUD_TEXT_GLOW", label = "Text shadow strength", typ = "num", min = 0, max = 0.020, step = 0.001, dec = 3,
+      live = function(v) HUD_TEXT_GLOW = tonumber(v) end,
+      desc = "Weight of the dark halo — smaller is fainter." },
+
+    { head = "HUD LAYOUT" },
+    { key = "MUSIC_WIN_FRAC", label = "Music marquee width", typ = "num", min = 0.10, max = 0.60, step = 0.02, dec = 2,
+      live = function(v) MUSIC_WIN_FRAC = tonumber(v) end,
+      desc = "Share of the screen width the now-playing marquee may use." },
+    { key = "HUD_MAP_FRAC", label = "Minimap / QR size", typ = "num", min = 0.10, max = 0.50, step = 0.01, dec = 2,
+      desc = "Share of screen height for the minimap and QR squares." },
+    { key = "HUD_THUMB", label = "Album-art thumbnail", typ = "bool", on = "1", off = "0",
+      live = function(v) SHOW_THUMB = (v ~= "0") end,
+      desc = "Cover art next to the music bar — click it to play / pause." },
+    { key = "HUD_MAP_ZOOMS", label = "Minimap zoom levels", typ = "str",
+      desc = "Space-separated zoom levels the ↑/↓ keys cycle through." },
+    { key = "HUD_RING_COLORS", label = "GPS ring colours", typ = "str",
+      desc = "One #RRGGBB per zoom level, space-separated." },
+
+    { head = "QUIET HOURS" },
+    { key = "MUSIC_SLEEP_START", label = "Music off at", typ = "time", step = 15, live = true,
+      desc = "Music pauses nightly at this time — ENTER to type, empty = no quiet hours." },
+    { key = "MUSIC_SLEEP_END", label = "Music back at", typ = "time", step = 15, live = true,
+      desc = "Music resumes at this time; overnight windows are fine." },
+    { key = "BLACKOUT_ENABLE", label = "Idle blackout", typ = "bool", on = "yes", off = "no",
+      live = function(v) BO.enable = (v:lower() ~= "no") end,
+      desc = "Looks off when idle in quiet hours, but HDMI stays alive." },
+    { key = "BLACKOUT_IDLE_MIN", label = "Blackout after", typ = "int", min = 1, max = 120, step = 1, unit = "min",
+      live = function(v) BO.idle = (tonumber(v) or 15) * 60 end,
+      desc = "Minutes without input before the screen fades to black." },
+
+    { head = "MORNING BRIEFING" },
+    { key = "GROK_BRIEFING", label = "Briefing enabled", typ = "bool", on = "1", off = "0",
+      desc = "Spoken AI morning briefing — needs XAI_API_KEY in your environment." },
+    { key = "GROK_TIME", label = "Briefing time", typ = "time", step = 5,
+      desc = "When the briefing plays each morning (24h)." },
+    { key = "GROK_LOCATION", label = "Weather location", typ = "str",
+      desc = "City for the weather segment, e.g. \"Mooresville, NC\"." },
+    { key = "GROK_TICKERS", label = "Stock tickers", typ = "str",
+      desc = "Comma-separated tickers for the stocks segment — empty skips it." },
+    { key = "GROK_VOICE", label = "Voice", typ = "str",
+      desc = "The xAI voice the briefing speaks with." },
+    { key = "GROK_MODEL", label = "Model", typ = "str",
+      desc = "The xAI model that writes the briefing." },
+    { key = "GROK_BGM_VOLUME", label = "Briefing music volume", typ = "int", min = 0, max = 100, step = 5,
+      desc = "Background-music level under the spoken briefing." },
+    { key = "GROK_VOICE_VOLUME", label = "Voice gain", typ = "int", min = 50, max = 300, step = 10, unit = "%",
+      desc = "Spoken-voice loudness — 100 = as recorded, higher is louder." },
+    { key = "GROK_SPEAK_DELAY", label = "Intro music", typ = "int", min = 0, max = 30, step = 1, unit = "s",
+      desc = "Seconds of music before the first words." },
+    { key = "GROK_SECTION_GAP", label = "Section gap", typ = "int", min = 0, max = 10, step = 1, unit = "s",
+      desc = "Seconds of music between briefing sections." },
+    { key = "GROK_FADE_IN", label = "Fade in", typ = "num", min = 0, max = 10, step = 0.1, dec = 1, unit = "s",
+      desc = "Soft-drop of the slideshow music when the briefing starts." },
+    { key = "GROK_FADE_OUT", label = "Fade out", typ = "num", min = 0, max = 10, step = 0.1, dec = 1, unit = "s",
+      desc = "Soft-drop of the briefing music when it ends." },
+    { key = "GROK_FADE_RESUME", label = "Music resume fade", typ = "num", min = 0, max = 10, step = 0.1, dec = 1, unit = "s",
+      desc = "Soft return of the slideshow music afterwards." },
+
+    { head = "PLACE NAMES" },
+    { key = "GEONAMES_COUNTRIES", label = "Countries indexed", typ = "str",
+      onsave = function()
+          local cur = tonumber((set_conf_read().GEODB_VERSION or "1"):match("%d+") or "1") or 1
+          set_conf_write("GEODB_VERSION", tostring(cur + 1), { quote = true })
+      end,
+      desc = "ISO codes, space-separated — empty = whole planet. Changing this rebuilds the place database next launch." },
+}
+SET.rows = SET.schema
+
+function set_conf_read()
+    local t = {}
+    local f = io.open(CFG_DIR .. "/screensaver.conf", "r")
+    if f then
+        for line in f:lines() do
+            local k, rest = line:match("^%s*export%s+([%w_]+)=(.*)$")
+            if k then
+                rest = rest:gsub("^%s+", "")
+                local q = rest:match('^"(.-)"') or rest:match("^'(.-)'")
+                if q then rest = q else rest = rest:gsub("%s*#.*$", ""):gsub("%s+$", "") end
+                t[k] = rest
+            end
+        end
+        f:close()
+    end
+    return t
+end
+
+-- Replace one knob's value in screensaver.conf, keeping the line's trailing
+-- comment and everything else in the file byte-identical. Atomic publish.
+function set_conf_write(key, val, it)
+    local path = CFG_DIR .. "/screensaver.conf"
+    local f = io.open(path, "r")
+    if not f then return false end
+    local lines, found = {}, false
+    for line in f:lines() do
+        if not found then
+            local pre = line:match("^(%s*export%s+" .. key .. "=)")
+            if pre then
+                found = true
+                local rest, tail = line:sub(#pre + 1), ""
+                local q = rest:sub(1, 1)
+                if q == '"' or q == "'" then
+                    local close = rest:find(q, 2, true)
+                    if close then tail = rest:sub(close + 1) end
+                else
+                    local sp, cm = rest:match("^[^#]-(%s*)(#.*)$")
+                    if cm then tail = sp .. cm end
+                end
+                local enc = val
+                if it and (it.typ == "str" or it.typ == "time" or it.quote) then
+                    enc = '"' .. val:gsub('[\\"$`]', "") .. '"'
+                end
+                line = pre .. enc .. tail
+            end
+        end
+        lines[#lines + 1] = line
+    end
+    f:close()
+    if not found then
+        local enc = val
+        if it and (it.typ == "str" or it.typ == "time" or it.quote) then enc = '"' .. val .. '"' end
+        lines[#lines + 1] = "export " .. key .. "=" .. enc
+    end
+    local out = io.open(path .. ".part", "w")
+    if not out then return false end
+    out:write(table.concat(lines, "\n"), "\n")
+    out:close()
+    return os.rename(path .. ".part", path) ~= nil
+end
+
+function set_fmt(it, v)
+    v = v or ""
+    if it.typ == "bool" then return (v == (it.on or "1")) and "ON" or "OFF" end
+    if it.typ == "time" then return (v == "") and "off" or v end
+    if it.fmt then return it.fmt(v) end
+    local s
+    if it.typ == "num" then s = string.format("%." .. (it.dec or 2) .. "f", tonumber(v) or 0)
+    elseif it.typ == "int" then s = string.format("%d", tonumber(v) or 0)
+    else
+        s = v
+        if s == "" then s = "—" end
+        if #s > 26 then s = s:sub(1, 25) .. "…" end
+    end
+    if it.unit then s = s .. " " .. it.unit end
+    return s
+end
+
+function set_draw()
+    local w, h = refresh_display_size()
+    if w <= 0 or h <= 0 then return end
+    local fs   = math.floor(h * 0.0185)
+    local tfs  = math.floor(h * 0.030)
+    local lh   = math.floor(fs * 1.62)
+    local pad  = math.floor(h * 0.030)
+    local nvis = math.min(#SET.rows, math.floor((h * 0.72) / lh))
+    if SET.sel < SET.top then SET.top = SET.sel end
+    if SET.sel > SET.top + nvis - 1 then SET.top = SET.sel - nvis + 1 end
+    -- pull a section header into view when its first item is the top row
+    if SET.top > 1 and SET.rows[SET.top - 1].head and SET.sel < SET.top + nvis - 1 then
+        SET.top = SET.top - 1
+    end
+    local bw = math.floor(w * 0.46)
+    local fh = math.floor(fs * 1.45)                -- footer line height
+    local bh = pad + math.floor(tfs * 1.7) + nvis * lh + math.floor(fh * 2.4) + pad
+    local bx = math.floor((w - bw) / 2)
+    local by = math.floor((h - bh) / 2)
+    local xl = bx + pad
+    local xv = bx + math.floor(bw * 0.60)
+    local y0 = by + pad + math.floor(tfs * 1.7)
+    local ev = {}
+    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord2\\shad0\\1c&H101010&\\1a&H20&\\3c&H707070&\\3a&H50&\\p1}"
+        .. rrect_path(bx, by, bw, bh, math.floor(h * 0.018)) .. "{\\p0}"
+    local selvis = SET.sel - SET.top
+    if selvis >= 0 and selvis < nvis then
+        ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\1a&HE0&\\p1}"
+            .. rrect_path(bx + math.floor(pad / 2), y0 + selvis * lh, bw - pad, lh, math.floor(lh * 0.25))
+            .. "{\\p0}"
+    end
+    ev[#ev + 1] = string.format("{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\bord0"
+        .. "\\shad1\\4c&H000000&\\4a&H60&\\1c&HFFFFFF&}SETTINGS",
+        bx + math.floor(bw / 2), by + pad, tfs)
+    for i = 0, nvis - 1 do
+        local r = SET.rows[SET.top + i]
+        if not r then break end
+        local yc = y0 + i * lh + math.floor(lh / 2)
+        if r.head then
+            ev[#ev + 1] = string.format("{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d"
+                .. "\\bord0\\shad0\\1c&HF7C34F&}%s", xl, yc, math.floor(fs * 0.92), r.head)
+        else
+            local sel = (SET.top + i == SET.sel)
+            ev[#ev + 1] = string.format("{\\an4\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d"
+                .. "\\bord0\\shad0\\1c&H%s&}%s",
+                xl, yc, fs, sel and "FFFFFF" or "C8C8C8", r.label)
+            local vtxt = set_fmt(r, SET.vals[r.key])
+            if sel then
+                vtxt = (r.typ == "str") and (vtxt .. "\\h\\h(ENTER)") or ("‹\\h\\h" .. vtxt .. "\\h\\h›")
+            end
+            ev[#ev + 1] = string.format("{\\an4\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d"
+                .. "\\bord0\\shad0\\1c&H%s&}%s",
+                xv, yc, fs, sel and "FFFFFF" or "FCE5B3", vtxt)
+        end
+    end
+    if SET.top > 1 then
+        ev[#ev + 1] = string.format("{\\an6\\pos(%d,%d)\\fs%d\\bord0\\shad0\\1c&H909090&}▲",
+            bx + bw - math.floor(pad / 2), y0 + math.floor(lh / 2), math.floor(fs * 0.8))
+    end
+    if SET.top + nvis - 1 < #SET.rows then
+        ev[#ev + 1] = string.format("{\\an6\\pos(%d,%d)\\fs%d\\bord0\\shad0\\1c&H909090&}▼",
+            bx + bw - math.floor(pad / 2), y0 + (nvis - 1) * lh + math.floor(lh / 2), math.floor(fs * 0.8))
+    end
+    local it = SET.rows[SET.sel]
+    local note = SET.note ~= "" and SET.note or (it and it.desc or "")
+    local fy = y0 + nvis * lh + math.floor(fh * 0.4)
+    ev[#ev + 1] = string.format("{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad0\\1c&H%s&}%s",
+        bx + math.floor(bw / 2), fy, math.floor(fs * 0.82),
+        SET.note ~= "" and "F7C34F" or "A0A0A0", note)
+    ev[#ev + 1] = string.format("{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad0\\1c&H808080&}"
+        .. "↑↓ select\\h\\h\\h‹ › change\\h\\h\\hENTER type\\h\\h\\hR restart now\\h\\h\\hESC close",
+        bx + math.floor(bw / 2), fy + fh, math.floor(fs * 0.82))
+    SET.ov.res_x = w; SET.ov.res_y = h
+    SET.ov.data = table.concat(ev, "\n")
+    SET.ov:update()
+end
+
+function set_arm()
+    SET.gen = SET.gen + 1
+    local g = SET.gen
+    mp.add_timeout(120, function() if SET.on and g == SET.gen then set_hide() end end)
+end
+
+function set_move(dir)
+    local i = SET.sel
+    repeat i = i + dir until not SET.rows[i] or SET.rows[i].key
+    if SET.rows[i] then SET.sel = i; SET.note = ""; set_draw() end
+end
+
+function set_apply(it, v)
+    SET.vals[it.key] = v
+    SET.over[it.key] = v
+    local ok = set_conf_write(it.key, v, it)
+    if it.onsave then pcall(it.onsave, v) end
+    if type(it.live) == "function" then pcall(it.live, v) end
+    if not ok then SET.note = "Could not write screensaver.conf!"
+    elseif it.live then SET.note = "Saved — applied live"
+    else SET.note = "Saved — applies next start (R restarts now)" end
+    set_draw()
+end
+
+function set_adjust(dir)
+    local it = SET.rows[SET.sel]
+    if not it or not it.key then return end
+    local v = SET.vals[it.key] or ""
+    if it.typ == "bool" then
+        v = (v == (it.on or "1")) and (it.off or "0") or (it.on or "1")
+    elseif it.typ == "time" then
+        local hh, mm = v:match("^(%d+):(%d+)$")
+        if not hh then hh, mm = v:match("^(%d+)$"), "0" end
+        local mins = hh and ((tonumber(hh) % 24) * 60 + (tonumber(mm) % 60)) or 0
+        mins = (mins + dir * (it.step or 15)) % 1440
+        if mins < 0 then mins = mins + 1440 end
+        v = string.format("%02d:%02d", math.floor(mins / 60), mins % 60)
+    elseif it.typ == "int" or it.typ == "num" then
+        local n = (tonumber(v) or 0) + dir * (it.step or 1)
+        if it.min and n < it.min then n = it.min end
+        if it.max and n > it.max then n = it.max end
+        v = (it.typ == "int") and string.format("%d", n)
+            or string.format("%." .. (it.dec or 2) .. "f", n)
+    else
+        return                          -- str: ENTER opens the text input
+    end
+    set_apply(it, v)
+end
+
+function set_submit(it, text)
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    if it.typ == "time" and text ~= "" then
+        local hh, mm = text:match("^(%d?%d):(%d?%d)$")
+        if not hh then hh, mm = text:match("^(%d?%d)$"), "0" end
+        local H, M = tonumber(hh), tonumber(mm)
+        if not H or H > 23 or not M or M > 59 then
+            SET.note = "Use 24h HH:MM — or leave empty for off"
+            set_draw(); return
+        end
+        text = string.format("%02d:%02d", H, M)
+    elseif it.typ == "int" or it.typ == "num" then
+        local n = tonumber(text)
+        if not n then SET.note = "Enter a number"; set_draw(); return end
+        if it.min and n < it.min then n = it.min end
+        if it.max and n > it.max then n = it.max end
+        text = (it.typ == "int") and string.format("%d", n)
+            or string.format("%." .. (it.dec or 2) .. "f", n)
+    end
+    set_apply(it, text)
+end
+
+function set_edit()
+    local it = SET.rows[SET.sel]
+    if not it or not it.key then return end
+    if it.typ == "bool" then set_adjust(1); return end
+    local ok, input = pcall(require, "mp.input")
+    if not ok or not input or not input.get then
+        SET.note = "Typing needs mpv ≥ 0.38 — use ‹ › or edit the conf file"
+        set_draw(); return
+    end
+    input.get({
+        prompt = it.label .. " >",
+        default_text = SET.vals[it.key] or "",
+        submit = function(text)
+            input.terminate()
+            set_submit(it, text)
+        end,
+    })
+end
+
+-- Quit and relaunch so every saved knob takes effect. The helper waits for the
+-- whole app to wind down before launch.sh runs again; "confi[g]" keeps the
+-- helper's own command line from matching the pattern it greps for.
+function set_restart()
+    SET.note = "Restarting…"; set_draw()
+    mp.commandv("run", "bash", "-c",
+        '(for i in $(seq 1 60); do pgrep -f "Screensaver-App/confi[g]" >/dev/null || break; sleep 0.5; done; '
+        .. 'sleep 1; exec "' .. APP_DIR .. '/launch.sh") >/dev/null 2>&1 &')
+    mp.add_timeout(0.4, function() mp.command("quit") end)
+end
+
+function set_bind()
+    local function wrap(fn)
+        return function()
+            if bo_wake() then return end
+            set_arm(); fn()
+        end
+    end
+    mp.add_forced_key_binding("UP",         "ss-set-up",    wrap(function() set_move(-1) end), { repeatable = true })
+    mp.add_forced_key_binding("DOWN",       "ss-set-down",  wrap(function() set_move(1) end),  { repeatable = true })
+    mp.add_forced_key_binding("WHEEL_UP",   "ss-set-wup",   wrap(function() set_move(-1) end))
+    mp.add_forced_key_binding("WHEEL_DOWN", "ss-set-wdn",   wrap(function() set_move(1) end))
+    mp.add_forced_key_binding("LEFT",       "ss-set-left",  wrap(function() set_adjust(-1) end), { repeatable = true })
+    mp.add_forced_key_binding("RIGHT",      "ss-set-right", wrap(function() set_adjust(1) end),  { repeatable = true })
+    mp.add_forced_key_binding("ENTER",      "ss-set-enter", wrap(set_edit))
+    mp.add_forced_key_binding("KP_ENTER",   "ss-set-kpent", wrap(set_edit))
+    mp.add_forced_key_binding("r",          "ss-set-rst",   wrap(set_restart))
+    mp.add_forced_key_binding("ESC",        "ss-set-esc",   function() set_hide() end)
+    -- Swallow clicks so they don't pause music / quit underneath the menu.
+    mp.add_forced_key_binding("MBTN_LEFT",  "ss-set-clk",   wrap(function() end))
+    mp.add_forced_key_binding("MBTN_RIGHT", "ss-set-rclk",  function() set_hide() end)
+end
+
+function set_unbind()
+    for _, n in ipairs({ "ss-set-up", "ss-set-down", "ss-set-wup", "ss-set-wdn",
+                         "ss-set-left", "ss-set-right", "ss-set-enter", "ss-set-kpent",
+                         "ss-set-rst", "ss-set-esc", "ss-set-clk", "ss-set-rclk" }) do
+        mp.remove_key_binding(n)
+    end
+end
+
+function set_hide()
+    SET.on = false
+    SET.gen = SET.gen + 1
+    set_unbind()
+    SET.ov:remove(); SET.ov.data = ""
+end
+
+function set_show()
+    if HELP and HELP.on then help_hide() end
+    SET.vals = set_conf_read()
+    if not SET.rows[SET.sel] or not SET.rows[SET.sel].key then SET.sel = 2 end
+    SET.note = ""
+    SET.on = true
+    set_bind()
+    set_draw()
+    set_arm()
+end
+
+mp.register_script_message("ss-settings", function()
+    if bo_wake() then return end
+    if SET.on then set_hide() else set_show() end
 end)

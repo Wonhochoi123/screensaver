@@ -19,6 +19,8 @@ media into a chronological slideshow with a rich, glanceable HUD:
   on-screen captions.
 - 🖥️ **Auto-launch when idle** (and a manual "Start Screensaver" launcher), with
   smart inhibitors so it never interrupts you while media is playing.
+- ⚙️ **On-screen settings menu** — press `s` to change any option from the
+  couch; no config-file editing required.
 
 Everything is driven by your own files and **one config file** — no accounts, no
 cloud, no telemetry.
@@ -117,6 +119,7 @@ Notes:
 | `End` / `Home` | Jump to next / previous **year** |
 | `l` | Cycle the **landmark** label for the current photo (remembered) |
 | `h` / `?` | Toggle the on-screen **controls cheat-sheet** |
+| `s` | Open the **settings menu** — edit every option from the screen |
 | `Delete` | Move the current photo/video to the trash |
 | `=` / `-` | Slideshow volume up / down |
 | `Esc` / `q` | Quit |
@@ -229,13 +232,35 @@ Place data © [GeoNames](https://www.geonames.org), CC-BY 4.0.
 
 ---
 
+## Settings menu (press `s`)
+
+You don't need a text editor to configure anything. Press **`s`** while the
+screensaver is running and a settings panel opens with every option, grouped
+the same way as the tables below:
+
+- **`↑` / `↓`** (or the mouse wheel) moves between options.
+- **`←` / `→`** nudges the selected value — numbers step within a sane range,
+  switches toggle, times move in 5–15 minute steps.
+- **`Enter`** lets you **type** a value (briefing location, stock tickers, an
+  exact time…). Empty is allowed where it means "off".
+- **`Esc`** closes the menu. **`r`** restarts the screensaver in place.
+
+Every change is saved **immediately** into `screensaver.conf` (comments and
+layout preserved — the file stays human-editable). Options the running show
+can pick up — HUD text sizes, volume, photo duration, quiet hours, the idle
+blackout — say *"applied live"* and take effect on the spot. The rest say
+*"applies next start"*; press **`r`** to restart right away, or just let it
+apply next time the screensaver comes up. Changing the indexed country list
+also bumps `GEODB_VERSION` for you so the place database rebuilds.
+
 ## Configuration reference
 
 **Everything is controlled by one file:** `config/screensaver.conf` (repo copy)
-which installs to `~/Screensaver-App/config/screensaver.conf`. Edit the **installed
-copy** to change your running setup immediately; edit the **repo copy** to change
-what a fresh install lays down. Every script sources this file, so a value set
-here applies everywhere.
+which installs to `~/Screensaver-App/config/screensaver.conf`. The settings
+menu above edits the installed copy for you; to do it by hand, edit the
+**installed copy** to change your running setup immediately, or the **repo
+copy** to change what a fresh install lays down. Every script sources this
+file, so a value set here applies everywhere.
 
 > HUD text sizes are **fractions of the screen height** (e.g. `0.030` ≈ 3% of
 > height), so they look the same on any display. Raise to enlarge.
