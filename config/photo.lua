@@ -948,10 +948,22 @@ mp.register_script_message("handle-left-click", function()
     if bo_wake() then return end
     local mouse = mp.get_property_native("mouse-pos")
 
-    -- Reading pane open: a click on the article side stays put (it's for
-    -- reading); a click on the left half closes it and stops there.
+    -- Reading pane open: the left half is the headline menu — clicking another
+    -- linked headline switches the article on the right; clicking empty space
+    -- on the left closes the pane. Clicks on the article side just stay put.
     if RD and RD.on and mouse then
-        if mouse.x < (RD.x0 or 0) then rd_close() end
+        if mouse.x < (RD.x0 or 0) then
+            if briefing_boxes then
+                for _, b in ipairs(briefing_boxes) do
+                    if mouse.x >= b.x0 and mouse.x <= b.x1
+                       and mouse.y >= b.y0 and mouse.y <= b.y1 then
+                        if b.url:match("^https?://") then rd_open(b.url) end
+                        return
+                    end
+                end
+            end
+            rd_close()
+        end
         return
     end
 
@@ -2721,6 +2733,10 @@ local function draw_briefing()
     end
 
     local w, h = refresh_display_size()
+    -- Reading pane open: captions become the "menu" on the LEFT half (the
+    -- article details fill the right); otherwise they own the full width.
+    local split   = RD and RD.on
+    local cap_cx  = split and math.floor(w * 0.25) or math.floor(w / 2)
     local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
     -- Per-sentence source links: grok-briefing.sh publishes "sentence<TAB>url"
     -- lines whose sentences are split the SAME way as above. Only trust them
@@ -2743,7 +2759,7 @@ local function draw_briefing()
     -- Fill the screen below the badge/controls at the top.
     local regionTop = math.floor(h * 0.20)
     local regionH   = h - regionTop - math.floor(h * 0.04)
-    local maxH, maxW = regionH, w * 0.88
+    local maxH, maxW = regionH, (split and w * 0.42 or w * 0.88)
 
     -- Captions are the main content while a briefing plays: no background (they
     -- sit on the blurred backdrop), centered, and auto-sized as BIG as will fit.
@@ -2780,11 +2796,13 @@ local function draw_briefing()
     -- and globals don't count toward Lua's 200-local cap).
     local y = regionTop + math.floor((regionH - totalH) / 2)   -- centered below the top
     BC.lines, BC.w, BC.h = {}, w, h
-    local boxes, bx0, bx1 = {}, math.floor(w * 0.05), math.floor(w * 0.95)
+    local boxes, bx0, bx1
+    if split then boxes, bx0, bx1 = {}, math.floor(w * 0.02), math.floor(w * 0.48)
+    else          boxes, bx0, bx1 = {}, math.floor(w * 0.05), math.floor(w * 0.95) end
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
         local top = y
-        BC.lines[#BC.lines + 1] = { text = L.text, cx = math.floor(w / 2),
+        BC.lines[#BC.lines + 1] = { text = L.text, cx = cap_cx,
                                     cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
         y = y + lineH
         if L.si then
@@ -3898,6 +3916,7 @@ RD = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0,
 RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
 
 function rd_close()
+    if not RD.on then return end
     RD.on = false
     RD.gen = RD.gen + 1
     RD.paras = nil
@@ -3905,35 +3924,44 @@ function rd_close()
     for _, n in ipairs({ "ss-rd-esc", "ss-rd-up", "ss-rd-down" }) do
         mp.remove_key_binding(n)
     end
+    -- Resume the briefing voice we paused on open (no-op if it ended), and let
+    -- the captions take the full width again.
+    briefing_paused = false
+    mp.commandv("run", "/bin/sh", "-c",
+        'p=$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null); [ -n "$p" ] && kill -CONT "$p" 2>/dev/null')
+    briefing_shown = nil
+    draw_briefing()
 end
 
 function rd_draw()
     if not RD.on then return end
     local w, h = refresh_display_size()
     if w <= 0 then return end
-    local fs   = math.floor(h * 0.0195)
-    local tfs  = math.floor(h * 0.024)
-    local lh   = math.floor(fs * 1.52)
-    local pad  = math.floor(h * 0.035)
+    -- Same look as the captions on the left — Montserrat ExtraBold, white, the
+    -- shared glow, straight on the blurred backdrop (no panel) — just smaller.
+    local fs   = math.floor(h * 0.022)
+    local tfs  = math.floor(h * 0.030)
+    local lh   = math.floor(fs * 1.5)
+    local pad  = math.floor(h * 0.04)
     local x0   = math.floor(w * 0.5)
     RD.x0 = x0
     local xtext = x0 + pad
     local inner = w - x0 - pad * 2 - math.floor(fs * 1.2)   -- minus scrollbar gutter
-    local maxc  = math.max(16, math.floor(inner / (fs * 0.50)))
+    local maxc  = math.max(16, math.floor(inner / (fs * 0.52)))
 
     -- Wrap paragraphs at the current size (cheap; redone per draw so resizes work).
     local lines = {}
     for _, p in ipairs(RD.paras or {}) do
         local mark = #lines + 1
-        wrap_words(p.text, p.head and math.floor(maxc * 0.8) or maxc, lines)
+        wrap_words(p.text, p.head and math.floor(maxc * fs / tfs) or maxc, lines)
         for k = mark, #lines do lines[k].head = p.head end
         if lines[mark] then lines[mark].gap = true end
     end
 
-    local top_y  = pad + math.floor(tfs * 0.4)
+    local top_y  = math.floor(h * 0.20)              -- aligned with the captions region
     local foot_h = math.floor(fs * 2.2)
     local gapH   = math.floor(lh * 0.45)
-    local availH = h - top_y - foot_h - pad
+    local availH = h - top_y - foot_h - math.floor(h * 0.04)
     -- Visible window: walk lines, summing real heights (head lines are taller).
     local heights = {}
     for i, L in ipairs(lines) do
@@ -3949,10 +3977,10 @@ function rd_draw()
     if RD.scroll > maxscroll then RD.scroll = maxscroll end
 
     local ev = {}
-    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H0A0A0A&\\1a&H10&\\p1}"
-        .. string.format("m %d 0 l %d 0 %d %d %d %d", x0, w, w, h, x0, h) .. "{\\p0}"
-    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H707070&\\1a&H60&\\p1}"
-        .. string.format("m %d 0 l %d 0 %d %d %d %d", x0, x0 + 2, x0 + 2, h, x0, h) .. "{\\p0}"
+    -- Hair-thin divider between the headline half and the article half.
+    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\1a&HC8&\\p1}"
+        .. string.format("m %d %d l %d %d %d %d %d %d",
+            x0, top_y, x0 + 2, top_y, x0 + 2, top_y + availH, x0, top_y + availH) .. "{\\p0}"
 
     local y, shown = top_y, 0
     for i = RD.scroll + 1, #lines do
@@ -3960,12 +3988,11 @@ function rd_draw()
         local rh = L.head and math.floor(tfs * 1.5) or lh
         if L.gap and i > RD.scroll + 1 then y = y + gapH end
         if y + rh > top_y + availH then break end
+        local lfs = L.head and tfs or fs
         ev[#ev + 1] = string.format(
-            "{\\an4\\pos(%d,%d)\\fnMontserrat %s\\fs%d\\bord0\\shad0\\1c&H%s&}%s",
-            xtext, y + math.floor(rh / 2),
-            L.head and "ExtraBold" or "SemiBold",
-            L.head and tfs or fs,
-            L.head and "F7C34F" or "E8E8E8", L.text)
+            "{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
+            xtext, y + math.floor(rh / 2), lfs, math.floor(lfs * 0.02 + 0.5),
+            glow(lfs), L.head and 0x12 or 0x28, L.text)
         y = y + rh
         shown = shown + 1
     end
@@ -4016,18 +4043,32 @@ function rd_set_text(txt)
 end
 
 function rd_open(url)
-    if RD.on then rd_close() end
+    local first = not RD.on               -- switching articles keeps the split as-is
     RD.url = url
     RD.on = true
     RD.gen = RD.gen + 1
     local gen = RD.gen
-    RD.paras = { { text = "FETCHING…", head = true },
-                 { text = url, head = false } }
+    RD.paras = { { text = "FETCHING…", head = true } }
     RD.scroll = 0
     mp.add_forced_key_binding("ESC",  "ss-rd-esc",  function() rd_close() end)
     mp.add_forced_key_binding("UP",   "ss-rd-up",   function() rd_scroll(-1) end, { repeatable = true })
     mp.add_forced_key_binding("DOWN", "ss-rd-down", function() rd_scroll(1) end,  { repeatable = true })
-    rd_draw()
+    if first then
+        -- Pause the spoken voice (same mechanism as the 'b' key) so it waits
+        -- while you read, take a small beat, THEN divide the screen: captions
+        -- re-flow onto the left half, the article appears on the right.
+        briefing_paused = true
+        mp.commandv("run", "/bin/sh", "-c",
+            'p=$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null); [ -n "$p" ] && kill -STOP "$p" 2>/dev/null')
+        mp.add_timeout(0.3, function()
+            if not RD.on or gen ~= RD.gen then return end
+            briefing_shown = nil
+            draw_briefing()
+            rd_draw()
+        end)
+    else
+        rd_draw()
+    end
     local out = "/tmp/ss_article.txt"
     os.remove(out)
     mp.command_native_async({
