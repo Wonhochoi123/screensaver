@@ -656,12 +656,14 @@ local function apply_minimap(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
-    -- Zoom-scale read-out pinned to the map's top edge, styled like the
-    -- coordinate labels; cleared with the map in clear_hud_osd.
+    -- Zoom-scale read-out floated just ABOVE the map square: overlay-add
+    -- bitmaps render on top of all ASS text, so a label inside the square
+    -- would be buried under the map. Styled like the coordinate labels;
+    -- cleared with the map in clear_hud_osd.
     local z = ZOOMS[cur.zidx]
     if z then
         ZL.ov.res_x = L.win_w; ZL.ov.res_y = L.win_h
-        ZL.ov.data = coord_tags(L.map_cx, L.img_top + L.fs, L.fs) .. "Z" .. z
+        ZL.ov.data = coord_tags(L.map_cx, L.img_top - math.floor(L.fs * 0.7), L.fs) .. "Z" .. z
         ZL.ov:update()
     end
 end
@@ -3268,10 +3270,10 @@ SET.schema = {
       desc = "Share of the screen width the now-playing marquee may use." },
     { key = "HUD_MAP_FRAC", label = "Minimap / QR size", typ = "num", min = 0.10, max = 0.50, step = 0.01, dec = 2,
       desc = "Share of screen height for the minimap and QR squares." },
-    { key = "HUD_THUMB", label = "Album-art thumbnail", typ = "bool", on = "1", off = "0",
+    { key = "HUD_THUMB", label = "Album-art thumbnail", typ = "bool", on = "1", off = "0", def = "1",
       live = function(v) SHOW_THUMB = (v ~= "0") end,
       desc = "Cover art next to the music bar — click it to play / pause." },
-    { key = "HUD_AUTO_ZOOM", label = "Auto zoom", typ = "bool", on = "yes", off = "no", live = true,
+    { key = "HUD_AUTO_ZOOM", label = "Auto zoom", typ = "bool", on = "yes", off = "no", live = true, def = "yes",
       desc = "Step the minimap inward while each item plays; ↑/↓ always work." },
     { key = "HUD_MAP_ZOOMS", label = "Minimap zoom levels", typ = "str",
       desc = "Space-separated zoom levels the ↑/↓ keys cycle through — any count." },
@@ -3283,7 +3285,7 @@ SET.schema = {
       desc = "Music pauses nightly at this time — ENTER to type, empty = no quiet hours." },
     { key = "MUSIC_SLEEP_END", label = "Music back at", typ = "time", step = 15, live = true,
       desc = "Music resumes at this time; overnight windows are fine." },
-    { key = "BLACKOUT_ENABLE", label = "Idle blackout", typ = "bool", on = "yes", off = "no",
+    { key = "BLACKOUT_ENABLE", label = "Idle blackout", typ = "bool", on = "yes", off = "no", def = "yes",
       live = function(v) BO.enable = (v:lower() ~= "no") end,
       desc = "Looks off when idle in quiet hours, but HDMI stays alive." },
     { key = "BLACKOUT_IDLE_MIN", label = "Blackout after", typ = "int", min = 1, max = 120, step = 1, unit = "min",
@@ -3291,7 +3293,7 @@ SET.schema = {
       desc = "Minutes without input before the screen fades to black." },
 
     { head = "MORNING BRIEFING" },
-    { key = "GROK_BRIEFING", label = "Briefing enabled", typ = "bool", on = "1", off = "0",
+    { key = "GROK_BRIEFING", label = "Briefing enabled", typ = "bool", on = "1", off = "0", def = "0",
       desc = "Spoken AI morning briefing — needs XAI_API_KEY in your environment." },
     { key = "GROK_TIME", label = "Briefing time", typ = "time", step = 5,
       desc = "When the briefing plays each morning (24h)." },
@@ -3624,6 +3626,17 @@ end
 function set_show()
     if HELP and HELP.on then help_hide() end
     SET.vals = set_conf_read()
+    -- A knob can exist in the code before its line exists in an older
+    -- installed conf (the installer appends it on the next update). Show the
+    -- real effective value instead of a blank: environment first, then the
+    -- same built-in fallback the feature code uses (each def below mirrors
+    -- an inline code default and nothing else — the conf stays the source
+    -- of truth). Editing such a knob appends its line to the conf.
+    for _, r in ipairs(SET.rows) do
+        if r.key and SET.vals[r.key] == nil then
+            SET.vals[r.key] = SET.cfg_orig(r.key) or r.def
+        end
+    end
     if not SET.rows[SET.sel] or not SET.rows[SET.sel].key then SET.sel = 2 end
     SET.note = ""
     SET.on = true

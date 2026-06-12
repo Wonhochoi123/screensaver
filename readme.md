@@ -253,6 +253,12 @@ blackout — say *"applied live"* and take effect on the spot. The rest say
 apply next time the screensaver comes up. Changing the indexed country list
 also bumps `GEODB_VERSION` for you so the place database rebuilds.
 
+The menu contains **every behavioural option**. The only conf entries not in
+it are the install paths (`APP_DIR`, `MEDIA_DIR`, …) and the internal
+database fields (`GEODB`, `GEODB_VERSION` — managed for you), which can still
+be edited in the file directly. If a brand-new option isn't in your conf file
+yet, the menu shows its built-in default and writes the line on first change.
+
 ## Configuration reference
 
 **Everything is controlled by one file:** `config/screensaver.conf` (repo copy)
@@ -289,8 +295,6 @@ file, so a value set here applies everywhere.
 | `MUSIC_WIN_FRAC` | `0.2` | Marquee width (fraction of screen width) |
 | `HUD_MAP_FRAC` | `0.27` | Minimap + QR size (fraction of height) |
 | `HUD_THUMB` | `1` | Album-art thumbnail on (1) / off (0) |
-| `MUSIC_SCROLL_SPEED` | `0.045` | *Legacy / unused* — the marquee no longer scrolls (hover reveals the full title instead) |
-| `MUSIC_SCROLL_DWELL` | `30` | *Legacy / unused* (see above) |
 | `HUD_MAP_ZOOMS` | `"6 8 10 12 14 16"` | Minimap zoom levels (`↑`/`↓` cycles them) — list as many as you like; during playback the zoom auto-steps inward, giving each level an equal share of the item's play time |
 | `HUD_RING_COLORS` | `"#FFFFFF #4FC3F7"` | GPS ring colour **gradient stops** — the ring blends from the first colour to the last across your zoom levels; two colours (start → destination) are all you need |
 | `HUD_AUTO_ZOOM` | `yes` | Auto-step the minimap inward while each item plays (`yes`/`no`); the current scale (e.g. `Z12`) shows at the top of the map, and `↑`/`↓` always zoom manually |
