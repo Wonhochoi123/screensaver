@@ -651,7 +651,15 @@ local function apply_qr(bgra_path, L)
     mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
-ZL = { ov = mp.create_osd_overlay("ass-events") }   -- zoom-scale label (global: local cap)
+-- Zoom-scale label (global: local cap). A raw OSM zoom number ("Z6") means
+-- nothing to most people, so the read-out shows the approximate on-screen
+-- scale instead (equator values from the OSM zoom table): z6 ≈ 1:10M (large
+-- country), z11 ≈ 1:250K (city), z16 ≈ 1:8K (street).
+ZL = { ov = mp.create_osd_overlay("ass-events"),
+       scale = { [0] = "1:500M", "1:250M", "1:150M", "1:70M", "1:35M", "1:15M",
+                 "1:10M", "1:4M", "1:2M", "1:1M", "1:500K", "1:250K", "1:150K",
+                 "1:70K", "1:35K", "1:15K", "1:8K", "1:4K", "1:2K", "1:1K",
+                 "1:500" } }
 local function apply_minimap(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
@@ -663,7 +671,8 @@ local function apply_minimap(bgra_path, L)
     local z = ZOOMS[cur.zidx]
     if z then
         ZL.ov.res_x = L.win_w; ZL.ov.res_y = L.win_h
-        ZL.ov.data = coord_tags(L.map_cx, L.img_top - math.floor(L.fs * 0.7), L.fs) .. "Z" .. z
+        ZL.ov.data = coord_tags(L.map_cx, L.img_top - math.floor(L.fs * 0.7), L.fs)
+            .. (ZL.scale[z] and ("~ " .. ZL.scale[z]) or ("Z" .. z))
         ZL.ov:update()
     end
 end
