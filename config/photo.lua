@@ -956,6 +956,20 @@ mp.register_script_message("handle-left-click", function()
         if active then
             local act = controls_hit and controls_hit(mouse.x, mouse.y)
             if act then act(); return end
+            -- Click the captions to open that segment's source in a browser. The
+            -- briefing publishes the URL to /tmp/ss_briefing.url; the link itself
+            -- is never spoken or shown. A click with no link is silently absorbed.
+            if briefing_box and mouse.x >= briefing_box.x0 and mouse.x <= briefing_box.x1
+               and mouse.y >= briefing_box.y0 and mouse.y <= briefing_box.y1 then
+                local uf = io.open("/tmp/ss_briefing.url", "r")
+                local u  = uf and (uf:read("*l") or "") or ""
+                if uf then uf:close() end
+                if u:match("^https?://") then
+                    mp.command_native_async({ name = "subprocess",
+                        args = { "xdg-open", u } }, function() end)
+                end
+                return
+            end
         else
             if BD.menu_vis then
                 local act = logo_menu_hit and logo_menu_hit(mouse.x, mouse.y)
@@ -2595,6 +2609,7 @@ local function draw_briefing()
     briefing_shown = txt
     if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
         BC.gen = BC.gen + 1   -- cancel any in-flight fade
+        briefing_box = nil    -- no captions on screen → nothing to click
         briefing_ov:remove(); return
     end
 
@@ -2630,10 +2645,11 @@ local function draw_briefing()
         if totalH <= maxH or fs <= math.floor(h * 0.020) then break end
         fs = math.floor(fs * 0.88)
     end
-    if #lines == 0 then briefing_ov:remove(); return end
+    if #lines == 0 then briefing_box = nil; briefing_ov:remove(); return end
 
     -- Stash the positioned lines; briefing_fade animates them in.
     local y = regionTop + math.floor((regionH - totalH) / 2)   -- centered below the top
+    local box_top = y
     BC.lines, BC.w, BC.h = {}, w, h
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
@@ -2641,6 +2657,11 @@ local function draw_briefing()
                                     cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
         y = y + lineH
     end
+    -- Clickable region around the captions: tapping it opens this segment's
+    -- source link (global — handle-left-click is defined earlier in the chunk,
+    -- and globals don't count toward Lua's 200-local cap).
+    briefing_box = { x0 = math.floor(w * 0.05), y0 = box_top,
+                     x1 = math.floor(w * 0.95), y1 = y }
     BC.t0 = mp.get_time(); BC.gen = BC.gen + 1
     briefing_fade()
 end
@@ -2983,6 +3004,22 @@ function backdrop_step(d)
     return true
 end
 
+-- Helpers for the "what's coming up" block under the idle clock (globals: the
+-- main chunk is at Lua's 200-local cap).
+function ss_clock12(mins)         -- minutes-of-day -> "5:39 AM"
+    mins = mins % 1440
+    local H, M = math.floor(mins / 60), mins % 60
+    local h12 = H % 12; if h12 == 0 then h12 = 12 end
+    return string.format("%d:%02d %s", h12, M, (H < 12) and "AM" or "PM")
+end
+-- Opacity by how soon the event is: near = bright (ASS alpha 0x00), far = floor
+-- of 0.4 opacity (ASS alpha 0x99). A full day (1440 min) spans the whole ramp.
+function ss_sched_alpha(mins_until)
+    local p = 1.0 - 0.6 * ((mins_until % 1440) / 1440)
+    if p > 1 then p = 1 elseif p < 0.4 then p = 0.4 end
+    return math.floor((1 - p) * 255 + 0.5)
+end
+
 local function logo_tick()
     if not GROK_ENABLED then return end
     local w, h = refresh_display_size()
@@ -3090,17 +3127,45 @@ local function logo_tick()
             "{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H30&}GETTING READY…",
             math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.95),
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
-    elseif idle and hh then
-        -- Under the idle clock: when the next briefing is scheduled.
-        local H, M = tonumber(hh), tonumber(mm)
-        local h12  = H % 12; if h12 == 0 then h12 = 12 end
-        local when = string.format("%d:%02d %s", h12, M, (H < 12) and "AM" or "PM")
-        local fs   = math.floor(h * 0.018)
-        lt = string.format(
-            "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H50&}"
-            .. "BRIEFING SCHEDULED AT: %s",
-            math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.12),
-            fs, math.floor(fs * 0.05 + 0.5), glow(fs), when)
+    elseif idle then
+        -- Under the idle clock: a two-line "what's coming up" block — the next
+        -- briefing and the quiet-hours window. Each line's brightness tracks how
+        -- soon it is (closer = brighter, floor 0.4 opacity), and the SOONER of
+        -- the two sits on top, nearest the clock.
+        local t   = os.date("*t")
+        local now = t.hour * 60 + t.min
+        local items = {}
+        if hh then
+            local target = (tonumber(hh) * 60 + tonumber(mm)) % 1440
+            items[#items + 1] = { du = (target - now) % 1440,
+                text = "BRIEFING SCHEDULED FOR " .. ss_clock12(target) }
+        end
+        local qa = parse_hm(cfgstr("MUSIC_SLEEP_START"))
+        local qb = parse_hm(cfgstr("MUSIC_SLEEP_END"))
+        if qa and qb and qa ~= qb then
+            if is_sleep_time() then           -- happening now: brightest, on top
+                items[#items + 1] = { du = 0,
+                    text = "QUIET HOURS UNTIL " .. ss_clock12(qb) }
+            else
+                items[#items + 1] = { du = (qa - now) % 1440,
+                    text = "QUIET HOURS " .. ss_clock12(qa) .. " \\h–\\h " .. ss_clock12(qb) }
+            end
+        end
+        if #items > 0 then
+            table.sort(items, function(a, b) return a.du < b.du end)
+            local fs    = math.floor(h * 0.018)
+            local fsp   = math.floor(fs * 0.05 + 0.5)
+            local lineH = math.floor(fs * 1.55)
+            local cx    = math.floor(w / 2)
+            local y0    = logo.y + logo.h + math.floor(logo.h * 0.12)
+            local parts = {}
+            for i, it in ipairs(items) do
+                parts[#parts + 1] = string.format(
+                    "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
+                    cx, y0 + (i - 1) * lineH, fs, fsp, glow(fs), ss_sched_alpha(it.du), it.text)
+            end
+            lt = table.concat(parts, "\n")
+        end
     end
     if lt then
         if lt ~= logo_text_ov.data or logo_text_ov.res_x ~= w or logo_text_ov.res_y ~= h then
@@ -3196,6 +3261,7 @@ function help_show()
         "",
         "{\\fnMontserrat ExtraBold}MORNING BRIEFING{\\fnMontserrat SemiBold}\\h\\h(while playing)",
         ".\\h\\hskip\\h\\h\\h,\\h\\hback\\h\\h\\hB\\h\\hpause\\h\\h\\hC\\h\\hcaptions\\h\\h\\hX\\h\\hstop",
+        "CLICK\\h\\ha caption to open its source",
     }
     local lh = math.floor(fs * 1.55)
     local bh = #lines * lh + math.floor(tfs * 1.2) + lh * 2

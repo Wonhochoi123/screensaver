@@ -86,6 +86,7 @@ gen_segment() {
     local id="$1" search="$2" prompt="$3"
     local hash; hash="$(printf '%s' "$prompt" | md5sum | cut -d' ' -f1)"
     local cmp3="$TODAY_CACHE/${id}_${hash}.mp3" ctxt="$TODAY_CACHE/${id}_${hash}.txt"
+    local csrc="$TODAY_CACHE/${id}_${hash}.url"     # source link for this segment
     [ -s "$cmp3" ] && [ -s "$ctxt" ] && return 0
 
     local resp text
@@ -104,6 +105,16 @@ gen_segment() {
     fi
     [ -z "$text" ] || [ "$text" = "null" ] && return 1     # quietly give up on this segment
 
+    # Capture ONE source link from the raw response (web-search segments only) —
+    # for the clickable subtitle. It is never spoken or shown; it's stripped from
+    # the spoken text below. Grab the first external URL, drop our own API hosts,
+    # and trim trailing punctuation.
+    local src=""
+    if [ "$search" = "true" ]; then
+        src="$(printf '%s' "$resp" | grep -oE 'https?://[^"[:space:])]+' \
+              | grep -viE 'api\.x\.ai|//x\.ai|grok\.com' | head -1 | sed 's/[.,);]*$//')"
+    fi
+
     # strip markdown / citation noise (so TTS never reads URLs), collapse blanks
     text="$(printf '%s' "$text" | sed \
             -e 's/\*\*//g' -e 's/^#\+[[:space:]]*//' \
@@ -120,6 +131,7 @@ gen_segment() {
             --output "$tmp" \
        && [ -s "$tmp" ] && ! head -c1 "$tmp" | grep -q '{'; then
         printf '%s' "$text" > "$ctxt"
+        [ -n "$src" ] && printf '%s' "$src" > "$csrc" || rm -f "$csrc"
         mv -f "$tmp" "$cmp3"
         return 0
     fi
@@ -140,8 +152,11 @@ prep() {
 # --- playback ----------------------------------------------------------------
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
     | socat -t1 - "UNIX-CONNECT:$AUDIO_SOCK" 2>/dev/null; }
-sub_show()  { printf '%s' "$1" > "$SUB_FILE"; }
-sub_hide()  { printf '__HIDE__'  > "$SUB_FILE"; }
+URL_FILE="/tmp/ss_briefing.url"          # photo.lua opens this when the caption is clicked
+sub_show()    { printf '%s' "$1" > "$SUB_FILE"; }
+sub_hide()    { printf '__HIDE__'  > "$SUB_FILE"; rm -f "$URL_FILE"; }
+# Publish (or clear) the clickable source link for the current segment.
+set_source()  { if [ -n "$1" ]; then printf '%s' "$1" > "$URL_FILE"; else rm -f "$URL_FILE"; fi; }
 
 # --- soft volume fades over an mpv IPC socket --------------------------------
 jsock()   { printf '%s\n' "$2" | socat -t1 - "UNIX-CONNECT:$1" 2>/dev/null; }
@@ -223,6 +238,7 @@ play_welcome() {
     [ -n "$wmp3" ] && [ -s "$wmp3" ] || return 0
     wtxt="${wmp3%.*}.txt"
     [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
+    set_source ""                       # the premade greeting has no source link
     SKIP=0; STEP=1
     ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$wmp3" >/dev/null 2>&1 &
     CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
@@ -282,6 +298,8 @@ play() {
         [ -s "$cmp3" ] || { idx=$((idx+1)); continue; }
 
         [ -s "$ctxt" ] && sub_show "$(cat "$ctxt")" || sub_hide
+        local csrc="$TODAY_CACHE/${id}_${hash}.url"
+        [ -s "$csrc" ] && set_source "$(cat "$csrc")" || set_source ""
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$cmp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
         wait "$CUR_FFPLAY" 2>/dev/null

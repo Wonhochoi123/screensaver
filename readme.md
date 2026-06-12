@@ -142,9 +142,15 @@ Notes:
 | `c` | Hide / show captions |
 | `x` | Stop the briefing |
 
+**Click a caption line** to open that segment's **source** (the article the
+search segment was built from) in your browser. The link is never shown on
+screen or read aloud — clicking just opens it.
+
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
 for a **Replay / Refresh** chooser (or **Generate** if none is cached yet) to run
-one on demand.
+one on demand. When the screensaver is idle, a small line under the clock shows
+**what's coming up** — the next briefing and the quiet-hours window — with the
+sooner of the two on top and brighter as it approaches.
 
 ---
 
