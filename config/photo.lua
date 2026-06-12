@@ -956,19 +956,21 @@ mp.register_script_message("handle-left-click", function()
         if active then
             local act = controls_hit and controls_hit(mouse.x, mouse.y)
             if act then act(); return end
-            -- Click the captions to open that segment's source in a browser. The
-            -- briefing publishes the URL to /tmp/ss_briefing.url; the link itself
-            -- is never spoken or shown. A click with no link is silently absorbed.
-            if briefing_box and mouse.x >= briefing_box.x0 and mouse.x <= briefing_box.x1
-               and mouse.y >= briefing_box.y0 and mouse.y <= briefing_box.y1 then
-                local uf = io.open("/tmp/ss_briefing.url", "r")
-                local u  = uf and (uf:read("*l") or "") or ""
-                if uf then uf:close() end
-                if u:match("^https?://") then
-                    mp.command_native_async({ name = "subprocess",
-                        args = { "xdg-open", u } }, function() end)
+            -- Click a caption SENTENCE to open its own source in a browser. Each
+            -- sentence box carries the reference xAI cited for that sentence; the
+            -- link is never spoken or shown. A click off any linked sentence falls
+            -- through (so the badge/transport above still work).
+            if briefing_boxes then
+                for _, b in ipairs(briefing_boxes) do
+                    if mouse.x >= b.x0 and mouse.x <= b.x1
+                       and mouse.y >= b.y0 and mouse.y <= b.y1 then
+                        if b.url:match("^https?://") then
+                            mp.command_native_async({ name = "subprocess",
+                                args = { "xdg-open", b.url } }, function() end)
+                        end
+                        return
+                    end
                 end
-                return
             end
         else
             if BD.menu_vis then
@@ -2609,12 +2611,30 @@ local function draw_briefing()
     briefing_shown = txt
     if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
         BC.gen = BC.gen + 1   -- cancel any in-flight fade
-        briefing_box = nil    -- no captions on screen → nothing to click
+        briefing_boxes = nil  -- no captions on screen → nothing to click
         briefing_ov:remove(); return
     end
 
     local w, h = refresh_display_size()
     local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
+    -- Per-sentence source links: grok-briefing.sh publishes "sentence<TAB>url"
+    -- lines whose sentences are split the SAME way as above. Only trust them
+    -- when their joined text matches exactly (guards the brief write race); then
+    -- each displayed sentence carries its own clickable reference.
+    local urls = {}
+    local lf = io.open("/tmp/ss_briefing.links", "r")
+    if lf then
+        local ls, lu = {}, {}
+        for line in lf:lines() do
+            local t, u = line:match("^(.-)\t(.*)$")
+            if not t then t, u = line, "" end
+            ls[#ls + 1] = t; lu[#lu + 1] = u
+        end
+        lf:close()
+        if #ls > 0 and table.concat(ls, " ") == txt then
+            sentences = ls; urls = lu
+        end
+    end
     -- Fill the screen below the badge/controls at the top.
     local regionTop = math.floor(h * 0.20)
     local regionH   = h - regionTop - math.floor(h * 0.04)
@@ -2630,6 +2650,7 @@ local function draw_briefing()
             local mark = #lines + 1
             wrap_words(sent, maxc, lines)
             if si > 1 and lines[mark] then lines[mark].gap_before = true end
+            for k = mark, #lines do lines[k].si = si end   -- which sentence this line belongs to
         end
         local lineH = math.floor(fs * 1.42)
         local sgap  = math.floor(fs * 0.55)
@@ -2645,23 +2666,33 @@ local function draw_briefing()
         if totalH <= maxH or fs <= math.floor(h * 0.020) then break end
         fs = math.floor(fs * 0.88)
     end
-    if #lines == 0 then briefing_box = nil; briefing_ov:remove(); return end
+    if #lines == 0 then briefing_boxes = nil; briefing_ov:remove(); return end
 
-    -- Stash the positioned lines; briefing_fade animates them in.
+    -- Stash the positioned lines; briefing_fade animates them in. Each SENTENCE
+    -- gets its own clickable box (full-width band spanning its wrapped lines)
+    -- carrying that sentence's source URL, so captions are independently
+    -- clickable (global — handle-left-click is defined earlier in the chunk,
+    -- and globals don't count toward Lua's 200-local cap).
     local y = regionTop + math.floor((regionH - totalH) / 2)   -- centered below the top
-    local box_top = y
     BC.lines, BC.w, BC.h = {}, w, h
+    local boxes, bx0, bx1 = {}, math.floor(w * 0.05), math.floor(w * 0.95)
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
+        local top = y
         BC.lines[#BC.lines + 1] = { text = L.text, cx = math.floor(w / 2),
                                     cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
         y = y + lineH
+        if L.si then
+            local b = boxes[L.si]
+            if b then b.y1 = y
+            else boxes[L.si] = { x0 = bx0, x1 = bx1, y0 = top, y1 = y,
+                                 url = urls[L.si] or "" } end
+        end
     end
-    -- Clickable region around the captions: tapping it opens this segment's
-    -- source link (global — handle-left-click is defined earlier in the chunk,
-    -- and globals don't count toward Lua's 200-local cap).
-    briefing_box = { x0 = math.floor(w * 0.05), y0 = box_top,
-                     x1 = math.floor(w * 0.95), y1 = y }
+    briefing_boxes = {}
+    for _, b in pairs(boxes) do
+        if b.url ~= "" then briefing_boxes[#briefing_boxes + 1] = b end
+    end
     BC.t0 = mp.get_time(); BC.gen = BC.gen + 1
     briefing_fade()
 end

@@ -86,43 +86,83 @@ gen_segment() {
     local id="$1" search="$2" prompt="$3"
     local hash; hash="$(printf '%s' "$prompt" | md5sum | cut -d' ' -f1)"
     local cmp3="$TODAY_CACHE/${id}_${hash}.mp3" ctxt="$TODAY_CACHE/${id}_${hash}.txt"
-    local csrc="$TODAY_CACHE/${id}_${hash}.url"     # source link for this segment
+    local clinks="$TODAY_CACHE/${id}_${hash}.links"  # per-sentence "sentence<TAB>url" map
     [ -s "$cmp3" ] && [ -s "$ctxt" ] && return 0
 
-    local resp text
+    local resp raw
     if [ "$search" = "true" ]; then
         resp="$(curl -s --max-time 90 "$API/responses" -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg m "$MODEL" --arg p "$prompt" \
                 '{model:$m, input:[{role:"user",content:$p}], tools:[{type:"web_search"}]}')")"
-        text="$(printf '%s' "$resp" | jq -r '[.output[]? | select(.type=="message") | .content[]? | select(.type=="output_text") | .text] | join("")')"
+        raw="$(printf '%s' "$resp" | jq -r '[.output[]? | select(.type=="message") | .content[]? | select(.type=="output_text") | .text] | join("")')"
     else
         resp="$(curl -s --max-time 60 "$API/chat/completions" -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg m "$MODEL" --arg p "$prompt" \
                 '{model:$m, messages:[{role:"user",content:$p}], temperature:0.7}')")"
-        text="$(printf '%s' "$resp" | jq -r '.choices[0].message.content')"
+        raw="$(printf '%s' "$resp" | jq -r '.choices[0].message.content')"
     fi
-    [ -z "$text" ] || [ "$text" = "null" ] && return 1     # quietly give up on this segment
+    [ -z "$raw" ] || [ "$raw" = "null" ] && return 1       # quietly give up on this segment
 
-    # Capture ONE source link from the raw response (web-search segments only) —
-    # for the clickable subtitle. It is never spoken or shown; it's stripped from
-    # the spoken text below. Grab the first external URL, drop our own API hosts,
-    # and trim trailing punctuation.
-    local src=""
-    if [ "$search" = "true" ]; then
-        src="$(printf '%s' "$resp" | grep -oE 'https?://[^"[:space:])]+' \
-              | grep -viE 'api\.x\.ai|//x\.ai|grok\.com' | head -1 | sed 's/[.,);]*$//')"
+    # Split the answer into sentences and pull each sentence's OWN inline source
+    # link (the references xAI embeds in the text). The clean spoken/displayed
+    # text never contains a URL — they live only in the per-sentence link map, so
+    # each caption line is independently clickable. The voice reads the whole
+    # cleaned text as one. Python does this so the sentence split matches
+    # photo.lua exactly; if python is unavailable we fall back to plain cleaning.
+    local text links_tsv=""
+    if command -v python3 >/dev/null 2>&1; then
+        local parsed
+        parsed="$(SEG_RAW="$raw" python3 - <<'PY'
+import os, re, json
+raw = os.environ.get("SEG_RAW", "")
+def clean(s):
+    s = re.sub(r'\*\*', '', s)
+    s = re.sub(r'(?m)^#+\s*', '', s)
+    s = re.sub(r'\[\[[0-9,]*\]\]\([^)]*\)', '', s)
+    s = re.sub(r'\[[0-9,]*\]\([^)]*\)', '', s)
+    s = re.sub(r'\[[^\[\]]*\]\([^)]*\)', '', s)
+    s = re.sub(r'\[\[[0-9,]*\]\]', '', s)
+    s = re.sub(r'\[[0-9,]*\]', '', s)
+    s = re.sub(r'https?://[^ )]*', '', s)
+    s = re.sub(r'\(\s*\)', '', s)               # empty () left by a removed link
+    s = re.sub(r'\s+([.,;:!?])', r'\1', s)      # tidy a space before punctuation
+    return re.sub(r'\s+', ' ', s).strip()
+t = re.sub(r'[\r\n]+', ' ', raw)
+t = re.sub(r'([.!?])\s+', lambda m: m.group(1) + '\x01', t)   # same boundary rule as photo.lua
+sents, links = [], []
+for part in t.split('\x01'):
+    m = re.search(r'https?://[^\s)\]]+', part)
+    url = m.group(0).rstrip('.,);]') if m else ''
+    if url and re.search(r'api\.x\.ai|//x\.ai|grok\.com', url):
+        url = ''
+    c = clean(part)
+    if c:
+        sents.append(c); links.append(url)
+print(json.dumps({"text": " ".join(sents),
+                  "sentences": [{"t": s, "u": u} for s, u in zip(sents, links)]}))
+PY
+)"
+        text="$(printf '%s' "$parsed" | jq -r '.text' 2>/dev/null)"
+        if [ -n "$text" ] && [ "$text" != "null" ]; then
+            links_tsv="$(printf '%s' "$parsed" | jq -r '.sentences[] | [.t, .u] | @tsv' 2>/dev/null)"
+        else
+            text=""
+        fi
     fi
-
-    # strip markdown / citation noise (so TTS never reads URLs), collapse blanks
-    text="$(printf '%s' "$text" | sed \
-            -e 's/\*\*//g' -e 's/^#\+[[:space:]]*//' \
-            -e 's/\[\[[0-9,]*\]\]([^)]*)//g' \
-            -e 's/\[[0-9,]*\]([^)]*)//g' \
-            -e 's/\[[^][]*\]([^)]*)//g' \
-            -e 's/\[\[[0-9,]*\]\]//g' -e 's/\[[0-9,]*\]//g' \
-            -e 's#https\?://[^ )]*##g' -e 's/  */ /g' | awk 'NF{p=1} p{print}')"
+    # Fallback (no python, or it produced nothing): the original plain cleaning.
+    if [ -z "$text" ]; then
+        text="$(printf '%s' "$raw" | sed \
+                -e 's/\*\*//g' -e 's/^#\+[[:space:]]*//' \
+                -e 's/\[\[[0-9,]*\]\]([^)]*)//g' \
+                -e 's/\[[0-9,]*\]([^)]*)//g' \
+                -e 's/\[[^][]*\]([^)]*)//g' \
+                -e 's/\[\[[0-9,]*\]\]//g' -e 's/\[[0-9,]*\]//g' \
+                -e 's#https\?://[^ )]*##g' -e 's/  */ /g' | awk 'NF{p=1} p{print}')"
+        links_tsv=""
+    fi
+    [ -z "$text" ] && return 1
 
     local tmp; tmp="$(mktemp --suffix=.mp3)"
     if curl -s --max-time 90 -X POST "$API/tts" -H "Authorization: Bearer $API_KEY" \
@@ -131,7 +171,7 @@ gen_segment() {
             --output "$tmp" \
        && [ -s "$tmp" ] && ! head -c1 "$tmp" | grep -q '{'; then
         printf '%s' "$text" > "$ctxt"
-        [ -n "$src" ] && printf '%s' "$src" > "$csrc" || rm -f "$csrc"
+        [ -n "$links_tsv" ] && printf '%s\n' "$links_tsv" > "$clinks" || rm -f "$clinks"
         mv -f "$tmp" "$cmp3"
         return 0
     fi
@@ -152,11 +192,11 @@ prep() {
 # --- playback ----------------------------------------------------------------
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
     | socat -t1 - "UNIX-CONNECT:$AUDIO_SOCK" 2>/dev/null; }
-URL_FILE="/tmp/ss_briefing.url"          # photo.lua opens this when the caption is clicked
+LINKS_FILE="/tmp/ss_briefing.links"      # per-sentence "sentence<TAB>url" map photo.lua clicks
 sub_show()    { printf '%s' "$1" > "$SUB_FILE"; }
-sub_hide()    { printf '__HIDE__'  > "$SUB_FILE"; rm -f "$URL_FILE"; }
-# Publish (or clear) the clickable source link for the current segment.
-set_source()  { if [ -n "$1" ]; then printf '%s' "$1" > "$URL_FILE"; else rm -f "$URL_FILE"; fi; }
+sub_hide()    { printf '__HIDE__'  > "$SUB_FILE"; rm -f "$LINKS_FILE"; }
+# Publish (or clear) the current segment's per-sentence link map.
+set_links()   { if [ -n "$1" ] && [ -s "$1" ]; then cp -f "$1" "$LINKS_FILE"; else rm -f "$LINKS_FILE"; fi; }
 
 # --- soft volume fades over an mpv IPC socket --------------------------------
 jsock()   { printf '%s\n' "$2" | socat -t1 - "UNIX-CONNECT:$1" 2>/dev/null; }
@@ -238,7 +278,7 @@ play_welcome() {
     [ -n "$wmp3" ] && [ -s "$wmp3" ] || return 0
     wtxt="${wmp3%.*}.txt"
     [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
-    set_source ""                       # the premade greeting has no source link
+    set_links ""                        # the premade greeting has no source links
     SKIP=0; STEP=1
     ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$wmp3" >/dev/null 2>&1 &
     CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
@@ -298,8 +338,7 @@ play() {
         [ -s "$cmp3" ] || { idx=$((idx+1)); continue; }
 
         [ -s "$ctxt" ] && sub_show "$(cat "$ctxt")" || sub_hide
-        local csrc="$TODAY_CACHE/${id}_${hash}.url"
-        [ -s "$csrc" ] && set_source "$(cat "$csrc")" || set_source ""
+        set_links "$TODAY_CACHE/${id}_${hash}.links"
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$cmp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
         wait "$CUR_FFPLAY" 2>/dev/null

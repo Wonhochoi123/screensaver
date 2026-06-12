@@ -142,9 +142,11 @@ Notes:
 | `c` | Hide / show captions |
 | `x` | Stop the briefing |
 
-**Click a caption line** to open that segment's **source** (the article the
-search segment was built from) in your browser. The link is never shown on
-screen or read aloud — clicking just opens it.
+**Click a caption sentence** to open **its own source** in your browser — each
+sentence keeps the reference xAI cited for it, so different lines can open
+different articles. The links are never shown on screen or read aloud (the
+voice reads the whole segment as one); clicking just opens them. A sentence
+with no citation isn't clickable.
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
 for a **Replay / Refresh** chooser (or **Generate** if none is cached yet) to run
