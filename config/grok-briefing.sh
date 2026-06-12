@@ -65,18 +65,22 @@ TODAY_HUMAN="$(date '+%A, %B %d, %Y')"
 build_segments() {
     SEG_IDS=(); SEG_SEARCH=(); SEG_PROMPT=()
     local loc="${LOCATION:-your area}"
+    # Shared output contract: ONE topic per line, each carrying its own real
+    # source URL after a ||SRC|| marker. This is what lets every item be split
+    # and linked separately (the marker + URL are metadata, never read aloud).
+    local FMT=$'\n\nFormatting rules (important): Write plain spoken sentences only — NO markdown, bullets, numbering, emojis, or symbols in the spoken text, because it is read aloud. Put each distinct item on its OWN line. At the END of each line, append a space then the literal marker ||SRC|| then the single best real source URL you actually used from your web search for that item (leave it blank after the marker if there genuinely is none). The ||SRC|| marker and URL are metadata and will NOT be read aloud.'
     SEG_IDS+=("weather");  SEG_SEARCH+=("true")
-    SEG_PROMPT+=("Briefly summarize today's ($TODAY_HUMAN) weather for $loc. Keep it conversational, one short paragraph, no lists.")
+    SEG_PROMPT+=("Briefly summarize today's ($TODAY_HUMAN) weather for $loc in one or two conversational sentences on a single line.$FMT")
     SEG_IDS+=("news");     SEG_SEARCH+=("true")
-    SEG_PROMPT+=("Search the web and give me 3 of the most important general news headlines happening right now today, $TODAY_HUMAN. Be concise, one sentence each, plain spoken sentences, no bullets or emojis.")
+    SEG_PROMPT+=("Search the web and give me the 3 most important general news headlines happening right now today, $TODAY_HUMAN. One headline per line, one sentence each.$FMT")
     SEG_IDS+=("techfin");  SEG_SEARCH+=("true")
-    SEG_PROMPT+=("Search the web for the latest interesting tech and finance news as of today, $TODAY_HUMAN. Give me 3 tech headlines and 2 financial market headlines, one sentence each, plain spoken, no bullets or emojis.")
+    SEG_PROMPT+=("Search the web for the latest interesting tech and finance news as of today, $TODAY_HUMAN. Give me 3 tech headlines and 2 financial market headlines — one headline per line, one sentence each.$FMT")
     if [ -n "$TICKERS" ]; then
         SEG_IDS+=("stocks"); SEG_SEARCH+=("true")
-        SEG_PROMPT+=("Search the web for the latest stock prices and news as of today, $TODAY_HUMAN for $TICKERS. For each: current price, percent change, and one key news item if there is one. Plain flowing spoken sentences — no bullet points, no emojis, no headers.")
+        SEG_PROMPT+=("Search the web for the latest stock price and news as of today, $TODAY_HUMAN for these tickers: $TICKERS. Put EACH ticker on its own separate line with its current price, percent change, and one key news item if there is one.$FMT")
     fi
     SEG_IDS+=("watch");    SEG_SEARCH+=("true")
-    SEG_PROMPT+=("Search the web and recommend two interesting stocks or investments to watch today, $TODAY_HUMAN. Give the ticker, current price, why it's worth watching today specifically, and a one-sentence risk note. Casual spoken sentences — no bullet points, no emojis, no headers. Under 150 words.")
+    SEG_PROMPT+=("Search the web and recommend two interesting stocks or investments to watch today, $TODAY_HUMAN. Put EACH recommendation on its own separate line with the ticker, current price, why it's worth watching today specifically, and a one-sentence risk note. Keep each line under 60 words.$FMT")
 }
 
 have_net() { curl -s --max-time 8 -o /dev/null "$API/models" -H "Authorization: Bearer $API_KEY"; }
@@ -160,16 +164,11 @@ else:
 if not text:
     print("{}"); raise SystemExit
 
-flat = re.sub(r'[\r\n]', ' ', text)        # 1:1 so annotation offsets stay valid
-spans, i = [], 0
-for m in re.finditer(r'[.!?]+(?:\s+|$)', flat):
-    spans.append((i, m.end())); i = m.end()
-if i < len(flat):
-    spans.append((i, len(flat)))
-
 def clean(s):
+    s = re.sub(r'\|\|SRC\|\|.*$', '', s)              # drop the source marker + url
     s = re.sub(r'\*\*', '', s)
     s = re.sub(r'(?m)^#+\s*', '', s)
+    s = re.sub(r'^\s*(?:[-*•]|\d+[.)])\s+', '', s)  # leading bullet / number
     s = re.sub(r'\[\[[0-9,]*\]\]\([^)]*\)', '', s)
     s = re.sub(r'\[[0-9,]*\]\([^)]*\)', '', s)
     s = re.sub(r'\[[^\[\]]*\]\([^)]*\)', '', s)
@@ -180,26 +179,54 @@ def clean(s):
     s = re.sub(r'\s+([.,;:!?])', r'\1', s)
     return re.sub(r'\s+', ' ', s).strip()
 
-def url_for(raw_sent, ss, se):
-    if citations:                          # inline [n] marker -> citations[n-1]
-        m = re.search(r'\[(\d+)\]', raw_sent)
+def url_in(s, ls, le):
+    m = re.search(r'\|\|SRC\|\|\s*(\S+)?', s)         # the model's own per-item source
+    if m and m.group(1):
+        u = m.group(1).rstrip('.,);]')
+        if u.startswith('http') and not host_bad(u):
+            return u
+    if citations:                                    # inline [n] -> citations[n-1]
+        m = re.search(r'\[(\d+)\]', s)
         if m:
             k = int(m.group(1)) - 1
             if 0 <= k < len(citations) and not host_bad(citations[k]):
                 return citations[k]
-    for a_s, a_e, u in anns_off:           # citation span overlapping this sentence
-        if not host_bad(u) and a_s < se and a_e > ss:
+    for a_s, a_e, u in anns_off:                      # citation span overlapping this item
+        if not host_bad(u) and a_s < le and a_e > ls:
             return u
-    m = re.search(r'https?://[^\s)\]]+', raw_sent)   # inline url in the text
+    m = re.search(r'https?://[^\s)\]]+', s)           # any inline url
     if m and not host_bad(m.group(0)):
         return m.group(0).rstrip('.,);]')
     return ""
 
+# Divide into ITEMS by line — the model is asked to put one topic per line, so
+# each news story / ticker / pick becomes its own clickable block. Offsets are
+# tracked into the original text so citation spans still map. If the model
+# ignored the line format (one blob), fall back to sentence splitting.
+def split_lines(s):
+    out, pos = [], 0
+    for line in s.split('\n'):
+        out.append((pos, pos + len(line), line)); pos += len(line) + 1
+    return [(a, b, ln) for (a, b, ln) in out if ln.strip()]
+
+def split_sentences(s):
+    flat = re.sub(r'\|\|SRC\|\|\s*\S*', '', s)
+    flat = re.sub(r'[\r\n]', ' ', flat)
+    out, i = [], 0
+    for m in re.finditer(r'[.!?]+(?:\s+|$)', flat):
+        out.append((i, m.end(), flat[i:m.end()])); i = m.end()
+    if i < len(flat):
+        out.append((i, len(flat), flat[i:]))
+    return out
+
+units = split_lines(text)
+if len(units) <= 1:                                   # model didn't break it up
+    units = split_sentences(text)
+
 sents, links = [], []
-for ss, se in spans:
-    raw_sent = flat[ss:se]
-    u = url_for(raw_sent, ss, se)
-    c = clean(raw_sent)
+for ls, le, chunk in units:
+    u = url_in(chunk, ls, le)
+    c = clean(chunk)
     if c:
         sents.append(c); links.append(u)
 print(json.dumps({"text": " ".join(sents),
