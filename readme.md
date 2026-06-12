@@ -275,7 +275,7 @@ file, so a value set here applies everywhere.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `PHOTO_DURATION` | `7` | Seconds each still photo is shown (videos play in full) |
+| `PHOTO_DURATION` | `10` | Seconds each still photo is shown (videos play in full) |
 | `VOLUME` | `70` | mpv startup volume (0–100) |
 | `IDLE_TIMEOUT_MS` | `300000` | Idle time before auto-launch (ms; 300000 = 5 min) |
 | `MIN_LOAD_SECS` | `2` | Minimum time the "please wait" screen stays up |
@@ -290,14 +290,15 @@ file, so a value set here applies everywhere.
 | `HUD_REGION_FS` | `0.026` | Region (top-right) size |
 | `HUD_CITY_FS` | `0.066` | City headline size |
 | `HUD_COORD_FS` | `0.025` | GPS coordinates size |
-| `HUD_TEXT_BLUR` | `0.10` | Text shadow blur/spread (× font size) |
-| `HUD_TEXT_GLOW` | `0.002` | Text shadow strength (× font size) |
+| `HUD_TEXT_BLUR` | `0.25` | Text shadow blur/spread (× font size) |
+| `HUD_TEXT_GLOW` | `0.001` | Text shadow strength (× font size) |
 | `MUSIC_WIN_FRAC` | `0.2` | Marquee width (fraction of screen width) |
 | `HUD_MAP_FRAC` | `0.27` | Minimap + QR size (fraction of height) |
 | `HUD_THUMB` | `1` | Album-art thumbnail on (1) / off (0) |
-| `HUD_MAP_ZOOMS` | `"6 8 10 12 14 16"` | Minimap zoom levels (`↑`/`↓` cycles them) — list as many as you like; during playback the zoom auto-steps inward, giving each level an equal share of the item's play time |
+| `HUD_MAP_ZOOMS` | `"6 7 8 9 10 11 12 13 14 15 16"` | Minimap zoom levels (`↑`/`↓` cycles them) — list as many as you like; during playback the zoom auto-steps inward, giving each level an equal share of the item's play time |
 | `HUD_RING_COLORS` | `"#FFFFFF #4FC3F7"` | GPS ring colour **gradient stops** — the ring blends from the first colour to the last across your zoom levels; two colours (start → destination) are all you need |
-| `HUD_AUTO_ZOOM` | `yes` | Auto-step the minimap inward while each item plays (`yes`/`no`); the approximate map scale (e.g. `~ 1:150K` for a town view) shows above the map, and `↑`/`↓` always zoom manually |
+| `HUD_AUTO_ZOOM` | `yes` | Auto-step the minimap inward while each item plays (`yes`/`no`); the approximate map scale (e.g. `ZOOM: 1:150K` for a town view) shows above the map, and `↑`/`↓` always zoom manually |
+| `HUD_QR_TEXT` | `"SCAN TO VISIT THIS SPOT"` | Invitation shown above the QR code (scanning opens the spot in Google Maps); empty hides it |
 
 ### Quiet hours & blackout
 

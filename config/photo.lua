@@ -92,7 +92,7 @@ local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = min
 -- Minimap zoom levels + ring colours (emergency arrays only if the conf can't
 -- be read — arrays can't degrade to 0; the real values live in the conf).
 local ZOOMS        = cfglist("HUD_MAP_ZOOMS", tonumber)
-if #ZOOMS == 0 then ZOOMS = {6, 8, 10, 12, 14, 16} end
+if #ZOOMS == 0 then ZOOMS = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} end
 local RING_COLORS  = cfglist("HUD_RING_COLORS")
 if #RING_COLORS == 0 then RING_COLORS = {"#FFFFFF", "#4FC3F7"} end
 local DEFAULT_ZIDX = 1
@@ -624,7 +624,7 @@ local function clear_hud_osd()
     pcall(mp.command_native, {"overlay-remove", 2})
     qr_coord_ov:remove()
     map_coord_ov:remove()
-    if ZL then ZL.ov:remove() end
+    if ZL then ZL.ov:remove(); ZL.qr:remove() end
 end
 
 -- While a briefing is on screen, every HUD except the music block is hidden.
@@ -649,6 +649,18 @@ local function apply_qr(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
+    -- Invitation floated above the QR square (bitmaps cover ASS, so it can't
+    -- sit on the square itself). The QR opens the spot in Google Maps; the
+    -- wording is a conf knob, empty hides it. Cleared in clear_hud_osd.
+    local t = cfgstr("HUD_QR_TEXT")
+    if t == nil then t = "SCAN TO VISIT THIS SPOT" end
+    if t ~= "" then
+        ZL.qr.res_x = L.win_w; ZL.qr.res_y = L.win_h
+        ZL.qr.data = coord_tags(L.qr_cx, L.img_top - math.floor(L.fs * 0.7), L.fs) .. t
+        ZL.qr:update()
+    elseif ZL.qr.data and ZL.qr.data ~= "" then
+        ZL.qr:remove(); ZL.qr.data = ""
+    end
 end
 
 -- Zoom-scale label (global: local cap). A raw OSM zoom number ("Z6") means
@@ -656,6 +668,8 @@ end
 -- scale instead (equator values from the OSM zoom table): z6 ≈ 1:10M (large
 -- country), z11 ≈ 1:250K (city), z16 ≈ 1:8K (street).
 ZL = { ov = mp.create_osd_overlay("ass-events"),
+       qr = mp.create_osd_overlay("ass-events"),   -- "scan me" invite above the QR
+
        scale = { [0] = "1:500M", "1:250M", "1:150M", "1:70M", "1:35M", "1:15M",
                  "1:10M", "1:4M", "1:2M", "1:1M", "1:500K", "1:250K", "1:150K",
                  "1:70K", "1:35K", "1:15K", "1:8K", "1:4K", "1:2K", "1:1K",
@@ -672,7 +686,7 @@ local function apply_minimap(bgra_path, L)
     if z then
         ZL.ov.res_x = L.win_w; ZL.ov.res_y = L.win_h
         ZL.ov.data = coord_tags(L.map_cx, L.img_top - math.floor(L.fs * 0.7), L.fs)
-            .. (ZL.scale[z] and ("~ " .. ZL.scale[z]) or ("Z" .. z))
+            .. ("ZOOM: " .. (ZL.scale[z] or ("z" .. z)))
         ZL.ov:update()
     end
 end
@@ -3288,6 +3302,9 @@ SET.schema = {
       desc = "Space-separated zoom levels the ↑/↓ keys cycle through — any count." },
     { key = "HUD_RING_COLORS", label = "GPS ring colours", typ = "str",
       desc = "#RRGGBB gradient stops — ring blends first→last across the zooms." },
+    { key = "HUD_QR_TEXT", label = "QR invitation", typ = "str", live = true,
+      def = "SCAN TO VISIT THIS SPOT",
+      desc = "Shown above the QR (it opens the spot in Google Maps) — empty hides it." },
 
     { head = "QUIET HOURS" },
     { key = "MUSIC_SLEEP_START", label = "Music off at", typ = "time", step = 15, live = true,
