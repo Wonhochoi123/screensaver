@@ -94,7 +94,7 @@ local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = min
 local ZOOMS        = cfglist("HUD_MAP_ZOOMS", tonumber)
 if #ZOOMS == 0 then ZOOMS = {6, 8, 10, 12, 14, 16} end
 local RING_COLORS  = cfglist("HUD_RING_COLORS")
-if #RING_COLORS == 0 then RING_COLORS = {"#FFFFFF", "#B3E5FC", "#4FC3F7"} end
+if #RING_COLORS == 0 then RING_COLORS = {"#FFFFFF", "#4FC3F7"} end
 local DEFAULT_ZIDX = 1
 
 -- Ring colour for zoom level i. RING_COLORS are gradient stops, not a 1:1
@@ -1366,27 +1366,32 @@ mp.register_event("file-loaded", function()
                 mp.add_timeout(0.5, start_prewarm)
             end)
 
-            -- Cinematic auto zoom-in: widest → middle of the list → deepest,
-            -- whatever its length (a 3-level list keeps the classic 1→2→3).
-            mp.add_timeout(1.8, function()
-                if my_seq ~= seq then return end
-                local mid = math.ceil((#ZOOMS + 1) / 2)
-                if cur.auto and cur.zidx < mid then
-                    cur.zidx = mid
-                    show_current_zoom()
-                end
-            end)
-
-            mp.add_timeout(3.6, function()
-                if my_seq ~= seq then return end
-                if cur.auto and cur.zidx < #ZOOMS then
-                    cur.zidx = #ZOOMS
-                    show_current_zoom()
-                end
-            end)
+            -- Auto zoom-in is driven by playback progress (auto_zoom_tick
+            -- below), so every zoom level gets an equal share of this item's
+            -- play time — photo or video, short or long.
         end)
     end)
 end)
+
+-- Cinematic auto zoom-in, paced by the media itself: the item's play time is
+-- split evenly across the zoom levels, so each level gets a fair share —
+-- 1/n of PHOTO_DURATION on a photo, 1/n of the clip's length on a video.
+-- Driven by percent-pos (not timers, which starve during video decode); it
+-- only ever steps inward, and any manual ↑/↓ sets cur.auto=false and stops
+-- it for the rest of the item. Global function: chunk is at the local cap.
+function auto_zoom_tick(pct)
+    if not pct or not cur.auto then return end
+    if not (cur.lat and cur.lon and cur.mdir) then return end
+    local n = #ZOOMS
+    if n <= 1 then return end
+    local target = math.floor(pct / 100 * n) + 1
+    if target > n then target = n end
+    if target > cur.zidx then
+        cur.zidx = target
+        show_current_zoom()
+    end
+end
+mp.observe_property("percent-pos", "number", function(_, pct) auto_zoom_tick(pct) end)
 
 -- Now-playing marquee (top-left). Montserrat ExtraBold, white. It never scrolls:
 -- a title too long for its window is shown static and simply FADES OUT toward the
