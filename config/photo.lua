@@ -1366,9 +1366,25 @@ mp.register_event("file-loaded", function()
                 mp.add_timeout(0.5, start_prewarm)
             end)
 
-            -- Auto zoom-in is driven by playback progress (auto_zoom_tick
-            -- below), so every zoom level gets an equal share of this item's
-            -- play time — photo or video, short or long.
+            -- Auto zoom-in for VIDEOS rides the percent-pos observer below
+            -- (a still image renders one frame, so percent-pos never moves).
+            -- For PHOTOS, spread the steps across the display duration with
+            -- timers — safe here, since timers only starve under video decode.
+            if mp.get_property_native("current-tracks/video/image") then
+                -- NB: "duration" is 0 for stills — the display time lives in
+                -- the image-display-duration property (set by launch.sh).
+                local dur = mp.get_property_number("image-display-duration")
+                if not dur or dur <= 0 or dur > 86400 then dur = cfgnum("PHOTO_DURATION") end
+                local n = #ZOOMS
+                if dur > 0 and n > 1 then
+                    for k = 1, n - 1 do
+                        mp.add_timeout(dur * k / n, function()
+                            if my_seq ~= seq then return end
+                            auto_zoom_step(k + 1)
+                        end)
+                    end
+                end
+            end
         end)
     end)
 end)
@@ -1376,20 +1392,24 @@ end)
 -- Cinematic auto zoom-in, paced by the media itself: the item's play time is
 -- split evenly across the zoom levels, so each level gets a fair share —
 -- 1/n of PHOTO_DURATION on a photo, 1/n of the clip's length on a video.
--- Driven by percent-pos (not timers, which starve during video decode); it
+-- Videos are driven by percent-pos (not timers, which starve during decode);
+-- photos by the timer chain above, both stepping through auto_zoom_step. It
 -- only ever steps inward, and any manual ↑/↓ sets cur.auto=false and stops
--- it for the rest of the item. Global function: chunk is at the local cap.
-function auto_zoom_tick(pct)
-    if not pct or not cur.auto then return end
+-- it for the rest of the item. Global functions: chunk is at the local cap.
+function auto_zoom_step(target)
+    if not cur.auto then return end
     if not (cur.lat and cur.lon and cur.mdir) then return end
-    local n = #ZOOMS
-    if n <= 1 then return end
-    local target = math.floor(pct / 100 * n) + 1
-    if target > n then target = n end
+    if target > #ZOOMS then target = #ZOOMS end
     if target > cur.zidx then
         cur.zidx = target
         show_current_zoom()
     end
+end
+function auto_zoom_tick(pct)
+    if not pct then return end
+    local n = #ZOOMS
+    if n <= 1 then return end
+    auto_zoom_step(math.floor(pct / 100 * n) + 1)
 end
 mp.observe_property("percent-pos", "number", function(_, pct) auto_zoom_tick(pct) end)
 
