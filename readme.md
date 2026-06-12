@@ -127,7 +127,9 @@ Notes:
 ### Mouse
 
 - **Click the album-art thumbnail** (top-left) to pause/play the music.
-- **Click the music marquee** to open the song chooser; wheel to scroll, click to pick.
+- **Click the music marquee** to open the song chooser; wheel to scroll, click a
+  row to play it, or click the **× on the right** of a row to remove that track
+  from the rotation (the file is moved to the trash, so it won't come back).
 - **Hover the month bar** (bottom) to see a month label; **left-click** it to jump
   to the photo at that point; **right-click** it to jump to that month's start.
 - **Right-click elsewhere** quits the screensaver.

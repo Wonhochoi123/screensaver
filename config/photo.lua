@@ -1026,6 +1026,11 @@ mp.register_script_message("handle-left-click", function()
             MQ.scroll = math.floor(frac * MQ.maxscroll + 0.5); draw_chooser(); return
         end
         local r = chooser_hit and chooser_hit(mouse.x, mouse.y)
+        if r and r.del and mouse.x >= r.del.x0 and mouse.x <= r.del.x1
+           and mouse.y >= r.del.y0 and mouse.y <= r.del.y1 then
+            music_delete(r.idx, r.file)            -- "×": drop it and trash the file
+            return
+        end
         if r and r.idx ~= nil then
             mp.commandv("run", "/bin/sh", "-c",
                 "printf '%s\\n' '{\"command\":[\"set_property\",\"playlist-pos\"," .. r.idx
@@ -1656,6 +1661,7 @@ function draw_chooser()
     local top_y = b.y + b.th + math.floor(rowh * 0.5)
     local y, parts = top_y, {}
     local mstyle = music_style(fs, fsp)               -- Montserrat ExtraBold + glow
+    local delw = math.floor(fs * 1.7)                 -- room for the delete "×" on the right
     for i = first, last do
         local e = entries[i]
         local p = i - first                           -- 0 = top visible row
@@ -1666,11 +1672,19 @@ function draw_chooser()
         if has_below then vis = math.min(vis, math.max(0.10, (count - 1 - p + 0.5) / FADE)) end
         local alpha = math.floor(0x40 + (0xFF - 0x40) * (1 - vis) + 0.5)
         local tc = e.current and "&H50C0FF&" or "&HFFFFFF&"   -- current track in gold
+        -- Title (clipped short of the delete button so a long name can't run into it).
         parts[#parts + 1] = string.format(
             "{\\an4\\pos(%d,%d)%s\\1c%s\\alpha&H%02X&\\clip(%d,%d,%d,%d)}%s",
             x0 + pad, ry0 + math.floor(rowh / 2), mstyle, tc, alpha,
-            x0, ry0, x0 + boxw, ry0 + rowh, entry_name(e))
-        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry0 + rowh, idx = i - 1 }
+            x0, ry0, x0 + boxw - delw, ry0 + rowh, entry_name(e))
+        -- Delete "×" at the right of the row — removes the track and trashes the file.
+        parts[#parts + 1] = string.format(
+            "{\\an5\\pos(%d,%d)%s\\1c&H5050E0&\\alpha&H%02X&}\xC3\x97",
+            x0 + boxw - math.floor(delw / 2), ry0 + math.floor(rowh / 2), mstyle,
+            math.floor(0x20 + (0xFF - 0x20) * (1 - vis) + 0.5))
+        MQ.rows[#MQ.rows + 1] = { x0 = x0, y0 = ry0, x1 = x0 + boxw, y1 = ry0 + rowh, idx = i - 1,
+                                  file = e.filename,
+                                  del = { x0 = x0 + boxw - delw, y0 = ry0, x1 = x0 + boxw, y1 = ry0 + rowh } }
         y = ry0 + rowh + gapy
     end
     local bottom_y = y - gapy
@@ -1725,6 +1739,41 @@ function open_chooser()
             MQ.chooser = true
             draw_chooser()
         end)
+end
+
+-- Delete a track from the chooser: drop it from the live audio playlist (so it
+-- stops/skips immediately) and move the file to the trash (so it never comes
+-- back). Then re-query the playlist to refresh the rows, keeping the chooser
+-- open at the same scroll. Global: the main chunk is at Lua's 200-local cap.
+function music_delete(idx, file)
+    if idx == nil then return end
+    mp.commandv("run", "/bin/sh", "-c",
+        "printf '%s\\n' '{\"command\":[\"playlist-remove\"," .. idx
+        .. "]}' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+    if file and file ~= "" then
+        mp.command_native_async({ name = "subprocess", playback_only = false,
+            args = { CFG_DIR .. "/trash-music.sh", file } }, function() end)
+    end
+    mp.osd_message("🗑 Removed from music", 1.0)
+    mp.add_timeout(0.2, function()
+        if not MQ.chooser then return end
+        local keep = MQ.scroll
+        mp.command_native_async({ name = "subprocess", capture_stdout = true,
+            args = { "/bin/sh", "-c",
+                "printf '%s\\n' '{\"command\":[\"get_property\",\"playlist\"]}' "
+                .. "| socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" } },
+            function(ok, res)
+                local entries = {}
+                if ok and res and res.stdout then
+                    local j = utils.parse_json(res.stdout)
+                    if j and j.error == "success" and type(j.data) == "table" then entries = j.data end
+                end
+                MQ.entries = entries
+                if #entries == 0 then MQ.chooser = false; music_menu_ov:remove(); return end
+                MQ.scroll = keep
+                draw_chooser()
+            end)
+    end)
 end
 
 -- Mouse wheel: scroll the open song chooser; otherwise step the slideshow (only
@@ -3300,7 +3349,7 @@ function help_show()
         "DEL\\h\\hmove photo to trash",
         "=\\h/\\h−\\h\\hvolume\\h\\h\\h•\\h\\h\\hESC / Q\\h\\hquit",
         "",
-        "CLICK\\h\\halbum art: play / pause\\h\\h\\h•\\h\\h\\hsong title: chooser",
+        "CLICK\\h\\halbum art: play / pause\\h\\h\\h•\\h\\h\\hsong title: chooser (× removes a track)",
         "CLICK\\h\\hmonth bar: jump there\\h\\h\\h•\\h\\h\\hRIGHT-CLICK\\h\\hquit",
         "",
         "{\\fnMontserrat ExtraBold}MORNING BRIEFING{\\fnMontserrat SemiBold}\\h\\h(while playing)",
