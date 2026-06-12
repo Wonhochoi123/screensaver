@@ -144,11 +144,12 @@ Notes:
 | `c` | Hide / show captions |
 | `x` | Stop the briefing |
 
-**Click a caption sentence** to open **its own source** in your browser — each
-sentence keeps the reference xAI cited for it, so different lines can open
-different articles. The links are never shown on screen or read aloud (the
-voice reads the whole segment as one); clicking just opens them. A sentence
-with no citation isn't clickable.
+**Click a caption item** to open **its own source** in your browser — every
+topic (each headline, each ticker, each pick) is its own block carrying the
+reference it was built from, so different blocks open different articles. The
+links are never shown on screen or read aloud (the voice reads the whole
+segment as one); clicking just opens them. An item with no source isn't
+clickable.
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
 for a **Replay / Refresh** chooser (or **Generate** if none is cached yet) to run

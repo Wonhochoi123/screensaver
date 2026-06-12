@@ -1769,7 +1769,7 @@ function music_delete(idx, file)
                     if j and j.error == "success" and type(j.data) == "table" then entries = j.data end
                 end
                 MQ.entries = entries
-                if #entries == 0 then MQ.chooser = false; music_menu_ov:remove(); return end
+                if #entries == 0 then music_clear(); return end   -- last one deleted
                 MQ.scroll = keep
                 draw_chooser()
             end)
@@ -1980,6 +1980,18 @@ function poll_music()
         args = { "/bin/sh", "-c",
             "printf '%s\\n' '{\"command\":[\"get_property\",\"metadata\"]}' | socat -t1 - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null" },
     }, function(ok, res)
+        -- Dead-player detector: when the audio mpv is gone (last track deleted →
+        -- empty playlist → it exits), the socket stops answering. Three silent
+        -- polls in a row (~9s) clear the whole music HUD instead of holding the
+        -- last track on screen forever.
+        local alive = ok and res and res.stdout and res.stdout ~= ""
+            and utils.parse_json(res.stdout) ~= nil
+        if alive then
+            MQ.fail = 0
+        else
+            MQ.fail = (MQ.fail or 0) + 1
+            if MQ.fail >= 3 and music_shown then music_clear() end
+        end
         local title, artist
         if ok and res and res.stdout and res.stdout ~= "" then
             local j = utils.parse_json(res.stdout)
@@ -2013,6 +2025,19 @@ function poll_music()
         end)
     end)
 end
+-- Clear every piece of the music HUD (marquee, bar, thumb, chooser). Used when
+-- the music is gone for good — the last track was deleted, or the audio player
+-- died — so a stale "now playing" can't linger. Global: 200-local cap.
+function music_clear()
+    music_shown = nil; music_hit = nil; music_bar = nil
+    music_pct = nil; music_playing = false
+    MQ.layout = nil; MQ.chooser = false; MQ.rows = {}; MQ.entries = nil
+    music_ov:remove(); music_measure_ov:remove(); music_menu_ov:remove()
+    music_bar_ov:remove(); music_bar_bg_ov:remove(); music_thumb_ov:remove()
+    pcall(mp.command_native, { "overlay-remove", THUMB_ID })
+    TH.shown = nil; TH.path = nil; TH.d = nil
+end
+
 mp.add_periodic_timer(3, poll_music)
 poll_music()
 

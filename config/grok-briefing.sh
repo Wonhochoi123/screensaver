@@ -68,7 +68,7 @@ build_segments() {
     # Shared output contract: ONE topic per line, each carrying its own real
     # source URL after a ||SRC|| marker. This is what lets every item be split
     # and linked separately (the marker + URL are metadata, never read aloud).
-    local FMT=$'\n\nFormatting rules (important): Write plain spoken sentences only — NO markdown, bullets, numbering, emojis, or symbols in the spoken text, because it is read aloud. Put each distinct item on its OWN line. At the END of each line, append a space then the literal marker ||SRC|| then the single best real source URL you actually used from your web search for that item (leave it blank after the marker if there genuinely is none). The ||SRC|| marker and URL are metadata and will NOT be read aloud.'
+    local FMT=$'\n\nFormatting rules (important): Write plain spoken sentences only — NO markdown, bullets, numbering, emojis, or symbols in the spoken text, because it is read aloud. Put each distinct item on its OWN line. Every line MUST end with a space, the literal marker ||SRC||, another space, and the full URL of the web page you actually used for that item — you searched the web for this, so each item has a source; do NOT leave it blank. Example line:\nApple announced a new chip this morning. ||SRC|| https://www.reuters.com/technology/apple-chip\nThe ||SRC|| marker and URL are metadata and will NOT be read aloud.'
     SEG_IDS+=("weather");  SEG_SEARCH+=("true")
     SEG_PROMPT+=("Briefly summarize today's ($TODAY_HUMAN) weather for $loc in one or two conversational sentences on a single line.$FMT")
     SEG_IDS+=("news");     SEG_SEARCH+=("true")
@@ -108,6 +108,9 @@ gen_segment() {
         raw="$(printf '%s' "$resp" | jq -r '.choices[0].message.content')"
     fi
     [ -z "$raw" ] || [ "$raw" = "null" ] && return 1       # quietly give up on this segment
+    # Keep the raw response beside the cache for diagnosis (e.g. "why did this
+    # item get no link?"); the daily cache cleanup prunes it with everything else.
+    printf '%s' "$resp" > "$TODAY_CACHE/${id}_${hash}.resp" 2>/dev/null
 
     # Split the answer into sentences and attach EACH sentence's OWN reference,
     # taken from xAI's real citations — the web_search response carries url
@@ -220,8 +223,8 @@ def split_sentences(s):
     return out
 
 units = split_lines(text)
-if len(units) <= 1:                                   # model didn't break it up
-    units = split_sentences(text)
+if len(units) <= 1 and '||SRC||' not in text:         # one blob with no markers:
+    units = split_sentences(text)                     # model ignored the format
 
 sents, links = [], []
 for ls, le, chunk in units:
@@ -229,6 +232,27 @@ for ls, le, chunk in units:
     c = clean(chunk)
     if c:
         sents.append(c); links.append(u)
+
+# Last resort: if NO item got a url, harvest every external url anywhere in the
+# response (search-tool results, nested annotations, any shape) in order, and
+# only when the count matches the items 1:1, zip them on. An exact count match
+# is the only case where positional assignment is trustworthy.
+if search and links and not any(links):
+    pool, seen = [], set()
+    def walk(o):
+        if isinstance(o, dict):
+            for v in o.values(): walk(v)
+        elif isinstance(o, list):
+            for v in o: walk(v)
+        elif isinstance(o, str):
+            for m in re.finditer(r'https?://[^\s"\\)\]]+', o):
+                u = m.group(0).rstrip('.,);]')
+                if not host_bad(u) and u not in seen:
+                    seen.add(u); pool.append(u)
+    walk(resp)
+    if len(pool) == len(links):
+        links = pool
+
 print(json.dumps({"text": " ".join(sents),
                   "sentences": [{"t": s, "u": u} for s, u in zip(sents, links)]}))
 PY
@@ -281,11 +305,19 @@ prep() {
 # --- playback ----------------------------------------------------------------
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
     | socat -t1 - "UNIX-CONNECT:$AUDIO_SOCK" 2>/dev/null; }
-LINKS_FILE="/tmp/ss_briefing.links"      # per-sentence "sentence<TAB>url" map photo.lua clicks
+LINKS_FILE="/tmp/ss_briefing.links"      # per-item "text<TAB>url" map photo.lua clicks
 sub_show()    { printf '%s' "$1" > "$SUB_FILE"; }
 sub_hide()    { printf '__HIDE__'  > "$SUB_FILE"; rm -f "$LINKS_FILE"; }
-# Publish (or clear) the current segment's per-sentence link map.
-set_links()   { if [ -n "$1" ] && [ -s "$1" ]; then cp -f "$1" "$LINKS_FILE"; else rm -f "$LINKS_FILE"; fi; }
+# Publish (or clear) the current segment's link map. Atomic (tmp+mv), and the
+# callers publish it BEFORE the caption text so photo.lua never pairs new text
+# with the previous segment's links.
+set_links() {
+    if [ -n "$1" ] && [ -s "$1" ]; then
+        cp -f "$1" "$LINKS_FILE.part" 2>/dev/null && mv -f "$LINKS_FILE.part" "$LINKS_FILE"
+    else
+        rm -f "$LINKS_FILE"
+    fi
+}
 
 # --- soft volume fades over an mpv IPC socket --------------------------------
 jsock()   { printf '%s\n' "$2" | socat -t1 - "UNIX-CONNECT:$1" 2>/dev/null; }
@@ -366,8 +398,8 @@ play_welcome() {
     wmp3="$(find "$WELCOME_DIR" -maxdepth 1 -type f -iname '*.mp3' 2>/dev/null | shuf -n1)"
     [ -n "$wmp3" ] && [ -s "$wmp3" ] || return 0
     wtxt="${wmp3%.*}.txt"
-    [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
     set_links ""                        # the premade greeting has no source links
+    [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
     SKIP=0; STEP=1
     ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$wmp3" >/dev/null 2>&1 &
     CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
@@ -426,8 +458,8 @@ play() {
         [ -s "$cmp3" ] || gen_segment "$id" "${SEG_SEARCH[$idx]}" "$prompt" || { idx=$((idx+1)); continue; }
         [ -s "$cmp3" ] || { idx=$((idx+1)); continue; }
 
-        [ -s "$ctxt" ] && sub_show "$(cat "$ctxt")" || sub_hide
         set_links "$TODAY_CACHE/${id}_${hash}.links"
+        [ -s "$ctxt" ] && sub_show "$(cat "$ctxt")" || sub_hide
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$cmp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
         wait "$CUR_FFPLAY" 2>/dev/null
