@@ -291,8 +291,8 @@ file, so a value set here applies everywhere.
 | `HUD_THUMB` | `1` | Album-art thumbnail on (1) / off (0) |
 | `MUSIC_SCROLL_SPEED` | `0.045` | *Legacy / unused* — the marquee no longer scrolls (hover reveals the full title instead) |
 | `MUSIC_SCROLL_DWELL` | `30` | *Legacy / unused* (see above) |
-| `HUD_MAP_ZOOMS` | `"11 14 16"` | Minimap zoom levels (`↑`/`↓` cycles them) |
-| `HUD_RING_COLORS` | `"#FFFFFF #B3E5FC #4FC3F7"` | GPS ring colour per zoom level |
+| `HUD_MAP_ZOOMS` | `"11 14 16"` | Minimap zoom levels (`↑`/`↓` cycles them) — list as many as you like |
+| `HUD_RING_COLORS` | `"#FFFFFF #B3E5FC #4FC3F7"` | GPS ring colour **gradient stops** — the ring blends from the first colour to the last across your zoom levels, so the lists don't need matching lengths |
 
 ### Quiet hours & blackout
 

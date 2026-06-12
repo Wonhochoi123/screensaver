@@ -97,6 +97,32 @@ local RING_COLORS  = cfglist("HUD_RING_COLORS")
 if #RING_COLORS == 0 then RING_COLORS = {"#FFFFFF", "#B3E5FC", "#4FC3F7"} end
 local DEFAULT_ZIDX = 1
 
+-- Ring colour for zoom level i. RING_COLORS are gradient stops, not a 1:1
+-- list: the zoom levels are spread evenly across them and each level's colour
+-- is interpolated, so any number of zooms works with any number of colours
+-- (3 zooms over 3 stops lands exactly on the stops — the classic config is
+-- unchanged). Global function: the main chunk is at Lua's 200-local cap.
+function ring_color(i)
+    local m, n = #RING_COLORS, #ZOOMS
+    if m == 0 then return "#FFFFFF" end
+    local function rgb(s)
+        local r, g, b = (s or ""):match("#?(%x%x)(%x%x)(%x%x)")
+        return tonumber(r or "", 16) or 255, tonumber(g or "", 16) or 255,
+               tonumber(b or "", 16) or 255
+    end
+    if i <= 1 or m == 1 or n <= 1 then return string.format("#%02X%02X%02X", rgb(RING_COLORS[1])) end
+    if i >= n then return string.format("#%02X%02X%02X", rgb(RING_COLORS[m])) end
+    local t = (i - 1) / (n - 1) * (m - 1)   -- position along the stop chain
+    local k = math.floor(t)
+    local f = t - k
+    local r1, g1, b1 = rgb(RING_COLORS[k + 1])
+    local r2, g2, b2 = rgb(RING_COLORS[math.min(k + 2, m)])
+    return string.format("#%02X%02X%02X",
+        math.floor(r1 + (r2 - r1) * f + 0.5),
+        math.floor(g1 + (g2 - g1) * f + 0.5),
+        math.floor(b1 + (b2 - b1) * f + 0.5))
+end
+
 local ov       = mp.create_osd_overlay("ass-events")
 local pause_ov = mp.create_osd_overlay("ass-events")  -- res set per-draw from the real display
 local qr_coord_ov  = mp.create_osd_overlay("ass-events")
@@ -654,7 +680,7 @@ end
 local function build_all(lat, lon, w, h, mdir, cb, i)
     i = i or 1
     if i > #ZOOMS then if cb then cb() end return end
-    build_one(lat, lon, ZOOMS[i], w, h, RING_COLORS[i], mdir, function()
+    build_one(lat, lon, ZOOMS[i], w, h, ring_color(i), mdir, function()
         build_all(lat, lon, w, h, mdir, cb, i + 1)
     end)
 end
@@ -850,7 +876,7 @@ end)
 local function show_current_zoom()
     if not (cur.lat and cur.lon and cur.mdir) then return end
     local z = ZOOMS[cur.zidx]
-    local color = RING_COLORS[cur.zidx]
+    local color = ring_color(cur.zidx)
     local s = cur.seq
     local L = hud_geom()
     build_one(cur.lat, cur.lon, z, L.S, L.S, color, cur.mdir, function(ok)
@@ -1325,7 +1351,7 @@ mp.register_event("file-loaded", function()
         end
 
         local z = ZOOMS[cur.zidx]
-        local color = RING_COLORS[cur.zidx]
+        local color = ring_color(cur.zidx)
 
         draw_coord_labels(L, m.lat, m.lon)
 
@@ -3207,9 +3233,9 @@ SET.schema = {
       live = function(v) SHOW_THUMB = (v ~= "0") end,
       desc = "Cover art next to the music bar — click it to play / pause." },
     { key = "HUD_MAP_ZOOMS", label = "Minimap zoom levels", typ = "str",
-      desc = "Space-separated zoom levels the ↑/↓ keys cycle through." },
+      desc = "Space-separated zoom levels the ↑/↓ keys cycle through — any count." },
     { key = "HUD_RING_COLORS", label = "GPS ring colours", typ = "str",
-      desc = "One #RRGGBB per zoom level, space-separated." },
+      desc = "#RRGGBB gradient stops — ring blends first→last across the zooms." },
 
     { head = "QUIET HOURS" },
     { key = "MUSIC_SLEEP_START", label = "Music off at", typ = "time", step = 15, live = true,
