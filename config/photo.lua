@@ -92,7 +92,7 @@ local THUMB_ID     = 3      -- mpv overlay id for the album-art thumb (1,2 = min
 -- Minimap zoom levels + ring colours (emergency arrays only if the conf can't
 -- be read — arrays can't degrade to 0; the real values live in the conf).
 local ZOOMS        = cfglist("HUD_MAP_ZOOMS", tonumber)
-if #ZOOMS == 0 then ZOOMS = {11, 14, 16} end
+if #ZOOMS == 0 then ZOOMS = {6, 8, 10, 12, 14, 16} end
 local RING_COLORS  = cfglist("HUD_RING_COLORS")
 if #RING_COLORS == 0 then RING_COLORS = {"#FFFFFF", "#B3E5FC", "#4FC3F7"} end
 local DEFAULT_ZIDX = 1
@@ -1366,18 +1366,21 @@ mp.register_event("file-loaded", function()
                 mp.add_timeout(0.5, start_prewarm)
             end)
 
+            -- Cinematic auto zoom-in: widest → middle of the list → deepest,
+            -- whatever its length (a 3-level list keeps the classic 1→2→3).
             mp.add_timeout(1.8, function()
                 if my_seq ~= seq then return end
-                if cur.auto and cur.zidx < 2 then
-                    cur.zidx = 2
+                local mid = math.ceil((#ZOOMS + 1) / 2)
+                if cur.auto and cur.zidx < mid then
+                    cur.zidx = mid
                     show_current_zoom()
                 end
             end)
 
             mp.add_timeout(3.6, function()
                 if my_seq ~= seq then return end
-                if cur.auto and cur.zidx < 3 then
-                    cur.zidx = 3
+                if cur.auto and cur.zidx < #ZOOMS then
+                    cur.zidx = #ZOOMS
                     show_current_zoom()
                 end
             end)
