@@ -87,6 +87,8 @@ Notes:
   `Data/Optimized_Vids/`); the first pass may take a little while.
 - Supported media: `jpg/jpeg/png` images and `mp4/mkv/mov/webm` videos; music in
   `mp3/flac/m4a/ogg/opus/wav/aac`.
+- **Empty library?** The screensaver shows a guidance screen telling you where to
+  put your photos, and starts automatically the moment files appear.
 
 ---
 
@@ -114,6 +116,7 @@ Notes:
 | `Page Down` / `Page Up` | Jump to next / previous **month** |
 | `End` / `Home` | Jump to next / previous **year** |
 | `l` | Cycle the **landmark** label for the current photo (remembered) |
+| `h` / `?` | Toggle the on-screen **controls cheat-sheet** |
 | `Delete` | Move the current photo/video to the trash |
 | `=` / `-` | Slideshow volume up / down |
 | `Esc` / `q` | Quit |

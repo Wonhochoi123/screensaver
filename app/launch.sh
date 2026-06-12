@@ -182,6 +182,26 @@ while [ $_w -lt 30 ]; do
     sleep 0.1; _w=$((_w+1))
 done
 
+# Empty library: don't build an empty playlist and silently exit — tell the
+# user where their photos go and start automatically the moment files appear.
+# (Esc/q on the black screen quits as usual.)
+if [ "$_SS_MC" = 0 ]; then
+    _ss_load_msg "ADD YOUR PHOTOS" "Drop photos and videos into $MEDIA_DIR — I'll start automatically"
+    while kill -0 "$MPV_LOAD_PID" 2>/dev/null; do
+        _SS_MC="$(find "$MEDIA_DIR" -maxdepth 1 -type f \
+            \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \
+               -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.heic' -o -iname '*.heif' \
+               -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.m4v' \
+               -o -iname '*.webm' \) -print 2>/dev/null | wc -l)"
+        [ "$_SS_MC" -gt 0 ] && break
+        sleep 5
+    done
+    kill -0 "$MPV_LOAD_PID" 2>/dev/null || exit 0    # user closed the window
+    HEAVY=1
+    _SS_TITLE="BUILDING LIBRARY"; _SS_SUB="Setting up your screensaver..."
+    _ss_load_msg "$_SS_TITLE" "$_SS_SUB"
+fi
+
 _ss_load_msg "$_SS_TITLE" "Reading photo metadata..."
 "$POLICE" --once
 

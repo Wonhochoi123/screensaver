@@ -10,6 +10,10 @@ STATUS_FILE="$APP_DIR/vid-status"
 mkdir -p "$OPT_DIR"
 touch "$LOG_FILE"
 
+# ionice is optional (util-linux); skip silently where absent.
+IONICE=""
+command -v ionice >/dev/null 2>&1 && IONICE="ionice"
+
 log() { echo "[$(date +'%H:%M:%S')] $*" >> "$LOG_FILE"; }
 
 FFMPEG_PID=""
@@ -133,7 +137,9 @@ PY
         echo "$filename — starting..." > "$STATUS_FILE"
         rm -f "$STATUS_FILE.raw"
 
-        ffmpeg -nostdin -y -v error \
+        # Lowest CPU/IO priority: the encode runs while the slideshow is playing
+        # and must never steal frames from it — it just takes a little longer.
+        nice -n 19 ${IONICE:+$IONICE -c3} ffmpeg -nostdin -y -v error \
             -i "$vid" \
             -filter_complex "$FILTER" \
             -map_metadata -1 -metadata:s:v:0 rotate=0 \

@@ -106,16 +106,33 @@ echo "▶ Resolving and installing dependencies..."
 
 REQUIRED_CMDS=(mpv exiftool python3 curl qrencode ffmpeg socat playerctl pactl fc-match unzip)
 
+# Everything the package transaction provides, checked up front: when it is all
+# already here (every re-install after the first), skip the package manager
+# entirely — no apt/dnf metadata refresh, no sudo prompt, seconds instead of
+# minutes. Anything missing -> full transaction as before.
+deps_missing() {
+    for c in "${REQUIRED_CMDS[@]}" xdotool; do
+        command -v "$c" >/dev/null 2>&1 || return 0
+    done
+    command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 || return 0
+    python3 -c 'import qrcode, PIL' >/dev/null 2>&1 || return 0
+    return 1
+}
+
 detect_pm() {
     for pm in dnf apt-get pacman zypper; do
         command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return; }
     done
     echo ""
 }
-PM="$(detect_pm)"
-
 INSTALL=""
 PKGS=""
+if deps_missing; then
+    PM="$(detect_pm)"
+else
+    echo "▶ All dependencies already present — skipping package installation."
+    PM="skip"
+fi
 case "$PM" in
   dnf)
     PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
@@ -134,6 +151,8 @@ case "$PM" in
     PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
     INSTALL="sudo zypper install -y"
     ;;
+  skip)
+    ;;   # deps already satisfied above — nothing to install
   *)
     echo "⚠ No supported package manager (dnf/apt/pacman/zypper) found."
     ;;
@@ -164,6 +183,11 @@ fi
 FONT_BASE="https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf"
 got_font=0
 for w in ExtraBold SemiBold; do
+    # Already installed: keep it. Skipping also avoids rewriting a font a running
+    # mpv has mmap'd (overwriting mapped files can crash it with SIGBUS).
+    if [ -s "$FONT_DIR/Montserrat-$w.ttf" ]; then
+        got_font=1; continue
+    fi
     if curl -fsSL --create-dirs -o "$FONT_DIR/Montserrat-$w.ttf" "$FONT_BASE/Montserrat-$w.ttf"; then
         got_font=1
     else

@@ -1940,14 +1940,30 @@ function bo_show()
     if BO.on then return end
     BO.on = true
     BO.was_paused = mp.get_property_bool("pause")
-    mp.set_property_bool("pause", true)          -- stop decoding behind the black
-    BO.ov.res_x = 1280; BO.ov.res_y = 720
-    BO.ov.data = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H00&\\p1}m 0 0 l 1280 0 1280 720 0 720{\\p0}"
-    BO.ov:update()
+    -- Gentle ~1.2s fade to black; decode pauses only once fully dark. A wake
+    -- mid-fade cancels via the gen counter.
+    BO.gen = (BO.gen or 0) + 1
+    local g, t0 = BO.gen, mp.get_time()
+    local function tick()
+        if g ~= BO.gen or not BO.on then return end
+        local f = math.min(1, (mp.get_time() - t0) / 1.2)
+        local a = math.floor(0xFF * (1 - f) + 0.5)   -- FF transparent -> 00 opaque
+        BO.ov.res_x = 1280; BO.ov.res_y = 720
+        BO.ov.data = string.format(
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H%02X&\\p1}m 0 0 l 1280 0 1280 720 0 720{\\p0}", a)
+        BO.ov:update()
+        if f < 1 then
+            mp.add_timeout(0.05, tick)
+        else
+            mp.set_property_bool("pause", true)      -- fully black: stop decoding
+        end
+    end
+    tick()
 end
 function bo_hide()
     if not BO.on then return end
     BO.on = false
+    BO.gen = (BO.gen or 0) + 1                       -- cancel an in-flight fade
     BO.ov:remove()
     if not BO.was_paused then mp.set_property_bool("pause", false) end
 end
@@ -2708,33 +2724,40 @@ local function brief_theme()
 end
 
 local function draw_logo(show)
-    if not show or not logo then logo_ov:remove(); return end
+    -- Runs every logo_tick (0.3s): only push an update when the rendered text
+    -- actually changed (the clock changes once a minute), so libass isn't
+    -- re-rastering a static overlay all day.
+    if not show or not logo then
+        if logo_ov.data and logo_ov.data ~= "" then logo_ov:remove(); logo_ov.data = "" end
+        return
+    end
     local L  = logo
+    local s
     if L.mode == "clock" then
         -- Frameless clock: thinner (SemiBold), bigger, styled exactly like the
         -- rest of the HUD text (soft glow + semi-transparent), no drop shadow.
-        logo_ov.res_x = L.W; logo_ov.res_y = L.H
-        logo_ov.data = string.format(
+        s = string.format(
             "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H40&}%s",
             math.floor(L.W / 2), L.y, L.fs, L.fsp, glow(L.fs), L.text)
-        logo_ov:update()
-        return
+    else
+        local th = brief_theme()
+        local cx = L.x + L.pad + math.floor(L.sun_w / 2)
+        local cy = L.y + math.floor(L.h / 2)
+        local r  = math.floor(L.h * 0.19)
+        local tx = L.x + L.pad + L.sun_w + L.gap
+        local rad = math.floor(L.h * 0.30)
+        local icon = (th.icon == "moon") and moon_path(cx, cy, r) or sun_path(cx, cy, r)
+        s = table.concat({
+            "{\\an7\\pos(0,0)\\bord2\\shad0\\1c" .. th.plaque .. "\\1a&H2A&\\3c" .. th.bord
+                .. "\\3a&H20&\\p1}" .. rrect_path(L.x, L.y, L.w, L.h, rad) .. "{\\p0}",
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c" .. th.sun .. "\\p1}" .. icon .. "{\\p0}",
+            string.format("{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0"
+                .. "\\shad1\\4c&H000000&\\4a&H60&\\1c&HFFFFFF&}%s", tx, cy, L.fs, L.fsp, L.text),
+        }, "\n")
     end
-    local th = brief_theme()
-    local cx = L.x + L.pad + math.floor(L.sun_w / 2)
-    local cy = L.y + math.floor(L.h / 2)
-    local r  = math.floor(L.h * 0.19)
-    local tx = L.x + L.pad + L.sun_w + L.gap
-    local rad = math.floor(L.h * 0.30)
-    local icon = (th.icon == "moon") and moon_path(cx, cy, r) or sun_path(cx, cy, r)
+    if s == logo_ov.data and logo_ov.res_x == L.W and logo_ov.res_y == L.H then return end
     logo_ov.res_x = L.W; logo_ov.res_y = L.H
-    logo_ov.data = table.concat({
-        "{\\an7\\pos(0,0)\\bord2\\shad0\\1c" .. th.plaque .. "\\1a&H2A&\\3c" .. th.bord
-            .. "\\3a&H20&\\p1}" .. rrect_path(L.x, L.y, L.w, L.h, rad) .. "{\\p0}",
-        "{\\an7\\pos(0,0)\\bord0\\shad0\\1c" .. th.sun .. "\\p1}" .. icon .. "{\\p0}",
-        string.format("{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0"
-            .. "\\shad1\\4c&H000000&\\4a&H60&\\1c&HFFFFFF&}%s", tx, cy, L.fs, L.fsp, L.text),
-    }, "\n")
+    logo_ov.data = s
     logo_ov:update()
 end
 
@@ -2964,29 +2987,35 @@ local function logo_tick()
     if speaking or active or (not proc and mp.get_time() - BD.t0 > 3) then BD.preparing = false end
     local idle = not (active or BD.preparing or LB.near or BD.menu_open)
     local hh, mm = GROK_TIME:match("(%d+):(%d+)")
+    -- (Like draw_logo, only re-upload this overlay when its text changes — it is
+    -- recomputed every 0.3s but static for minutes at a time.)
+    local lt
     if BD.preparing and not LB.spoke and (mp.get_time() - BD.t0 <= 185) then
         local fs = math.floor(h * 0.024)
-        logo_text_ov.res_x = w; logo_text_ov.res_y = h
-        logo_text_ov.data = string.format(
+        lt = string.format(
             "{\\an8\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H30&}GETTING READY…",
             math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.95),
             fs, math.floor(fs * 0.05 + 0.5), glow(fs))
-        logo_text_ov:update()
     elseif idle and hh then
         -- Under the idle clock: when the next briefing is scheduled.
         local H, M = tonumber(hh), tonumber(mm)
         local h12  = H % 12; if h12 == 0 then h12 = 12 end
         local when = string.format("%d:%02d %s", h12, M, (H < 12) and "AM" or "PM")
         local fs   = math.floor(h * 0.018)
-        logo_text_ov.res_x = w; logo_text_ov.res_y = h
-        logo_text_ov.data = string.format(
+        lt = string.format(
             "{\\an8\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H50&}"
             .. "BRIEFING SCHEDULED AT: %s",
             math.floor(w / 2), logo.y + logo.h + math.floor(logo.h * 0.12),
             fs, math.floor(fs * 0.05 + 0.5), glow(fs), when)
-        logo_text_ov:update()
-    else
-        logo_text_ov:remove()
+    end
+    if lt then
+        if lt ~= logo_text_ov.data or logo_text_ov.res_x ~= w or logo_text_ov.res_y ~= h then
+            logo_text_ov.res_x = w; logo_text_ov.res_y = h
+            logo_text_ov.data = lt
+            logo_text_ov:update()
+        end
+    elseif logo_text_ov.data and logo_text_ov.data ~= "" then
+        logo_text_ov:remove(); logo_text_ov.data = ""
     end
 end
 mp.add_periodic_timer(0.3, logo_tick)
@@ -3041,3 +3070,60 @@ mp.register_script_message("ss-delete-current", function()
     end
 end)
 
+
+-- ----------------------------------------------------------------------------
+-- Help overlay ('?' or 'h'): a styled cheat-sheet of every control, so the
+-- features are discoverable from the screen itself. Toggles; auto-hides after
+-- 30s. (Globals — the main chunk is at Lua's 200-local cap.)
+-- ----------------------------------------------------------------------------
+HELP = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0 }
+function help_hide()
+    HELP.on = false; HELP.gen = HELP.gen + 1
+    HELP.ov:remove(); HELP.ov.data = ""
+end
+function help_show()
+    local w, h = refresh_display_size()
+    if w <= 0 then return end
+    local fs  = math.floor(h * 0.021)
+    local tfs = math.floor(h * 0.032)
+    local lines = {
+        string.format("{\\fs%d\\fnMontserrat ExtraBold}CONTROLS{\\fs%d\\fnMontserrat SemiBold}", tfs, fs),
+        "",
+        "\\h←\\h\\h→\\h\\h\\hprevious / next photo",
+        "SCROLL\\h\\hbrowse\\h\\h\\h•\\h\\h\\hSPACE\\h\\hplay / pause music",
+        "\\h↑\\h\\h↓\\h\\h\\hzoom the minimap",
+        "PGUP / PGDN\\h\\hmonth\\h\\h\\h•\\h\\h\\hHOME / END\\h\\hyear",
+        "L\\h\\hcycle landmark names",
+        "DEL\\h\\hmove photo to trash",
+        "=\\h/\\h−\\h\\hvolume\\h\\h\\h•\\h\\h\\hESC / Q\\h\\hquit",
+        "",
+        "CLICK\\h\\halbum art: play / pause\\h\\h\\h•\\h\\h\\hsong title: chooser",
+        "CLICK\\h\\hmonth bar: jump there\\h\\h\\h•\\h\\h\\hRIGHT-CLICK\\h\\hquit",
+        "",
+        "{\\fnMontserrat ExtraBold}MORNING BRIEFING{\\fnMontserrat SemiBold}\\h\\h(while playing)",
+        ".\\h\\hskip\\h\\h\\h,\\h\\hback\\h\\h\\hB\\h\\hpause\\h\\h\\hC\\h\\hcaptions\\h\\h\\hX\\h\\hstop",
+    }
+    local lh = math.floor(fs * 1.55)
+    local bh = #lines * lh + math.floor(tfs * 1.2) + lh * 2
+    local bw = math.floor(w * 0.40)
+    local bx = math.floor((w - bw) / 2)
+    local by = math.floor((h - bh) / 2)
+    HELP.ov.res_x = w; HELP.ov.res_y = h
+    HELP.ov.data = table.concat({
+        "{\\an7\\pos(0,0)\\bord2\\shad0\\1c&H101010&\\1a&H28&\\3c&H707070&\\3a&H50&\\p1}"
+            .. rrect_path(bx, by, bw, bh, math.floor(h * 0.018)) .. "{\\p0}",
+        string.format("{\\an5\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\fsp%d\\bord0"
+            .. "\\shad1\\4c&H000000&\\4a&H60&\\1c&HFFFFFF&}%s",
+            math.floor(w / 2), math.floor(h / 2), fs, math.floor(fs * 0.04 + 0.5),
+            table.concat(lines, "\\N")),
+    }, "\n")
+    HELP.ov:update()
+    HELP.on = true
+    HELP.gen = HELP.gen + 1
+    local g = HELP.gen
+    mp.add_timeout(30, function() if HELP.on and g == HELP.gen then help_hide() end end)
+end
+mp.register_script_message("ss-help", function()
+    if bo_wake() then return end
+    if HELP.on then help_hide() else help_show() end
+end)
