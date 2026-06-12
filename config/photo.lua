@@ -2602,6 +2602,19 @@ function briefing_fade()
 end
 
 local function draw_briefing()
+    -- Only ever paint captions while a briefing is genuinely LIVE. Without this,
+    -- a stale /tmp/ss_briefing.txt (left by a crashed briefing, or otherwise) is
+    -- rendered over the slideshow / loading screen forever. go_live writes the
+    -- live marker before any caption text, so this never hides real captions.
+    if not (briefing_active and briefing_active()) then
+        if briefing_shown ~= nil then        -- was showing → tear down once
+            briefing_shown = nil
+            BC.gen = BC.gen + 1
+            briefing_boxes = nil
+            briefing_ov:remove()
+        end
+        return
+    end
     local f = io.open(BRIEF_TXT, "r")
     local txt = f and (f:read("*a") or "") or ""
     if f then f:close() end
