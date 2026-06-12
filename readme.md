@@ -293,6 +293,7 @@ file, so a value set here applies everywhere.
 | `MUSIC_SCROLL_DWELL` | `30` | *Legacy / unused* (see above) |
 | `HUD_MAP_ZOOMS` | `"6 8 10 12 14 16"` | Minimap zoom levels (`↑`/`↓` cycles them) — list as many as you like; during playback the zoom auto-steps inward, giving each level an equal share of the item's play time |
 | `HUD_RING_COLORS` | `"#FFFFFF #4FC3F7"` | GPS ring colour **gradient stops** — the ring blends from the first colour to the last across your zoom levels; two colours (start → destination) are all you need |
+| `HUD_AUTO_ZOOM` | `yes` | Auto-step the minimap inward while each item plays (`yes`/`no`); the current scale (e.g. `Z12`) shows at the top of the map, and `↑`/`↓` always zoom manually |
 
 ### Quiet hours & blackout
 

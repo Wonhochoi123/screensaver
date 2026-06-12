@@ -624,6 +624,7 @@ local function clear_hud_osd()
     pcall(mp.command_native, {"overlay-remove", 2})
     qr_coord_ov:remove()
     map_coord_ov:remove()
+    if ZL then ZL.ov:remove() end
 end
 
 -- While a briefing is on screen, every HUD except the music block is hidden.
@@ -650,10 +651,19 @@ local function apply_qr(bgra_path, L)
     mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
 end
 
+ZL = { ov = mp.create_osd_overlay("ass-events") }   -- zoom-scale label (global: local cap)
 local function apply_minimap(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
+    -- Zoom-scale read-out pinned to the map's top edge, styled like the
+    -- coordinate labels; cleared with the map in clear_hud_osd.
+    local z = ZOOMS[cur.zidx]
+    if z then
+        ZL.ov.res_x = L.win_w; ZL.ov.res_y = L.win_h
+        ZL.ov.data = coord_tags(L.map_cx, L.img_top + L.fs, L.fs) .. "Z" .. z
+        ZL.ov:update()
+    end
 end
 
 local function build_one(lat, lon, z, w, h, color, mdir, cb)
@@ -1397,6 +1407,7 @@ end)
 -- only ever steps inward, and any manual ↑/↓ sets cur.auto=false and stops
 -- it for the rest of the item. Global functions: chunk is at the local cap.
 function auto_zoom_step(target)
+    if (cfgstr("HUD_AUTO_ZOOM") or "yes"):lower() == "no" then return end
     if not cur.auto then return end
     if not (cur.lat and cur.lon and cur.mdir) then return end
     if target > #ZOOMS then target = #ZOOMS end
@@ -3260,6 +3271,8 @@ SET.schema = {
     { key = "HUD_THUMB", label = "Album-art thumbnail", typ = "bool", on = "1", off = "0",
       live = function(v) SHOW_THUMB = (v ~= "0") end,
       desc = "Cover art next to the music bar — click it to play / pause." },
+    { key = "HUD_AUTO_ZOOM", label = "Auto zoom", typ = "bool", on = "yes", off = "no", live = true,
+      desc = "Step the minimap inward while each item plays; ↑/↓ always work." },
     { key = "HUD_MAP_ZOOMS", label = "Minimap zoom levels", typ = "str",
       desc = "Space-separated zoom levels the ↑/↓ keys cycle through — any count." },
     { key = "HUD_RING_COLORS", label = "GPS ring colours", typ = "str",
