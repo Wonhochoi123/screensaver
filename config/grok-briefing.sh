@@ -105,18 +105,68 @@ gen_segment() {
     fi
     [ -z "$raw" ] || [ "$raw" = "null" ] && return 1       # quietly give up on this segment
 
-    # Split the answer into sentences and pull each sentence's OWN inline source
-    # link (the references xAI embeds in the text). The clean spoken/displayed
-    # text never contains a URL — they live only in the per-sentence link map, so
-    # each caption line is independently clickable. The voice reads the whole
-    # cleaned text as one. Python does this so the sentence split matches
-    # photo.lua exactly; if python is unavailable we fall back to plain cleaning.
+    # Split the answer into sentences and attach EACH sentence's OWN reference,
+    # taken from xAI's real citations — the web_search response carries url
+    # citations as annotations with character spans into the text (and/or a
+    # citations list with inline [n] markers). We map every reference to the
+    # sentence it covers, so a page with N sources yields up to N independently
+    # clickable caption lines. The spoken/displayed text never contains a URL;
+    # links live only in the per-sentence map, and the voice reads the whole
+    # cleaned text as one. python parses the response (sentence split matches
+    # photo.lua, which trusts this list); plain cleaning is the fallback.
     local text links_tsv=""
     if command -v python3 >/dev/null 2>&1; then
         local parsed
-        parsed="$(SEG_RAW="$raw" python3 - <<'PY'
+        parsed="$(SEG_RESP="$resp" SEG_SEARCH_FLAG="$search" python3 - <<'PY'
 import os, re, json
-raw = os.environ.get("SEG_RAW", "")
+try:
+    resp = json.loads(os.environ.get("SEG_RESP", "") or "{}")
+except Exception:
+    resp = {}
+search = os.environ.get("SEG_SEARCH_FLAG", "") == "true"
+
+def host_bad(u):
+    return bool(re.search(r'api\.x\.ai|//x\.ai|grok\.com', u or ""))
+
+text, anns_off, citations = "", [], []     # (start,end,url) with offsets; ordered url list
+if search:
+    base = 0
+    for item in (resp.get("output") or []):
+        if item.get("type") != "message":
+            continue
+        for c in (item.get("content") or []):
+            if c.get("type") != "output_text":
+                continue
+            for a in (c.get("annotations") or []):
+                u = a.get("url") or ""
+                if not u:
+                    continue
+                s, e = a.get("start_index"), a.get("end_index")
+                if isinstance(s, int) and isinstance(e, int):
+                    anns_off.append((base + s, base + e, u))
+                else:
+                    citations.append(u)
+            text += (c.get("text") or "")
+            base = len(text)
+    for u in (resp.get("citations") or []):
+        if isinstance(u, str):
+            citations.append(u)
+else:
+    try:
+        text = resp["choices"][0]["message"]["content"] or ""
+    except Exception:
+        text = ""
+
+if not text:
+    print("{}"); raise SystemExit
+
+flat = re.sub(r'[\r\n]', ' ', text)        # 1:1 so annotation offsets stay valid
+spans, i = [], 0
+for m in re.finditer(r'[.!?]+(?:\s+|$)', flat):
+    spans.append((i, m.end())); i = m.end()
+if i < len(flat):
+    spans.append((i, len(flat)))
+
 def clean(s):
     s = re.sub(r'\*\*', '', s)
     s = re.sub(r'(?m)^#+\s*', '', s)
@@ -126,20 +176,32 @@ def clean(s):
     s = re.sub(r'\[\[[0-9,]*\]\]', '', s)
     s = re.sub(r'\[[0-9,]*\]', '', s)
     s = re.sub(r'https?://[^ )]*', '', s)
-    s = re.sub(r'\(\s*\)', '', s)               # empty () left by a removed link
-    s = re.sub(r'\s+([.,;:!?])', r'\1', s)      # tidy a space before punctuation
+    s = re.sub(r'\(\s*\)', '', s)
+    s = re.sub(r'\s+([.,;:!?])', r'\1', s)
     return re.sub(r'\s+', ' ', s).strip()
-t = re.sub(r'[\r\n]+', ' ', raw)
-t = re.sub(r'([.!?])\s+', lambda m: m.group(1) + '\x01', t)   # same boundary rule as photo.lua
+
+def url_for(raw_sent, ss, se):
+    if citations:                          # inline [n] marker -> citations[n-1]
+        m = re.search(r'\[(\d+)\]', raw_sent)
+        if m:
+            k = int(m.group(1)) - 1
+            if 0 <= k < len(citations) and not host_bad(citations[k]):
+                return citations[k]
+    for a_s, a_e, u in anns_off:           # citation span overlapping this sentence
+        if not host_bad(u) and a_s < se and a_e > ss:
+            return u
+    m = re.search(r'https?://[^\s)\]]+', raw_sent)   # inline url in the text
+    if m and not host_bad(m.group(0)):
+        return m.group(0).rstrip('.,);]')
+    return ""
+
 sents, links = [], []
-for part in t.split('\x01'):
-    m = re.search(r'https?://[^\s)\]]+', part)
-    url = m.group(0).rstrip('.,);]') if m else ''
-    if url and re.search(r'api\.x\.ai|//x\.ai|grok\.com', url):
-        url = ''
-    c = clean(part)
+for ss, se in spans:
+    raw_sent = flat[ss:se]
+    u = url_for(raw_sent, ss, se)
+    c = clean(raw_sent)
     if c:
-        sents.append(c); links.append(url)
+        sents.append(c); links.append(u)
 print(json.dumps({"text": " ".join(sents),
                   "sentences": [{"t": s, "u": u} for s, u in zip(sents, links)]}))
 PY
