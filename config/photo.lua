@@ -948,6 +948,13 @@ mp.register_script_message("handle-left-click", function()
     if bo_wake() then return end
     local mouse = mp.get_property_native("mouse-pos")
 
+    -- Reading pane open: a click on the article side stays put (it's for
+    -- reading); a click on the left half closes it and stops there.
+    if RD and RD.on and mouse then
+        if mouse.x < (RD.x0 or 0) then rd_close() end
+        return
+    end
+
     -- Morning-briefing badge (center-top). While speaking it shows a transport row
     -- (prev / pause / next / stop). Otherwise the Replay/Refresh chooser appears on
     -- hover (or when pinned by a click) — clicking a button runs it.
@@ -965,8 +972,14 @@ mp.register_script_message("handle-left-click", function()
                     if mouse.x >= b.x0 and mouse.x <= b.x1
                        and mouse.y >= b.y0 and mouse.y <= b.y1 then
                         if b.url:match("^https?://") then
-                            mp.command_native_async({ name = "subprocess",
-                                args = { "xdg-open", b.url } }, function() end)
+                            -- Default: read it right here in the split-screen
+                            -- pane; GROK_LINK_BROWSER=yes opens the browser.
+                            if (cfgstr("GROK_LINK_BROWSER") or "no"):lower() == "yes" then
+                                mp.command_native_async({ name = "subprocess",
+                                    args = { "xdg-open", b.url } }, function() end)
+                            elseif rd_open then
+                                rd_open(b.url)
+                            end
                         end
                         return
                     end
@@ -1780,6 +1793,10 @@ end
 -- between photos during a briefing, so it never reaches a video).
 mp.register_script_message("ss-wheel", function(dir)
     if bo_wake() then return end
+    if RD and RD.on then
+        rd_scroll(dir == "up" and -1 or 1)
+        return
+    end
     if MQ.chooser then
         MQ.scroll = MQ.scroll + (dir == "up" and -2 or 2)
         draw_chooser()
@@ -2290,6 +2307,7 @@ mp.register_script_message("month-prev", function() if bo_wake() then return end
 -- else still quits the screensaver.
 mp.register_script_message("handle-right-click", function()
     if bo_wake() then return end
+    if RD and RD.on then rd_close(); return end   -- close the reading pane, don't quit
     local mouse = mp.get_property_native("mouse-pos")
     if mouse and gp_section_at and not (briefing_active and briefing_active()) then
         local hv = gp_section_at(mouse.x, mouse.y)
@@ -3533,6 +3551,8 @@ SET.schema = {
       desc = "Soft-drop of the briefing music when it ends." },
     { key = "GROK_FADE_RESUME", label = "Music resume fade", typ = "num", min = 0, max = 10, step = 0.1, dec = 1, unit = "s",
       desc = "Soft return of the slideshow music afterwards." },
+    { key = "GROK_LINK_BROWSER", label = "Links open in browser", typ = "bool", on = "yes", off = "no", def = "no", live = true,
+      desc = "OFF reads sources in a split-screen pane; ON launches your browser." },
 
     { head = "PLACE NAMES" },
     { key = "GEONAMES_COUNTRIES", label = "Countries indexed", typ = "str",
@@ -3863,3 +3883,162 @@ mp.register_script_message("ss-settings", function()
     if bo_wake() then return end
     if SET.on then set_hide() else set_show() end
 end)
+
+
+-- ----------------------------------------------------------------------------
+-- Reading pane: clicking a briefing caption opens its source IN the screensaver
+-- — the right half of the screen becomes a scrollable article view (fetched and
+-- distilled to plain text by config/fetch-article.sh) instead of launching a
+-- browser. Wheel / ↑↓ scroll, ESC / right-click / click-outside closes. Set
+-- GROK_LINK_BROWSER=yes in the conf to use the browser instead.
+-- (Globals — the main chunk is at Lua's 200-local cap.)
+-- ----------------------------------------------------------------------------
+RD = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0,
+       paras = nil, scroll = 0, url = "", x0 = 0 }
+RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
+
+function rd_close()
+    RD.on = false
+    RD.gen = RD.gen + 1
+    RD.paras = nil
+    RD.ov:remove(); RD.ov.data = ""
+    for _, n in ipairs({ "ss-rd-esc", "ss-rd-up", "ss-rd-down" }) do
+        mp.remove_key_binding(n)
+    end
+end
+
+function rd_draw()
+    if not RD.on then return end
+    local w, h = refresh_display_size()
+    if w <= 0 then return end
+    local fs   = math.floor(h * 0.0195)
+    local tfs  = math.floor(h * 0.024)
+    local lh   = math.floor(fs * 1.52)
+    local pad  = math.floor(h * 0.035)
+    local x0   = math.floor(w * 0.5)
+    RD.x0 = x0
+    local xtext = x0 + pad
+    local inner = w - x0 - pad * 2 - math.floor(fs * 1.2)   -- minus scrollbar gutter
+    local maxc  = math.max(16, math.floor(inner / (fs * 0.50)))
+
+    -- Wrap paragraphs at the current size (cheap; redone per draw so resizes work).
+    local lines = {}
+    for _, p in ipairs(RD.paras or {}) do
+        local mark = #lines + 1
+        wrap_words(p.text, p.head and math.floor(maxc * 0.8) or maxc, lines)
+        for k = mark, #lines do lines[k].head = p.head end
+        if lines[mark] then lines[mark].gap = true end
+    end
+
+    local top_y  = pad + math.floor(tfs * 0.4)
+    local foot_h = math.floor(fs * 2.2)
+    local gapH   = math.floor(lh * 0.45)
+    local availH = h - top_y - foot_h - pad
+    -- Visible window: walk lines, summing real heights (head lines are taller).
+    local heights = {}
+    for i, L in ipairs(lines) do
+        heights[i] = (L.head and math.floor(tfs * 1.5) or lh) + (L.gap and i > 1 and gapH or 0)
+    end
+    local maxscroll = #lines
+    do  -- last fully-visible window start
+        local sum, i = 0, #lines
+        while i >= 1 and sum + heights[i] <= availH do sum = sum + heights[i]; i = i - 1 end
+        maxscroll = i
+    end
+    if RD.scroll < 0 then RD.scroll = 0 end
+    if RD.scroll > maxscroll then RD.scroll = maxscroll end
+
+    local ev = {}
+    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H0A0A0A&\\1a&H10&\\p1}"
+        .. string.format("m %d 0 l %d 0 %d %d %d %d", x0, w, w, h, x0, h) .. "{\\p0}"
+    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H707070&\\1a&H60&\\p1}"
+        .. string.format("m %d 0 l %d 0 %d %d %d %d", x0, x0 + 2, x0 + 2, h, x0, h) .. "{\\p0}"
+
+    local y, shown = top_y, 0
+    for i = RD.scroll + 1, #lines do
+        local L = lines[i]
+        local rh = L.head and math.floor(tfs * 1.5) or lh
+        if L.gap and i > RD.scroll + 1 then y = y + gapH end
+        if y + rh > top_y + availH then break end
+        ev[#ev + 1] = string.format(
+            "{\\an4\\pos(%d,%d)\\fnMontserrat %s\\fs%d\\bord0\\shad0\\1c&H%s&}%s",
+            xtext, y + math.floor(rh / 2),
+            L.head and "ExtraBold" or "SemiBold",
+            L.head and tfs or fs,
+            L.head and "F7C34F" or "E8E8E8", L.text)
+        y = y + rh
+        shown = shown + 1
+    end
+
+    -- Scrollbar (right edge) when there's more than one screenful.
+    if maxscroll > 0 and #lines > 0 then
+        local sbw = math.max(2, math.floor(fs * 0.18))
+        local sbx = w - pad + math.floor(fs * 0.3)
+        local th  = availH
+        local thumb_h = math.max(math.floor(lh * 1.2), math.floor(th * shown / #lines))
+        local thumb_y = top_y + math.floor((th - thumb_h) * RD.scroll / maxscroll)
+        ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&HD8&\\p1}"
+            .. rrect_path(sbx, top_y, sbw, th, math.floor(sbw / 2)) .. "{\\p0}"
+        ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\alpha&H50&\\p1}"
+            .. rrect_path(sbx, thumb_y, sbw, thumb_h, math.floor(sbw / 2)) .. "{\\p0}"
+    end
+
+    ev[#ev + 1] = string.format(
+        "{\\an2\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad0\\1c&H808080&}"
+        .. "SCROLL ↑↓\\h\\h\\h•\\h\\h\\hESC close",
+        x0 + math.floor((w - x0) / 2), h - math.floor(pad * 0.5), math.floor(fs * 0.8))
+
+    RD.ov.res_x = w; RD.ov.res_y = h
+    RD.ov.data = table.concat(ev, "\n")
+    RD.ov:update()
+end
+
+function rd_scroll(d)
+    if not RD.on then return end
+    RD.scroll = RD.scroll + d * 3
+    rd_draw()
+end
+
+function rd_set_text(txt)
+    -- "# " marks headings (page/section titles); blank lines split paragraphs.
+    local paras = {}
+    for block in (txt .. "\n\n"):gmatch("(.-)\n\n+") do
+        block = block:gsub("[\r\n]+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        if block ~= "" then
+            local headtext = block:match("^#%s*(.+)$")
+            paras[#paras + 1] = { text = headtext or block, head = headtext ~= nil }
+        end
+    end
+    if #paras == 0 then paras = { { text = "Nothing readable came back.", head = false } } end
+    RD.paras = paras
+    RD.scroll = 0
+    rd_draw()
+end
+
+function rd_open(url)
+    if RD.on then rd_close() end
+    RD.url = url
+    RD.on = true
+    RD.gen = RD.gen + 1
+    local gen = RD.gen
+    RD.paras = { { text = "FETCHING…", head = true },
+                 { text = url, head = false } }
+    RD.scroll = 0
+    mp.add_forced_key_binding("ESC",  "ss-rd-esc",  function() rd_close() end)
+    mp.add_forced_key_binding("UP",   "ss-rd-up",   function() rd_scroll(-1) end, { repeatable = true })
+    mp.add_forced_key_binding("DOWN", "ss-rd-down", function() rd_scroll(1) end,  { repeatable = true })
+    rd_draw()
+    local out = "/tmp/ss_article.txt"
+    os.remove(out)
+    mp.command_native_async({
+        name = "subprocess", playback_only = false,
+        args = { CFG_DIR .. "/fetch-article.sh", url, out },
+    }, function()
+        if not RD.on or gen ~= RD.gen then return end
+        local f = io.open(out, "r")
+        local txt = f and (f:read("*a") or "") or ""
+        if f then f:close() end
+        if txt == "" then txt = "Could not load the page.\n\n" .. url end
+        rd_set_text(txt)
+    end)
+end

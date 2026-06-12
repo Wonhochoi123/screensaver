@@ -144,12 +144,14 @@ Notes:
 | `c` | Hide / show captions |
 | `x` | Stop the briefing |
 
-**Click a caption item** to open **its own source** in your browser — every
-topic (each headline, each ticker, each pick) is its own block carrying the
-reference it was built from, so different blocks open different articles. The
-links are never shown on screen or read aloud (the voice reads the whole
-segment as one); clicking just opens them. An item with no source isn't
-clickable.
+**Click a caption item** to read **its own source** — every topic (each
+headline, each ticker, each pick) is its own block carrying the reference it
+was built from. Clicking splits the screen: the **right half becomes a
+scrollable reading pane** with the article's text (wheel or `↑`/`↓` to scroll;
+`Esc`, right-click, or a click on the left half closes it). The briefing keeps
+playing underneath. Links are never shown on screen or read aloud, and an item
+with no source isn't clickable. Prefer your browser instead? Set
+`GROK_LINK_BROWSER=yes` (also in the settings menu).
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
 for a **Replay / Refresh** chooser (or **Generate** if none is cached yet) to run
