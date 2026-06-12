@@ -58,13 +58,27 @@ POLICE_PID=$!
 "$APP_DIR/vid-daemon.sh" >/dev/null 2>&1 &
 VID_PID=$!
 
-# Slideshow music plays from Music/ScreenSaver (Music/GrokMorning is the
-# briefing's own bgm); fall back to the whole Music folder if that's empty.
+# Slideshow music plays from Music/ScreenSaver. If that's empty, fall back to
+# LOOSE audio files directly in Music/ only (legacy layout) — never recurse
+# into subfolders, because Music/GrokMorning is the briefing's own bgm and must
+# not leak into the slideshow (it did, when deleting every track left
+# ScreenSaver/ empty and the old fallback played the whole Music tree).
 SS_MUSIC="$MUSIC_DIR/ScreenSaver"
-[ -n "$(ls -A "$SS_MUSIC" 2>/dev/null)" ] || SS_MUSIC="$MUSIC_DIR"
-if [ -d "$SS_MUSIC" ] && [ -n "$(ls -A "$SS_MUSIC" 2>/dev/null)" ]; then
+if [ -n "$(ls -A "$SS_MUSIC" 2>/dev/null)" ]; then
     mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" "$SS_MUSIC" >/dev/null 2>&1 &
     MUSIC_PID=$!
+else
+    MUSIC_M3U="$PLAYLIST_DIR/music_fallback.m3u"
+    find "$MUSIC_DIR" -maxdepth 1 -type f \( -iname '*.mp3' -o -iname '*.flac' \
+        -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.opus' -o -iname '*.wav' \
+        -o -iname '*.aac' \) > "$MUSIC_M3U" 2>/dev/null
+    if [ -s "$MUSIC_M3U" ]; then
+        mpv --no-video --loop-playlist=inf --shuffle --input-ipc-server="$AUDIO_SOCK" \
+            --playlist="$MUSIC_M3U" >/dev/null 2>&1 &
+        MUSIC_PID=$!
+    else
+        rm -f "$MUSIC_M3U"
+    fi
 fi
 
 # Morning briefing scheduler (exits immediately + silently unless enabled with
