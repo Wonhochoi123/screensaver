@@ -155,8 +155,10 @@ one on demand.
 - **Top-right:** the photo's **date** and **region** (state / country).
 - **Bottom-center:** the **city** headline, with the optional **landmark** line
   above it (cycle with `l`).
-- **Lower-left/area:** **minimap** + **QR code** of the location and the **GPS
-  coordinates** (zoom with `↑`/`↓`).
+- **Bottom corners:** the **QR code** (left) and **minimap** (right), each a
+  little stack — the square, a label line under it (the QR's scan invitation /
+  the map's `ZOOM: 1:x` scale), and the **GPS coordinates** at the bottom
+  (zoom with `↑`/`↓`).
 - **Very bottom:** a hair-thin **now-playing progress** strip and a **month bar**
   showing your position across the whole timeline.
 

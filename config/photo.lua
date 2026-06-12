@@ -563,11 +563,14 @@ local function hud_geom()
     local pad = math.floor(win_h * 0.02)
     local fs  = math.floor(win_h * HUD_COORD_FS + 0.5)
     local gap = math.floor(win_h * 0.006)
-    local text_cy = win_h - pad - math.floor(fs * 0.7)
-    local img_top = (text_cy - math.floor(fs * 0.7) - gap) - S
+    -- Each column stacks top-down: square first, label line under it
+    -- ("SCAN TO…" / "ZOOM: 1:x"), coordinates at the very bottom.
+    local text_cy  = win_h - pad - math.floor(fs * 0.7)
+    local label_cy = text_cy - math.floor(fs * 1.5)
+    local img_top  = (label_cy - math.floor(fs * 0.7) - gap) - S
     return {
         win_w = win_w, win_h = win_h, S = S, pad = pad, fs = fs,
-        img_top = img_top, text_cy = text_cy,
+        img_top = img_top, label_cy = label_cy, text_cy = text_cy,
         qr_x  = pad,             qr_cx  = pad + math.floor(S / 2),
         map_x = win_w - S - pad, map_cx = win_w - pad - math.floor(S / 2),
     }
@@ -649,14 +652,15 @@ local function apply_qr(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
-    -- Invitation floated above the QR square (bitmaps cover ASS, so it can't
-    -- sit on the square itself). The QR opens the spot in Google Maps; the
-    -- wording is a conf knob, empty hides it. Cleared in clear_hud_osd.
+    -- Invitation on the label line between the QR square and its coordinates
+    -- (bitmaps cover ASS, so it can't sit on the square itself). The QR opens
+    -- the spot in Google Maps; the wording is a conf knob, empty hides it.
+    -- Cleared in clear_hud_osd.
     local t = cfgstr("HUD_QR_TEXT")
     if t == nil then t = "SCAN TO VISIT THIS SPOT" end
     if t ~= "" then
         ZL.qr.res_x = L.win_w; ZL.qr.res_y = L.win_h
-        ZL.qr.data = coord_tags(L.qr_cx, L.img_top - math.floor(L.fs * 0.7), L.fs) .. t
+        ZL.qr.data = coord_tags(L.qr_cx, L.label_cy, L.fs) .. t
         ZL.qr:update()
     elseif ZL.qr.data and ZL.qr.data ~= "" then
         ZL.qr:remove(); ZL.qr.data = ""
@@ -678,14 +682,14 @@ local function apply_minimap(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
     mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
-    -- Zoom-scale read-out floated just ABOVE the map square: overlay-add
-    -- bitmaps render on top of all ASS text, so a label inside the square
-    -- would be buried under the map. Styled like the coordinate labels;
+    -- Zoom-scale read-out on the label line between the map square and its
+    -- coordinates (overlay-add bitmaps render on top of all ASS text, so it
+    -- can't sit on the square itself). Styled like the coordinate labels;
     -- cleared with the map in clear_hud_osd.
     local z = ZOOMS[cur.zidx]
     if z then
         ZL.ov.res_x = L.win_w; ZL.ov.res_y = L.win_h
-        ZL.ov.data = coord_tags(L.map_cx, L.img_top - math.floor(L.fs * 0.7), L.fs)
+        ZL.ov.data = coord_tags(L.map_cx, L.label_cy, L.fs)
             .. ("ZOOM: " .. (ZL.scale[z] or ("z" .. z)))
         ZL.ov:update()
     end
