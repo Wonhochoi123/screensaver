@@ -3967,14 +3967,15 @@ RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
 -- plays. No voice pausing and no key bindings — it's part of the briefing.
 function briefing_article_show(url)
     if wx_hide then wx_hide() end          -- leaving the weather item → drop its card
-    RD.auto = true
-    RD.on = true
-    if url == "" then          -- filtered-out / sourceless item (weather, etc.)
-        RD.url = ""
-        RD.gen = RD.gen + 1
-        rd_set_text("# No source\n\nThere is no readable source for this item.")
+    if url == "" then          -- no source (markets, a filtered link) → clean empty pane
+        if RD.on then
+            RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
+            RD.url = ""; RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
+        end
         return
     end
+    RD.auto = true
+    RD.on = true
     if url == RD.url then return end          -- already showing/fetching this line
     RD.url = url
     RD.gen = RD.gen + 1

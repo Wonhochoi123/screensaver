@@ -1,20 +1,23 @@
 #!/bin/bash
 # =============================================================================
-#  grok-briefing.sh — scheduled spoken "morning briefing" (xAI Grok), integrated
-#  with the screensaver.
+#  grok-briefing.sh — scheduled spoken "morning briefing", integrated with the
+#  screensaver.
 #
-#  CONTENT MODEL (one giant call, line/detail pairs):
-#    The whole briefing is fetched in ONE web-search call and returned as a list
-#    of ITEMS, each a PAIR:
-#       * a ONE-LINER  — a single spoken headline sentence (read aloud)
-#       * a DETAIL     — a few sentences expanding on it (shown beside the line)
-#    Each one-liner gets its OWN TTS clip, so playback reads them one-by-one and
-#    always knows which line it is on. The paired detail is published next to it
-#    so photo.lua can show it automatically — no citations, no link-fetching.
+#  CONTENT MODEL (feeds, not AI — xAI is used ONLY to read the lines aloud):
+#    config/news-build.py assembles the whole briefing as a list of {cat,line,url}
+#    ITEMS with NO web-search / language-model call:
+#       * WEATHER       — a spoken line built from the Open-Meteo weather card
+#       * TOP NEWS      — top headlines from curated, balanced RSS feeds
+#       * TECH & FINANCE— top headlines from curated tech RSS feeds
+#       * MARKETS       — live prices for GROK_TICKERS (Yahoo Finance, best-effort)
+#       * CLOSING       — a templated warm sign-off
+#    The feeds ARE the editorial judgment, so links are real, balanced, and always
+#    open. Each one-liner still gets its OWN xAI TTS clip, so playback reads them
+#    one-by-one and knows which line it is on; photo.lua fetches each item's real
+#    source article (or, for WEATHER, draws a live weather card) on the right.
 #
 #  * Subtitles show through the slideshow's own OSD: the script writes the
-#    current one-liner to /tmp/ss_briefing.txt and its detail to
-#    /tmp/ss_briefing.detail; photo.lua renders them.
+#    current one-liner to /tmp/ss_briefing.txt; photo.lua renders it.
 #  * Background music comes from Music/GrokMorning while the briefing plays; the
 #    slideshow's own music (Music/ScreenSaver) is paused, then resumed after.
 #  * Controls come from photo.lua via signals: SIGUSR1 = skip, SIGUSR2 = prev.
@@ -77,44 +80,15 @@ gate_ok() {
 
 have_net() { curl -s --max-time 8 -o /dev/null "$API/models" -H "Authorization: Bearer $API_KEY"; }
 
-# --- the one giant prompt: whole briefing as line/detail pairs ----------------
+# --- per-day cache key --------------------------------------------------------
+# The content now comes from RSS feeds + weather + live prices (no AI call), so
+# the cache key is just the day plus the inputs that change what's gathered.
+# Bump the leading version tag to force every machine to regenerate.
 TODAY_HUMAN="$(date '+%A, %B %d, %Y')"
-BRIEFING_PROMPT=""; BRIEFING_HASH=""
-build_prompt() {
-    local loc="${LOCATION:-your area}" tick=""
-    [ -n "$TICKERS" ] && tick=$'\n- MARKETS: one item for EACH of these tickers — '"$TICKERS"$' — the one-liner naming it with its current price and percent move; give a SOURCE that is a readable finance article or quote page.'
-    BRIEFING_PROMPT="You are preparing a spoken morning briefing for $TODAY_HUMAN, for someone in $loc. Search the web for current, real information as of today.
-
-Produce the briefing as a sequence of ITEMS. Each item has THREE parts:
-  1) CATEGORY: one of these exact labels — WEATHER, TOP NEWS, TECH & FINANCE, MARKETS, WATCHLIST, CLOSING.
-  2) ONE-LINER: a single spoken headline sentence in plain conversational English. Read aloud, so use NO markdown, NO URLs, NO bracketed citations, NO bullet markers, NO asterisks, NO emojis. Report news factually and neutrally: state plainly what happened, with no partisan framing, no loaded or emotive adjectives, no editorializing, and no opinion. If a story is politically contested, summarize it even-handedly.
-  3) SOURCE: the full URL of the SINGLE web page you used for this item. It MUST be an ordinary news article page that opens and reads normally in a web browser. Hard rules for the URL: do NOT use youtube.com, youtu.be, or any video page; do NOT use reuters.com; avoid paywalled sites (Wall Street Journal, Bloomberg, Financial Times, New York Times, The Economist). For NEWS, the source MUST be politically BALANCED and centrist — pick straight-news wire-service or centrist reporting and avoid outlets with a strong partisan slant in EITHER direction. Do NOT use left-leaning outlets (The Guardian, NPR, MSNBC, Vox, HuffPost, Slate, The Nation, Mother Jones, Daily Kos, The Daily Beast) and do NOT use right-leaning outlets (Fox News, Breitbart, The Daily Wire, Newsmax, OAN, The Federalist, The Blaze, Daily Caller). PREFER neutral, centrist sources: AP News, BBC News, CNBC, Axios, The Hill, Christian Science Monitor, RealClearPolitics, and official company or government pages. For TECH items prefer The Verge, TechCrunch, Ars Technica, or Engadget; for sports, ESPN. For WEATHER and CLOSING items, leave the SOURCE line blank.
-
-Output EXACTLY in this format and nothing else — no preamble, no extra headings, no commentary:
-@@ITEM@@
-@@CAT@@
-<category label>
-@@LINE@@
-<one-liner sentence here>
-@@SRC@@
-<source article URL, or blank>
-@@ITEM@@
-@@CAT@@
-<category label>
-@@LINE@@
-<one-liner sentence here>
-@@SRC@@
-<source article URL, or blank>
-
-Cover these, in this exact order:
-- WEATHER: today's weather for $loc (1 item; blank SOURCE).
-- TOP NEWS: the three most important world or national stories right now (3 items).
-- TECH & FINANCE: three technology stories and two financial-market stories (5 items).$tick
-- WATCHLIST: two stocks or investments worth watching today, the one-liner naming it and why it is interesting today (2 items).
-- CLOSING: one warm, brief sign-off wishing the listener a good day (1 item; blank SOURCE).
-
-Never put URLs in the one-liners, and never put source names in brackets, citation numbers, asterisks, or emojis anywhere in the spoken text."
-    BRIEFING_HASH="$(printf '%s' "$BRIEFING_PROMPT" | md5sum | cut -d' ' -f1)"
+BRIEFING_HASH=""
+build_meta() {
+    BRIEFING_HASH="$(printf '%s' "feeds-v1|$(date +%F)|${LOCATION:-}|${TICKERS:-}|${GROK_NEWS_FEEDS:-}|${GROK_TECH_FEEDS:-}" \
+        | md5sum | cut -d' ' -f1)"
 }
 
 # --- TTS one one-liner into its own mp3 (atomic; rejects JSON error bodies) ---
@@ -131,112 +105,34 @@ tts_line() {
     rm -f "$tmp"; return 1
 }
 
-# --- generate the whole briefing: one call, parse pairs, TTS each one-liner ---
-# Cached by prompt hash for the day. Pass 1 writes ALL item_NNN.line/.detail and
-# item.count up front (so playback knows the full list as soon as anything lands);
-# pass 2 TTS each one-liner into item_NNN.mp3 in order, a few at a time.
+# --- generate the whole briefing: build items from feeds, TTS each one-liner ---
+# Cached per day. Pass 1 writes ALL item_NNN.cat/.line/.url and item.count up
+# front (so playback knows the full list as soon as anything lands); pass 2 TTS
+# each one-liner into item_NNN.mp3 in order, a few at a time.
 gen_briefing() {
-    build_prompt
+    build_meta
     local done_marker="$TODAY_CACHE/briefing_${BRIEFING_HASH}.done"
     [ -s "$done_marker" ] && return 0
 
-    local resp
-    resp="$(curl -s --max-time 120 "$API/responses" -H "Authorization: Bearer $API_KEY" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n --arg m "$MODEL" --arg p "$BRIEFING_PROMPT" \
-            '{model:$m, input:[{role:"user",content:$p}], tools:[{type:"web_search"}]}')")"
-    # Keep the raw response beside the cache for diagnosis.
-    printf '%s' "$resp" > "$TODAY_CACHE/briefing.resp" 2>/dev/null
+    # Weather card data (drives the spoken weather line AND primes the 20-min
+    # cache that photo.lua's right-pane card reuses).
+    local wxf="$TODAY_CACHE/weather.card"
+    bash "$CFG_DIR/weather-card.sh" "$wxf" 2>/dev/null
 
-    # Parse the response text into a JSON array of {cat, line, detail}. The model
-    # is asked for a strict @@ITEM@@/@@CAT@@/@@LINE@@/@@DETAIL@@ format, which is
-    # trivially separable; we still clean each part of stray markdown/URLs.
+    # Build the WHOLE briefing from curated balanced RSS feeds + live ticker
+    # prices — no AI call. Same {cat,line,url} JSON the old parser produced, so
+    # everything below (TTS, manifest, playback, photo.lua) is unchanged.
     local items
-    items="$(BRIEF_RESP="$resp" python3 - <<'PY'
-import os, re, json
-try:
-    resp = json.loads(os.environ.get("BRIEF_RESP", "") or "{}")
-except Exception:
-    resp = {}
-text = ""
-for it in (resp.get("output") or []):
-    if it.get("type") != "message":
-        continue
-    for c in (it.get("content") or []):
-        if c.get("type") == "output_text":
-            text += (c.get("text") or "")
-if not text:
-    # plain chat-completions shape, just in case
-    try:
-        text = resp["choices"][0]["message"]["content"] or ""
-    except Exception:
-        text = ""
-if not text:
-    print("[]"); raise SystemExit
+    items="$(WX_FILE="$wxf" LOCATION="${LOCATION:-}" TICKERS="${TICKERS:-}" \
+             DAY_NAME="$(date '+%A')" \
+             NEWS_FEEDS="${GROK_NEWS_FEEDS:-}" TECH_FEEDS="${GROK_TECH_FEEDS:-}" \
+             python3 "$CFG_DIR/news-build.py" 2>/dev/null)"
+    printf '%s' "$items" > "$TODAY_CACHE/briefing.resp" 2>/dev/null   # keep for diagnosis
 
-def clean(s):
-    s = re.sub(r'\*\*|__', '', s)
-    s = re.sub(r'(?m)^\s*#+\s*', '', s)
-    s = re.sub(r'(?m)^\s*(?:[-*•]|\d+[.)])\s+', '', s)   # leading bullet/number
-    s = re.sub(r'\[[0-9,\s]*\]', '', s)                        # [1] style citations
-    s = re.sub(r'\((?:https?://)[^)]*\)', '', s)               # (http...) parenthetical
-    s = re.sub(r'https?://\S+', '', s)                         # bare URLs
-    s = re.sub(r'[ \t]+', ' ', s)
-    s = re.sub(r' +([.,;:!?])', r'\1', s)                      # space before punctuation
-    s = re.sub(r'\(\s*\)', '', s)                              # emptied parentheses
-    return s.strip()
-
-VALID = {"WEATHER", "TOP NEWS", "TECH & FINANCE", "MARKETS", "WATCHLIST", "CLOSING"}
-# Hosts we never fetch a source article from: unscrapable/video (youtube,
-# reuters) plus partisan outlets on BOTH sides, so even if the model ignores the
-# "balanced sources" instruction the right pane never shows a slanted article
-# (the spoken one-liner still plays; that item just has no source on the right).
-BAD_HOST = re.compile(
-    r'youtube\.com|youtu\.be|reuters\.com'
-    # left-leaning
-    r'|theguardian\.com|guardian\.co\.uk|npr\.org|msnbc\.com|vox\.com'
-    r'|huffpost\.com|huffingtonpost\.com|slate\.com|thenation\.com'
-    r'|motherjones\.com|dailykos\.com|thedailybeast\.com'
-    # right-leaning
-    r'|foxnews\.com|foxbusiness\.com|breitbart\.com|dailywire\.com'
-    r'|newsmax\.com|oann\.com|oneamerica|thefederalist\.com'
-    r'|theblaze\.com|dailycaller\.com',
-    re.I)
-def grab(ch, a, b):
-    # text after marker a, up to marker b (or end)
-    pat = r'@@\s*' + a + r'\s*@@(.*?)(?=@@\s*' + (b or 'ZZZ') + r'\s*@@|$)'
-    m = re.search(pat, ch, re.S)
-    return m.group(1) if m else ""
-
-def pick_url(s):
-    m = re.search(r'https?://\S+', s or "")
-    if not m:
-        return ""
-    u = m.group(0).rstrip('.,);]\'"')
-    return "" if BAD_HOST.search(u) else u
-
-items = []
-last_cat = "BRIEFING"
-# Drop anything before the first marker (preamble), then split into items.
-for ch in re.split(r'@@\s*ITEM\s*@@', text)[1:]:
-    cat = re.sub(r'\s+', ' ', clean(grab(ch, 'CAT', 'LINE'))).strip().upper()
-    line = re.sub(r'\s*\n\s*', ' ', clean(grab(ch, 'LINE', 'SRC'))).strip()
-    url = pick_url(grab(ch, 'SRC', None))      # raw (do NOT clean — clean strips URLs)
-    if not line:
-        continue
-    # Snap odd category spellings to the nearest valid label; keep the last seen
-    # one if the model omitted it (so an item still groups with its neighbours).
-    if cat not in VALID:
-        cat = next((v for v in VALID if cat and (v in cat or cat in v)), last_cat)
-    last_cat = cat
-    items.append({"cat": cat, "line": line, "url": url})
-print(json.dumps(items))
-PY
-)"
     local n; n="$(printf '%s' "$items" | jq 'length' 2>/dev/null)"
     [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 1
 
-    # Pass 1: write every line/detail/category and a manifest (category<TAB>line
+    # Pass 1: write every line/url/category and a manifest (category<TAB>line
     # per item, in order), so playback — and photo.lua's grouped left column —
     # see the full list the instant the first clip is ready.
     rm -f "$TODAY_CACHE"/item_*.line "$TODAY_CACHE"/item_*.url \
@@ -390,7 +286,7 @@ play_welcome() {
 play() {
     # single instance — don't start if a briefing is already playing
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null && return 0
-    build_prompt
+    build_meta
     have_net || return 1
 
     echo $$ > "$PID_FILE"
@@ -496,15 +392,15 @@ check() {
     if [ -z "$API_KEY" ]; then echo "── stop: no key, can't test the API ──"; return; fi
     printf "  net:   reaching api.x.ai ... "
     if have_net; then echo "ok"; else echo "FAIL (no network, or key rejected)"; echo "──"; return; fi
-    printf "  gen:   generating today's briefing ... "
+    printf "  gen:   building today's briefing from feeds ... "
     if gen_briefing; then
         local cnt; cnt="$(cat "$TODAY_CACHE/item.count" 2>/dev/null)"
-        echo "ok — ${cnt:-?} line/detail items, audio cached"
+        echo "ok — ${cnt:-?} items (weather + news feeds + markets), audio cached"
         echo "  => the briefing pipeline works. If it still doesn't fire on its"
         echo "     own, the scheduler isn't being started (reinstall to refresh"
         echo "     launch.sh), or the screensaver wasn't restarted."
     else
-        echo "FAIL — the API returned no usable items for today's briefing"
+        echo "FAIL — couldn't build any items (check network / feeds / TTS key)"
     fi
     echo "────────────────────────────────────────────────────────"
 }
