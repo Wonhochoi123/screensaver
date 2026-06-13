@@ -399,7 +399,7 @@ file, so a value set here applies everywhere.
 | `GROK_BRIEFING` | `1` | Enable (1) / disable (0) |
 | `GROK_TIME` | `"05:39"` | When it plays (24h `HH:MM`) |
 | `GROK_LOCATION` | `"Mooresville, NC"` | Location for the weather segment |
-| `GROK_TICKERS` | `"TSLA, AMD, PLTR, BTC"` | Stocks/crypto segment (empty skips it). Stock tickers + crypto by name (BTC, ETH, SOL, DOGE, XRP). SpaceX is private — use the `DXYZ` proxy. |
+| `GROK_TICKERS` | `"TSLA, AMD, PLTR, BTC, SPCX"` | Stocks/crypto segment (empty skips it). Stock tickers, crypto by name (BTC, ETH, SOL…), and private-market names CNBC carries (e.g. `SPCX` = SpaceX). |
 | `GROK_MODEL` | `"grok-4.3"` | xAI model |
 | `GROK_VOICE` | `"ara"` | Voice |
 | `GROK_BGM_VOLUME` | `60` | Briefing music volume (0–100) |

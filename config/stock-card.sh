@@ -166,7 +166,7 @@ if prev is not None:
     out.append(f"PREV\t{prev:.2f}")
 if dlo is not None and dhi is not None:
     out.append(f"DAY\t{dlo:.2f}\t{dhi:.2f}")
-if wlo is not None and whi is not None:
+if wlo is not None and whi is not None and wlo > 0:   # 0.0 = missing (private names)
     out.append(f"W52\t{wlo:.2f}\t{whi:.2f}")
 hv = vol_alt if vol_alt else human(num(vol_raw))
 if hv:
