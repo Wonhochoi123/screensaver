@@ -2738,17 +2738,18 @@ local function draw_briefing()
     end
 
     local w, h = refresh_display_size()
-    -- grok-briefing.sh publishes three things: the current one-liner's paired
-    -- detail (/tmp/ss_briefing.detail), the full item list as "category<TAB>line"
+    -- grok-briefing.sh publishes: the current one-liner's source URL
+    -- (/tmp/ss_briefing.url), the full item list as "category<TAB>line"
     -- (/tmp/ss_briefing.manifest), and the 1-based index of the line being read
     -- now (/tmp/ss_briefing.idx). Together they drive a GROUPED left column: all
     -- of the current category's one-liners stacked, the active line highlighted
-    -- in blue, its detail auto-shown on the RIGHT. No manifest/index (e.g. the
-    -- welcome greeting) → the single caption owns the full width, as before.
-    local dfh = io.open("/tmp/ss_briefing.detail", "r")
-    local detail = dfh and (dfh:read("*a") or "") or ""
-    if dfh then dfh:close() end
-    detail = detail:gsub("%s+$", "")
+    -- in blue, while the RIGHT half fetches that line's real source article. No
+    -- manifest/index (welcome greeting, or the CLOSING sign-off) → the single
+    -- caption owns the full width, as before.
+    local ufh = io.open("/tmp/ss_briefing.url", "r")
+    local url = ufh and (ufh:read("*l") or "") or ""
+    if ufh then ufh:close() end
+    url = url:gsub("%s+$", "")
 
     local mani = {}
     local mf = io.open("/tmp/ss_briefing.manifest", "r")
@@ -2763,11 +2764,12 @@ local function draw_briefing()
     local xf = io.open("/tmp/ss_briefing.idx", "r")
     if xf then cur = tonumber((xf:read("*l") or "")); xf:close() end
 
-    -- Grouped mode when we have the manifest + a valid index: gather the
-    -- contiguous run of items sharing the current category, and remember which
-    -- one is active. Otherwise fall back to the single current line.
+    -- Grouped mode when we have the manifest + a valid index AND it isn't the
+    -- closing sign-off: gather the contiguous run of items sharing the current
+    -- category, and remember which one is active. Otherwise (welcome / closing)
+    -- fall back to the single current line, centered.
     local sentences, active_pos, group_sig
-    if cur and mani[cur] then
+    if cur and mani[cur] and mani[cur].cat ~= "CLOSING" then
         local cat = mani[cur].cat
         local g0 = cur; while g0 > 1 and mani[g0 - 1].cat == cat do g0 = g0 - 1 end
         local g1 = cur; while mani[g1 + 1] and mani[g1 + 1].cat == cat do g1 = g1 + 1 end
@@ -2779,7 +2781,8 @@ local function draw_briefing()
         sentences = split_sentences(txt:gsub("[\r\n]+", " "))
     end
 
-    local split   = detail ~= ""
+    -- Grouped → split (left column + right article pane). Single line → full width.
+    local split   = active_pos ~= nil
     local cap_cx  = split and math.floor(w * 0.25) or math.floor(w / 2)
     -- Fill the screen below the badge/controls at the top.
     local regionTop = math.floor(h * 0.20)
@@ -2844,8 +2847,9 @@ local function draw_briefing()
         BC.t0 = mp.get_time() - 100
     end
     briefing_fade()
-    -- Auto-follow: show this line's paired detail on the right (or clear if none).
-    if split then briefing_detail_show(detail) else briefing_detail_clear() end
+    -- Auto-follow: fetch this line's source article on the right (or clear the
+    -- pane for the centered welcome/closing lines).
+    if split then briefing_article_show(url) else briefing_detail_clear() end
 end
 mp.add_periodic_timer(0.3, draw_briefing)
 
@@ -3930,31 +3934,56 @@ end)
 
 
 -- ----------------------------------------------------------------------------
--- Reading pane: clicking a briefing caption opens its source IN the screensaver
--- — the right half of the screen becomes a scrollable article view (fetched and
--- distilled to plain text by config/fetch-article.sh) instead of launching a
--- browser. Wheel / ↑↓ scroll, ESC / right-click / click-outside closes. Set
--- GROK_LINK_BROWSER=yes in the conf to use the browser instead.
+-- Reading pane: the right half of the screen is a scrollable article view,
+-- fetched and distilled to plain text by config/fetch-article.sh. During a
+-- briefing it AUTO-follows the line being read — grok-briefing.sh publishes that
+-- line's source URL and this pane loads it. Wheel / ↑↓ scroll.
 -- (Globals — the main chunk is at Lua's 200-local cap.)
 -- ----------------------------------------------------------------------------
 RD = { ov = mp.create_osd_overlay("ass-events"), on = false, auto = false, gen = 0,
        paras = nil, scroll = 0, url = "", x0 = 0 }
 RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
 
--- Auto-follow detail pane: driven by draw_briefing (not by clicks). Shows the
--- current one-liner's paired detail on the right half, updated as each line
--- plays. No voice pausing and no key bindings — it's part of the briefing, not a
--- manual reading pane. (Globals — the main chunk is at Lua's 200-local cap.)
-function briefing_detail_show(detail)
+-- Auto-follow article pane: driven by draw_briefing (not by clicks). Fetches the
+-- current one-liner's source article on the right half, refreshing as each line
+-- plays. No voice pausing and no key bindings — it's part of the briefing.
+function briefing_article_show(url)
     RD.auto = true
     RD.on = true
+    if url == "" then          -- filtered-out / sourceless item (weather, etc.)
+        RD.url = ""
+        RD.gen = RD.gen + 1
+        rd_set_text("# No source\n\nThere is no readable source for this item.")
+        return
+    end
+    if url == RD.url then return end          -- already showing/fetching this line
+    RD.url = url
     RD.gen = RD.gen + 1
-    rd_set_text(detail)        -- sets paras, resets scroll, draws on the right half
+    local gen = RD.gen
+    RD.paras = { { text = "LOADING…", head = true } }
+    RD.scroll = 0
+    rd_draw()
+    -- Per-fetch output file (keyed by gen) so a rapid prev/next can't make one
+    -- line's fetch overwrite another's content mid-read.
+    local out = string.format("/tmp/ss_article_%d.txt", gen)
+    os.remove(out)
+    mp.command_native_async({
+        name = "subprocess", playback_only = false,
+        args = { CFG_DIR .. "/fetch-article.sh", url, out },
+    }, function()
+        local f = io.open(out, "r")
+        local t = f and (f:read("*a") or "") or ""
+        if f then f:close() end
+        os.remove(out)
+        if not RD.on or gen ~= RD.gen then return end    -- superseded by a newer line
+        if t == "" then t = "Could not load the page.\n\n" .. url end
+        rd_set_text(t)
+    end)
 end
 function briefing_detail_clear()
     if RD.on and RD.auto then
         RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
-        RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
+        RD.url = ""; RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
     end
 end
 

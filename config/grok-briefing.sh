@@ -52,7 +52,7 @@ CACHE_DIR="$DATA_DIR/Briefing"
 TODAY="$(date '+%Y-%m-%d')"
 TODAY_CACHE="$CACHE_DIR/$TODAY"
 SUB_FILE="/tmp/ss_briefing.txt"          # photo.lua reads this for the current one-liner
-DETAIL_FILE="/tmp/ss_briefing.detail"    # photo.lua reads this for the current line's detail
+URL_FILE="/tmp/ss_briefing.url"          # photo.lua fetches this — the current line's source article
 MANIFEST_FILE="/tmp/ss_briefing.manifest"  # all items "category<TAB>line" (left column grouping)
 IDX_FILE="/tmp/ss_briefing.idx"          # 1-based index of the line being read right now
 PID_FILE="/tmp/ss_briefing.pid"          # exists for the whole process (controls/single-instance)
@@ -82,13 +82,13 @@ TODAY_HUMAN="$(date '+%A, %B %d, %Y')"
 BRIEFING_PROMPT=""; BRIEFING_HASH=""
 build_prompt() {
     local loc="${LOCATION:-your area}" tick=""
-    [ -n "$TICKERS" ] && tick=$'\n- MARKETS: one item for EACH of these tickers — '"$TICKERS"$' — the one-liner naming it with its price and percent move, the detail covering what is driving it and what it means for a holder.'
+    [ -n "$TICKERS" ] && tick=$'\n- MARKETS: one item for EACH of these tickers — '"$TICKERS"$' — the one-liner naming it with its current price and percent move; give a SOURCE that is a readable finance article or quote page.'
     BRIEFING_PROMPT="You are preparing a spoken morning briefing for $TODAY_HUMAN, for someone in $loc. Search the web for current, real information as of today.
 
 Produce the briefing as a sequence of ITEMS. Each item has THREE parts:
   1) CATEGORY: one of these exact labels — WEATHER, TOP NEWS, TECH & FINANCE, MARKETS, WATCHLIST, CLOSING.
   2) ONE-LINER: a single spoken headline sentence in plain conversational English. Read aloud, so use NO markdown, NO URLs, NO bracketed citations, NO bullet markers, NO asterisks, NO emojis.
-  3) DETAIL: a substantial, genuinely insightful explanation of FOUR to SIX sentences. Give the concrete numbers and facts, the context behind the story, WHY it matters, and a takeaway or what to watch next. Be specific and analytical, not a restatement of the one-liner. Plain spoken English only — NO URLs, citations, brackets, markdown, or emojis.
+  3) SOURCE: the full URL of the SINGLE web page you used for this item. It MUST be an ordinary news article page that opens and reads normally in a web browser. Hard rules for the URL: do NOT use youtube.com, youtu.be, or any video page; do NOT use reuters.com; avoid paywalled sites (Wall Street Journal, Bloomberg, Financial Times, New York Times, The Economist). PREFER widely-readable sources such as AP News, NPR, BBC, CNBC, The Guardian, The Verge, TechCrunch, Ars Technica, Engadget, ESPN, and official company or government pages. For WEATHER and CLOSING items, leave the SOURCE line blank.
 
 Output EXACTLY in this format and nothing else — no preamble, no extra headings, no commentary:
 @@ITEM@@
@@ -96,24 +96,24 @@ Output EXACTLY in this format and nothing else — no preamble, no extra heading
 <category label>
 @@LINE@@
 <one-liner sentence here>
-@@DETAIL@@
-<eight to ten sentences of real insight here>
+@@SRC@@
+<source article URL, or blank>
 @@ITEM@@
 @@CAT@@
 <category label>
 @@LINE@@
 <one-liner sentence here>
-@@DETAIL@@
-<eight to ten sentences of real insight here>
+@@SRC@@
+<source article URL, or blank>
 
 Cover these, in this exact order:
-- WEATHER: today's weather for $loc (1 item).
+- WEATHER: today's weather for $loc (1 item; blank SOURCE).
 - TOP NEWS: the three most important world or national stories right now (3 items).
 - TECH & FINANCE: three technology stories and two financial-market stories (5 items).$tick
-- WATCHLIST: two stocks or investments worth watching today, each detail saying why it matters today and giving a one-sentence risk note (2 items).
-- CLOSING: one warm, brief sign-off wishing the listener a good day (1 item); for this item only, the DETAIL may be a single short sentence.
+- WATCHLIST: two stocks or investments worth watching today, the one-liner naming it and why it is interesting today (2 items).
+- CLOSING: one warm, brief sign-off wishing the listener a good day (1 item; blank SOURCE).
 
-Never put URLs, source names in brackets, citation numbers, asterisks, or emojis anywhere."
+Never put URLs in the one-liners, and never put source names in brackets, citation numbers, asterisks, or emojis anywhere in the spoken text."
     BRIEFING_HASH="$(printf '%s' "$BRIEFING_PROMPT" | md5sum | cut -d' ' -f1)"
 }
 
@@ -187,20 +187,27 @@ def clean(s):
     return s.strip()
 
 VALID = {"WEATHER", "TOP NEWS", "TECH & FINANCE", "MARKETS", "WATCHLIST", "CLOSING"}
+BAD_HOST = re.compile(r'youtube\.com|youtu\.be|reuters\.com', re.I)
 def grab(ch, a, b):
     # text after marker a, up to marker b (or end)
     pat = r'@@\s*' + a + r'\s*@@(.*?)(?=@@\s*' + (b or 'ZZZ') + r'\s*@@|$)'
     m = re.search(pat, ch, re.S)
     return m.group(1) if m else ""
 
+def pick_url(s):
+    m = re.search(r'https?://\S+', s or "")
+    if not m:
+        return ""
+    u = m.group(0).rstrip('.,);]\'"')
+    return "" if BAD_HOST.search(u) else u
+
 items = []
 last_cat = "BRIEFING"
 # Drop anything before the first marker (preamble), then split into items.
 for ch in re.split(r'@@\s*ITEM\s*@@', text)[1:]:
     cat = re.sub(r'\s+', ' ', clean(grab(ch, 'CAT', 'LINE'))).strip().upper()
-    line = re.sub(r'\s*\n\s*', ' ', clean(grab(ch, 'LINE', 'DETAIL'))).strip()
-    md = re.search(r'@@\s*DETAIL\s*@@(.*)$', ch, re.S)
-    detail = clean(md.group(1)) if md else ""
+    line = re.sub(r'\s*\n\s*', ' ', clean(grab(ch, 'LINE', 'SRC'))).strip()
+    url = pick_url(grab(ch, 'SRC', None))      # raw (do NOT clean — clean strips URLs)
     if not line:
         continue
     # Snap odd category spellings to the nearest valid label; keep the last seen
@@ -208,7 +215,7 @@ for ch in re.split(r'@@\s*ITEM\s*@@', text)[1:]:
     if cat not in VALID:
         cat = next((v for v in VALID if cat and (v in cat or cat in v)), last_cat)
     last_cat = cat
-    items.append({"cat": cat, "line": line, "detail": detail})
+    items.append({"cat": cat, "line": line, "url": url})
 print(json.dumps(items))
 PY
 )"
@@ -218,18 +225,18 @@ PY
     # Pass 1: write every line/detail/category and a manifest (category<TAB>line
     # per item, in order), so playback — and photo.lua's grouped left column —
     # see the full list the instant the first clip is ready.
-    rm -f "$TODAY_CACHE"/item_*.line "$TODAY_CACHE"/item_*.detail \
+    rm -f "$TODAY_CACHE"/item_*.line "$TODAY_CACHE"/item_*.url \
           "$TODAY_CACHE"/item_*.cat "$TODAY_CACHE"/item_*.mp3 "$TODAY_CACHE/briefing.manifest" 2>/dev/null
-    local i num line detail cat
+    local i num line url cat
     : > "$TODAY_CACHE/briefing.manifest"
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
         cat="$(printf '%s' "$items" | jq -r ".[$i].cat")"
         line="$(printf '%s' "$items" | jq -r ".[$i].line")"
-        detail="$(printf '%s' "$items" | jq -r ".[$i].detail")"
-        printf '%s' "$cat"    > "$TODAY_CACHE/item_${num}.cat"
-        printf '%s' "$line"   > "$TODAY_CACHE/item_${num}.line"
-        printf '%s' "$detail" > "$TODAY_CACHE/item_${num}.detail"
+        url="$(printf '%s' "$items" | jq -r ".[$i].url")"
+        printf '%s' "$cat"  > "$TODAY_CACHE/item_${num}.cat"
+        printf '%s' "$line" > "$TODAY_CACHE/item_${num}.line"
+        printf '%s' "$url"  > "$TODAY_CACHE/item_${num}.url"
         printf '%s\t%s\n' "$cat" "$line" >> "$TODAY_CACHE/briefing.manifest"
     done
     printf '%s' "$n" > "$TODAY_CACHE/item.count"
@@ -255,15 +262,16 @@ prep() { have_net || return 1; gen_briefing; }
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
     | socat -t1 - "UNIX-CONNECT:$AUDIO_SOCK" 2>/dev/null; }
 sub_show()   { printf '%s' "$1" > "$SUB_FILE"; }
-sub_hide()   { printf '__HIDE__' > "$SUB_FILE"; rm -f "$DETAIL_FILE" "$IDX_FILE" "$MANIFEST_FILE"; }
-# Publish (or clear) the current one-liner's detail. Atomic (tmp+mv); callers
-# publish it BEFORE the caption so photo.lua never pairs a new line with the
-# previous item's detail.
-set_detail() {
+sub_hide()   { printf '__HIDE__' > "$SUB_FILE"; rm -f "$URL_FILE" "$IDX_FILE" "$MANIFEST_FILE"; }
+# Publish (or clear) the current one-liner's source URL — photo.lua fetches it
+# into the right pane. Atomic (tmp+mv); published BEFORE the caption so photo.lua
+# never pairs a new line with the previous item's URL. A blank/missing url file
+# means "no source" (weather, closing, or a filtered-out link).
+set_url() {
     if [ -n "$1" ] && [ -s "$1" ]; then
-        cp -f "$1" "$DETAIL_FILE.part" 2>/dev/null && mv -f "$DETAIL_FILE.part" "$DETAIL_FILE"
+        cp -f "$1" "$URL_FILE.part" 2>/dev/null && mv -f "$URL_FILE.part" "$URL_FILE"
     else
-        rm -f "$DETAIL_FILE"
+        rm -f "$URL_FILE"
     fi
 }
 # Publish the full item list (so photo.lua can show a category's lines together),
@@ -356,7 +364,7 @@ play_welcome() {
     wmp3="$(find "$WELCOME_DIR" -maxdepth 1 -type f -iname '*.mp3' 2>/dev/null | shuf -n1)"
     [ -n "$wmp3" ] && [ -s "$wmp3" ] || return 0
     wtxt="${wmp3%.*}.txt"
-    set_detail ""; set_idx ""           # the greeting has no detail and no grouping
+    set_url ""; set_idx ""              # the greeting has no source and no grouping
     [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
     SKIP=0; STEP=1
     ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$wmp3" >/dev/null 2>&1 &
@@ -409,8 +417,8 @@ play() {
         [ "$SKIP" = 1 ] && { idx=$(( idx + STEP )); [ "$idx" -lt 1 ] && idx=1; continue; }
         [ -s "$mp3" ] || { idx=$((idx+1)); continue; }
 
-        # Publish the detail + current index FIRST, then the one-liner caption.
-        set_detail "$TODAY_CACHE/item_${num}.detail"
+        # Publish the source URL + current index FIRST, then the one-liner caption.
+        set_url "$TODAY_CACHE/item_${num}.url"
         set_idx "$idx"
         [ -s "$TODAY_CACHE/item_${num}.line" ] && sub_show "$(cat "$TODAY_CACHE/item_${num}.line")" || sub_hide
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$mp3" >/dev/null 2>&1 &
