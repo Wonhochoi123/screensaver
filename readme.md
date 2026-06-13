@@ -173,9 +173,13 @@ temperature sparkline**. The **markets** items are special too: the left half
 draws a **Google-Finance-style stock card** — ticker chips (the active one in
 blue), the company name, big price, today's change, a **1-day line vs a dashed
 previous-close**, and a day/52-week range + volume row — while the right half
-shows a **one-paragraph Grok analysis** of that ticker (the only place AI touches
+shows a **one-paragraph Grok analysis** of that ticker — what moved it, the
+context, and a **clear, opinionated recommendation** (Buy / Accumulate / Hold /
+Trim / Sell with the levels it's watching). It's the only place AI touches
 content; with live web search on, so it can cite the day's real catalyst — set
-`GROK_STOCK_SEARCH=0` for a numbers-only take). All stock data is free Yahoo
+`GROK_STOCK_SEARCH=0` for a numbers-only take. If the analysis ever comes up
+blank, run `~/Screensaver-App/config/grok-briefing.sh --check`, which tests the
+chat model and prints the valid model ids for your key. All stock data is free Yahoo
 Finance, cached per run. Nothing to click — it tracks the voice line-by-line,
 fading softly as each new category appears, and the wheel scrolls a long article.
 A partisan or unscrapable link is dropped on both sides (so the right pane never

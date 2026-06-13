@@ -144,8 +144,8 @@ stock_analysis() {            # sym name price prev pct dir outfile
     local sp='{"mode":"off"}'
     [ "${GROK_STOCK_SEARCH:-1}" = "1" ] && sp='{"mode":"on","max_search_results":6}'
     local sysmsg usrmsg body resp txt
-    sysmsg="You are a concise equity market analyst. Reply with ONE paragraph of 3 to 4 sentences in plain prose — no markdown, no preamble, no bullet points, no headings. Explain what most likely drove the stock's move today (cite the real catalyst if you can find it), give brief company or sector context, and a short balanced outlook. Do not give buy or sell recommendations. End with exactly: Not financial advice."
-    usrmsg="Analyze ${sym} (${name}). Today it is trading near \$${price}, ${dir} ${pct} percent from a previous close of \$${prev}. What moved it today, the context, and the outlook?"
+    sysmsg="You are a sharp, decisive equity analyst writing a morning brief. In ONE paragraph of 4 to 6 sentences, plain prose (no markdown, no bullet points, no headings, no preamble): say what most likely drove the stock today (cite the real catalyst if you can find it), the key context, and then give a CLEAR, opinionated recommendation — your stance (Buy, Accumulate, Hold, Trim, or Sell), your conviction level, and the price levels or risks you are watching. Be specific and confident, not wishy-washy. End with exactly: Not financial advice."
+    usrmsg="Analyze ${sym} (${name}) for an investor this morning. It is trading near \$${price}, ${dir} ${pct} percent from a previous close of \$${prev}. What drove it today, the outlook, and your recommendation?"
     body="$(jq -n --arg m "$MODEL" --arg s "$sysmsg" --arg u "$usrmsg" --argjson sp "$sp" \
         '{model:$m, messages:[{role:"system",content:$s},{role:"user",content:$u}],
           search_parameters:$sp, temperature:0.4}')" || return 1
@@ -174,30 +174,37 @@ gen_stock() {                 # NNN
     [ -n "$name" ] || name="$sym"
     stock_analysis "$sym" "$name" "${price:-?}" "${prev:-?}" "${pct:-0.0}" "${dir:-flat}" \
         "$RUN_DIR/item_${num}.analysis" 2>/dev/null \
-        || printf '%s' "Analysis unavailable right now. Not financial advice." \
+        || printf '%s' "${sym} is ${dir:-flat} ${pct:-0} percent today, near \$${price:-?} versus a previous close of \$${prev:-?}. Live analysis is temporarily unavailable. Not financial advice." \
                > "$RUN_DIR/item_${num}.analysis"
+    # Publish what we have NOW (each ticker as it finishes), so the card fills in
+    # progressively instead of waiting for the whole run — and never gets stuck on
+    # "Fetching…" if playback reaches the markets items before generation ends.
+    assemble_stocks; set_stocks
 }
 
 # Assemble all MARKETS items into one file photo.lua reads: records separated by
 # a lone "@@", each holding the card's TAB lines plus IDX, SYM and a one-line
 # ANALYSIS (newlines flattened so the record format stays line-based).
+# Atomic (temp+mv) so a parallel gen_stock calling this can't read a half-written
+# file, and a concurrent rewrite never corrupts it (last complete write wins).
 assemble_stocks() {
-    local out="$RUN_DIR/briefing.stocks" total i num first=1
+    local out="$RUN_DIR/briefing.stocks" tmp total i num first=1
     total="$(cat "$RUN_DIR/item.count" 2>/dev/null)"; [ -n "$total" ] || return 0
-    : > "$out"
+    tmp="$(mktemp "${out}.XXXXXX")" || return 0
     for (( i=1; i<=total; i++ )); do
         num="$(printf '%03d' "$i")"
         [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] || continue
-        [ "$first" = 1 ] || printf '@@\n' >> "$out"; first=0
-        printf 'IDX\t%s\n' "$i" >> "$out"
-        printf 'SYM\t%s\n' "$(cat "$RUN_DIR/item_${num}.sym" 2>/dev/null)" >> "$out"
-        [ -s "$RUN_DIR/item_${num}.stock" ] && cat "$RUN_DIR/item_${num}.stock" >> "$out"
+        [ "$first" = 1 ] || printf '@@\n' >> "$tmp"; first=0
+        printf 'IDX\t%s\n' "$i" >> "$tmp"
+        printf 'SYM\t%s\n' "$(cat "$RUN_DIR/item_${num}.sym" 2>/dev/null)" >> "$tmp"
+        [ -s "$RUN_DIR/item_${num}.stock" ] && cat "$RUN_DIR/item_${num}.stock" >> "$tmp"
         if [ -s "$RUN_DIR/item_${num}.analysis" ]; then
-            printf 'ANALYSIS\t' >> "$out"
-            tr '\n' ' ' < "$RUN_DIR/item_${num}.analysis" >> "$out"
-            printf '\n' >> "$out"
+            printf 'ANALYSIS\t' >> "$tmp"
+            tr '\n' ' ' < "$RUN_DIR/item_${num}.analysis" >> "$tmp"
+            printf '\n' >> "$tmp"
         fi
     done
+    mv -f "$tmp" "$out"
 }
 
 # --- build the whole briefing INTO $RUN_DIR (caller sets + mkdir's it) --------
@@ -555,6 +562,23 @@ check() {
     if [ -z "$API_KEY" ]; then echo "── stop: no key, can't test the API ──"; return; fi
     printf "  net:   reaching api.x.ai ... "
     if have_net; then echo "ok"; else echo "FAIL (no network, or key rejected)"; echo "──"; return; fi
+    # Stock analysis is the one place we call the chat model (with live search).
+    # Test it directly so a wrong model id or a no-search key is obvious here.
+    printf "  stock: analysis test (AAPL, model=%s, search=%s) ... " "$MODEL" "${GROK_STOCK_SEARCH:-1}"
+    local tmpa; tmpa="$(mktemp)"
+    if stock_analysis "AAPL" "Apple Inc" "230.00" "228.00" "0.9" "up" "$tmpa" && [ -s "$tmpa" ]; then
+        echo "ok"; echo "         “$(head -c 220 "$tmpa")…”"
+    else
+        echo "FAIL"
+        local r; r="$(curl -s --max-time 30 -X POST "$API/chat/completions" \
+            -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+            -d "$(jq -n --arg m "$MODEL" '{model:$m,messages:[{role:"user",content:"ping"}]}')")"
+        echo "         api says: $(printf '%s' "$r" | jq -rc '.error.message // .error // "blank/none"' 2>/dev/null | head -c 200)"
+        echo "         valid models on your key: $(curl -s --max-time 15 "$API/models" \
+            -H "Authorization: Bearer $API_KEY" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null | head -c 200)"
+        echo "         → set GROK_MODEL in screensaver.conf to one of those."
+    fi
+    rm -f "$tmpa"
     printf "  gen:   building today's briefing from feeds ... "
     if prep force; then
         local cnt; cnt="$(cat "$RUN_DIR/item.count" 2>/dev/null)"
