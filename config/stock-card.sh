@@ -30,9 +30,16 @@ if [ -s "$CACHE" ]; then
 fi
 
 python3 - "$SYM" > "$OUT.tmp" 2>/dev/null <<'PY'
-import sys, json, urllib.request, urllib.parse
+import sys, json, datetime, urllib.request, urllib.parse
 
+# Friendly aliases for crypto → CNBC's Coin Metrics symbols, so you can put plain
+# BTC / ETH in GROK_TICKERS. (SpaceX is private — no ticker; DXYZ is a proxy.)
+CRYPTO = {"BTC": "BTC.CM=", "BITCOIN": "BTC.CM=", "ETH": "ETH.CM=", "ETHEREUM": "ETH.CM=",
+          "SOL": "SOL.CM=", "SOLANA": "SOL.CM=", "DOGE": "DOGE.CM=", "DOGECOIN": "DOGE.CM=",
+          "XRP": "XRP.CM=", "LTC": "LTC.CM=", "ADA": "ADA.CM="}
 sym = sys.argv[1].strip().upper()
+sym = CRYPTO.get(sym, sym)
+is_crypto = sym.endswith("=")
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
@@ -67,6 +74,8 @@ except Exception:
     q = {}
 
 name = q.get("name") or sym
+if is_crypto and "/" in name:           # "Bitcoin/USD Coin Metrics" → "Bitcoin"
+    name = name.split("/")[0].strip()
 price = num(q.get("last"))
 prev = num(q.get("previous_day_closing"))
 chg = num(q.get("change"))
@@ -109,20 +118,34 @@ if chg is None and prev is not None:
 if pct is None and prev:
     pct = (price - prev) / prev * 100.0
 
-# --- Intraday series from Nasdaq (for the line chart) ------------------------
-series = []
-nd = get(f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(sym)}/chart?assetclass=stocks",
-         accept="application/json")
-try:
-    for pt in json.loads(nd)["data"]["chart"]:
-        v = num(pt.get("y") if isinstance(pt, dict) else None)
-        if v is not None:
-            series.append(v)
-except Exception:
-    series = []
-if len(series) > 72:
-    step = len(series) / 72
-    series = [series[min(len(series) - 1, int(i * step))] for i in range(72)]
+# --- Price series from Nasdaq, several ranges (for the switchable line chart) --
+# 1D = today's intraday; 1M / 1Y = daily history via fromdate/todate. (Crypto
+# isn't on Nasdaq's stock API, so those cards show price/stats without a line.)
+def downsample(vals, n=72):
+    if len(vals) <= n:
+        return vals
+    step = len(vals) / n
+    return [vals[min(len(vals) - 1, int(i * step))] for i in range(n)]
+
+
+def nasdaq_series(url):
+    try:
+        chart = json.loads(get(url, accept="application/json"))["data"]["chart"]
+        vals = [num(p.get("y")) for p in chart if isinstance(p, dict)]
+        return downsample([v for v in vals if v is not None])
+    except Exception:
+        return []
+
+
+enc = urllib.parse.quote(sym)
+ranges = {}
+if not is_crypto:
+    today = datetime.date.today()
+    ranges["1D"] = nasdaq_series(f"https://api.nasdaq.com/api/quote/{enc}/chart?assetclass=stocks")
+    ranges["1M"] = nasdaq_series(f"https://api.nasdaq.com/api/quote/{enc}/chart?assetclass=stocks"
+                                 f"&fromdate={today - datetime.timedelta(days=31)}&todate={today}")
+    ranges["1Y"] = nasdaq_series(f"https://api.nasdaq.com/api/quote/{enc}/chart?assetclass=stocks"
+                                 f"&fromdate={today - datetime.timedelta(days=365)}&todate={today}")
 
 
 def human(v):
@@ -148,8 +171,11 @@ if wlo is not None and whi is not None:
 hv = vol_alt if vol_alt else human(num(vol_raw))
 if hv:
     out.append(f"VOL\t{hv}")
-if len(series) >= 2:
-    out.append("SERIES\t" + " ".join(f"{v:.2f}" for v in series))
+# SERIES = 1D (kept for compatibility); SR1M / SR1Y = the longer ranges.
+for tag, key in (("SERIES", "1D"), ("SR1M", "1M"), ("SR1Y", "1Y")):
+    s = ranges.get(key) or []
+    if len(s) >= 2:
+        out.append(f"{tag}\t" + " ".join(f"{v:.2f}" for v in s))
 print("\n".join(out))
 PY
 

@@ -171,8 +171,9 @@ to readable text. The one exception is the **weather** item, whose right pane is
 high/low, wind, humidity, sunrise and sunset, and an **8-hour strip with a
 temperature sparkline**. The **markets** items are special too: the left half
 draws a **Google-Finance-style stock card** — ticker chips (the active one in
-blue), the company name, big price, today's change, a **1-day line vs a dashed
-previous-close**, and a day/52-week range + volume row — while the right half
+blue), the company name, big price, today's change, a **line chart that cycles
+through TODAY / 1 MONTH / 1 YEAR** (each labelled with its % move; the 1-day view
+has a dashed previous-close line), and a day/52-week range + volume row — while the right half
 shows a **one-paragraph Grok analysis** of that ticker — what moved it, the
 context, and a **clear, opinionated recommendation** (Buy / Accumulate / Hold /
 Trim / Sell with the levels it's watching, reasoned over the real live numbers).
@@ -397,7 +398,7 @@ file, so a value set here applies everywhere.
 | `GROK_BRIEFING` | `1` | Enable (1) / disable (0) |
 | `GROK_TIME` | `"05:39"` | When it plays (24h `HH:MM`) |
 | `GROK_LOCATION` | `"Mooresville, NC"` | Location for the weather segment |
-| `GROK_TICKERS` | `"TSLA, AMD, PLTR"` | Stocks segment (empty skips it) |
+| `GROK_TICKERS` | `"TSLA, AMD, PLTR, BTC"` | Stocks/crypto segment (empty skips it). Stock tickers + crypto by name (BTC, ETH, SOL, DOGE, XRP). SpaceX is private — use the `DXYZ` proxy. |
 | `GROK_MODEL` | `"grok-4.3"` | xAI model |
 | `GROK_VOICE` | `"ara"` | Voice |
 | `GROK_BGM_VOLUME` | `60` | Briefing music volume (0–100) |

@@ -46,7 +46,12 @@ cleanup() {
     [ -n "$GROK_PID" ]     && kill "$GROK_PID" 2>/dev/null
     [ -f /tmp/ss_briefing_ffplay.pid ] && kill "$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null)" 2>/dev/null
     [ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
-    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}" \
+    # Kill the briefing's background-music mpv DIRECTLY (its own process). On
+    # shutdown grok-briefing.sh's graceful 2.5s fade often gets killed mid-fade,
+    # orphaning that mpv playing softly forever — so don't rely on it here.
+    pkill -f 'input-ipc-server=/tmp/ss_bgm.sock' 2>/dev/null
+    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}" /tmp/ss_bgm.sock \
+          /tmp/ss_briefing_bgm.txt /tmp/ss_briefing_bgm_path \
           /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
           /tmp/ss_briefing.manifest /tmp/ss_briefing.idx /tmp/ss_briefing.detail \
           /tmp/ss_briefing.stocks \
@@ -62,7 +67,9 @@ rm -f "$AUDIO_SOCK"
 # marker makes the loading screen render the briefing (its first item is weather).
 [ -f /tmp/ss_briefing_ffplay.pid ] && kill "$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null)" 2>/dev/null
 [ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
-rm -f /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
+pkill -f 'input-ipc-server=/tmp/ss_bgm.sock' 2>/dev/null      # stray briefing bgm from a prior run
+rm -f /tmp/ss_bgm.sock /tmp/ss_briefing_bgm.txt /tmp/ss_briefing_bgm_path \
+      /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
       /tmp/ss_briefing.manifest /tmp/ss_briefing.idx /tmp/ss_briefing.detail \
       /tmp/ss_briefing.stocks \
       /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid

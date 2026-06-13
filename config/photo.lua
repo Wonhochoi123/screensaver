@@ -4510,7 +4510,7 @@ end
 -- (Globals — the main chunk is at Lua's 200-local cap.)
 -- ----------------------------------------------------------------------------
 SK = { ov = mp.create_osd_overlay("ass-events"), on = false, sig = nil,
-       byIdx = {}, order = {}, akey = nil, cur = nil, mani = nil }
+       byIdx = {}, order = {}, akey = nil, cur = nil, mani = nil, range_idx = 0 }
 SK.ov.z = 1900
 -- BGR up/down/flat colours (kept on SK, not new main-chunk locals — 200 cap).
 SK.cUp, SK.cDn, SK.cFl = "&H37C84A&", "&H4A4AE0&", "&HB0B0B0&"
@@ -4532,7 +4532,8 @@ function sk_load()
     for block in (raw .. "\n@@\n"):gmatch("(.-)\n@@\n") do
         local r = { sym = "", name = "", price = "", chg = "", pct = "", dir = "flat",
                     prev = "", dlo = "", dhi = "", w52lo = "", w52hi = "", vol = "",
-                    series = {}, analysis = "", idx = nil }
+                    series = {}, s1m = {}, s1y = {}, analysis = "", idx = nil }
+        local function nums(rest, into) for v in rest:gmatch("%S+") do into[#into + 1] = tonumber(v) end end
         for line in (block .. "\n"):gmatch("(.-)\n") do
             local tag, rest = line:match("^([%u%d]+)\t(.*)$")
             if tag == "IDX" then r.idx = tonumber(rest)
@@ -4546,10 +4547,19 @@ function sk_load()
             elseif tag == "DAY" then local a, b = rest:match("^(.-)\t(.*)$"); r.dlo, r.dhi = a or "", b or ""
             elseif tag == "W52" then local a, b = rest:match("^(.-)\t(.*)$"); r.w52lo, r.w52hi = a or "", b or ""
             elseif tag == "VOL" then r.vol = rest
-            elseif tag == "SERIES" then for v in rest:gmatch("%S+") do r.series[#r.series + 1] = tonumber(v) end
+            elseif tag == "SERIES" then nums(rest, r.series)
+            elseif tag == "SR1M" then nums(rest, r.s1m)
+            elseif tag == "SR1Y" then nums(rest, r.s1y)
             elseif tag == "ANALYSIS" then r.analysis = rest
             end
         end
+        -- Switchable ranges: today's intraday (with the prev-close baseline), plus
+        -- the 1-month and 1-year history when available. The card cycles through
+        -- whichever exist.
+        r.ranges = {}
+        if #r.series >= 2 then r.ranges[#r.ranges + 1] = { label = "TODAY", s = r.series, base = true } end
+        if #r.s1m >= 2 then r.ranges[#r.ranges + 1] = { label = "1 MONTH", s = r.s1m } end
+        if #r.s1y >= 2 then r.ranges[#r.ranges + 1] = { label = "1 YEAR", s = r.s1y } end
         if r.idx then SK.byIdx[r.idx] = r; SK.order[#SK.order + 1] = r end
     end
 end
@@ -4557,6 +4567,7 @@ end
 function sk_show(cur, mani)
     if wx_hide then wx_hide() end
     sk_load()
+    if cur ~= SK.cur then SK.range_idx = 0 end   -- new ticker → start at TODAY
     SK.on = true; SK.cur = cur; SK.mani = mani
     sk_draw(cur)
     -- Right pane: this ticker's analysis, fed into the reader so ↑/↓ scroll it.
@@ -4581,13 +4592,11 @@ end
 -- Draw one ticker's 1-day line: faint filled area + a coloured line, with a
 -- dashed previous-close baseline. col is the up/down/flat colour. (Global, not a
 -- main-chunk local — the chunk is at Lua's 200-local cap.)
-function sk_chart(ev, rec, bx, by, bw, bh, col)
-    local s = rec.series
+function sk_chart(ev, s, prevn, bx, by, bw, bh, col)
     if not s or #s < 2 then return end
     local n = #s
     local vmin, vmax = math.huge, -math.huge
     for _, v in ipairs(s) do vmin = math.min(vmin, v); vmax = math.max(vmax, v) end
-    local prevn = tonumber(rec.prev)
     if prevn then vmin = math.min(vmin, prevn); vmax = math.max(vmax, prevn) end
     if vmax <= vmin then vmax = vmin + 1 end
     local pad = (vmax - vmin) * 0.08
@@ -4697,14 +4706,25 @@ function sk_draw(cur)
     end
     y = y + math.floor(h * 0.072)
 
-    -- 1-day chart (only when we actually have an intraday series, i.e. Yahoo
-    -- worked). Without it, leave the space for the stats rather than an empty box.
+    -- Switchable line chart: cycles TODAY / 1 MONTH / 1 YEAR (whichever exist),
+    -- labelled with that range's % move. Without any series (e.g. crypto), leave
+    -- the space for the stats rather than an empty box.
     local chTop = y
     local chH = math.floor(h * 0.17)
-    if rec.series and #rec.series >= 2 then
-        txt("TODAY", right, chTop - math.floor(h * 0.006), math.floor(h * 0.016),
-            "&H9A9A9A&", 6, "Montserrat SemiBold", 0x40)
-        sk_chart(ev, rec, left, chTop, Lw, chH, col)
+    local ranges = rec.ranges or {}
+    if #ranges > 0 then
+        local rng = ranges[(SK.range_idx % #ranges) + 1]
+        local s = rng.s
+        local rcol, rpct = col, nil
+        if s[1] and s[1] ~= 0 then
+            rpct = (s[#s] - s[1]) / s[1] * 100
+            rcol = rpct >= 0 and SK.cUp or SK.cDn
+        end
+        local lbl = rng.label
+        if rpct then lbl = lbl .. string.format("   %s%.1f%%", rpct >= 0 and "+" or "−", math.abs(rpct)) end
+        txt(lbl, right, chTop - math.floor(h * 0.006), math.floor(h * 0.016), rcol, 6,
+            "Montserrat SemiBold", 0x30)
+        sk_chart(ev, s, rng.base and tonumber(rec.prev) or nil, left, chTop, Lw, chH, rcol)
     else
         chH = math.floor(h * 0.02)   -- no chart → tighten up to the stats row
     end
@@ -4735,4 +4755,14 @@ mp.add_periodic_timer(0.5, function()
     local before = SK.sig
     sk_load()
     if SK.sig ~= before then sk_show(SK.cur, SK.mani or {}) end
+end)
+-- Auto-cycle the chart's time range (TODAY → 1 MONTH → 1 YEAR) every ~5s, like
+-- the minimap's auto-zoom, so all ranges are seen without needing a key.
+mp.add_periodic_timer(5, function()
+    if not (SK.on and SK.cur and briefing_active and briefing_active()) then return end
+    local rec = SK.byIdx[SK.cur]
+    if rec and rec.ranges and #rec.ranges > 1 then
+        SK.range_idx = SK.range_idx + 1
+        sk_draw(SK.cur)
+    end
 end)
