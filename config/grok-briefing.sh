@@ -87,8 +87,8 @@ build_prompt() {
 
 Produce the briefing as a sequence of ITEMS. Each item has THREE parts:
   1) CATEGORY: one of these exact labels — WEATHER, TOP NEWS, TECH & FINANCE, MARKETS, WATCHLIST, CLOSING.
-  2) ONE-LINER: a single spoken headline sentence in plain conversational English. Read aloud, so use NO markdown, NO URLs, NO bracketed citations, NO bullet markers, NO asterisks, NO emojis.
-  3) SOURCE: the full URL of the SINGLE web page you used for this item. It MUST be an ordinary news article page that opens and reads normally in a web browser. Hard rules for the URL: do NOT use youtube.com, youtu.be, or any video page; do NOT use reuters.com; avoid paywalled sites (Wall Street Journal, Bloomberg, Financial Times, New York Times, The Economist). PREFER widely-readable sources such as AP News, NPR, BBC, CNBC, The Guardian, The Verge, TechCrunch, Ars Technica, Engadget, ESPN, and official company or government pages. For WEATHER and CLOSING items, leave the SOURCE line blank.
+  2) ONE-LINER: a single spoken headline sentence in plain conversational English. Read aloud, so use NO markdown, NO URLs, NO bracketed citations, NO bullet markers, NO asterisks, NO emojis. Report news factually and neutrally: state plainly what happened, with no partisan framing, no loaded or emotive adjectives, no editorializing, and no opinion. If a story is politically contested, summarize it even-handedly.
+  3) SOURCE: the full URL of the SINGLE web page you used for this item. It MUST be an ordinary news article page that opens and reads normally in a web browser. Hard rules for the URL: do NOT use youtube.com, youtu.be, or any video page; do NOT use reuters.com; avoid paywalled sites (Wall Street Journal, Bloomberg, Financial Times, New York Times, The Economist). For NEWS, the source MUST be politically BALANCED and centrist — pick straight-news wire-service or centrist reporting and avoid outlets with a strong partisan slant in EITHER direction. Do NOT use left-leaning outlets (The Guardian, NPR, MSNBC, Vox, HuffPost, Slate, The Nation, Mother Jones, Daily Kos, The Daily Beast) and do NOT use right-leaning outlets (Fox News, Breitbart, The Daily Wire, Newsmax, OAN, The Federalist, The Blaze, Daily Caller). PREFER neutral, centrist sources: AP News, BBC News, CNBC, Axios, The Hill, Christian Science Monitor, RealClearPolitics, and official company or government pages. For TECH items prefer The Verge, TechCrunch, Ars Technica, or Engadget; for sports, ESPN. For WEATHER and CLOSING items, leave the SOURCE line blank.
 
 Output EXACTLY in this format and nothing else — no preamble, no extra headings, no commentary:
 @@ITEM@@
@@ -187,7 +187,21 @@ def clean(s):
     return s.strip()
 
 VALID = {"WEATHER", "TOP NEWS", "TECH & FINANCE", "MARKETS", "WATCHLIST", "CLOSING"}
-BAD_HOST = re.compile(r'youtube\.com|youtu\.be|reuters\.com', re.I)
+# Hosts we never fetch a source article from: unscrapable/video (youtube,
+# reuters) plus partisan outlets on BOTH sides, so even if the model ignores the
+# "balanced sources" instruction the right pane never shows a slanted article
+# (the spoken one-liner still plays; that item just has no source on the right).
+BAD_HOST = re.compile(
+    r'youtube\.com|youtu\.be|reuters\.com'
+    # left-leaning
+    r'|theguardian\.com|guardian\.co\.uk|npr\.org|msnbc\.com|vox\.com'
+    r'|huffpost\.com|huffingtonpost\.com|slate\.com|thenation\.com'
+    r'|motherjones\.com|dailykos\.com|thedailybeast\.com'
+    # right-leaning
+    r'|foxnews\.com|foxbusiness\.com|breitbart\.com|dailywire\.com'
+    r'|newsmax\.com|oann\.com|oneamerica|thefederalist\.com'
+    r'|theblaze\.com|dailycaller\.com',
+    re.I)
 def grab(ch, a, b):
     # text after marker a, up to marker b (or end)
     pat = r'@@\s*' + a + r'\s*@@(.*?)(?=@@\s*' + (b or 'ZZZ') + r'\s*@@|$)'
