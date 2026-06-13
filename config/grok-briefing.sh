@@ -53,7 +53,8 @@ VOICE_GAIN="$(awk "BEGIN{print ${VOICE_VOL}/100}")"   # ffplay -af volume factor
 WELCOME_DIR="$CFG_DIR/welcome"           # premade greeting clips (play instantly)
 CACHE_DIR="$DATA_DIR/Briefing"
 TODAY="$(date '+%Y-%m-%d')"
-TODAY_CACHE="$CACHE_DIR/$TODAY"
+TODAY_DIR="$CACHE_DIR/$TODAY"            # the day's folder, holds one subdir per run
+RUN_DIR=""                              # the timestamped run we generate into / play from
 SUB_FILE="/tmp/ss_briefing.txt"          # photo.lua reads this for the current one-liner
 URL_FILE="/tmp/ss_briefing.url"          # photo.lua fetches this — the current line's source article
 MANIFEST_FILE="/tmp/ss_briefing.manifest"  # all items "category<TAB>line" (left column grouping)
@@ -67,8 +68,6 @@ BGM_SOCK="/tmp/ss_bgm.sock"              # bgm's own mpv IPC socket (for fading)
 SPEAK_DELAY="${GROK_SPEAK_DELAY:-5}"     # seconds of music before the first words
 SECTION_GAP="${GROK_SECTION_GAP:-1}"     # seconds of music between one-liners
 API="https://api.x.ai/v1"
-
-mkdir -p "$TODAY_CACHE" 2>/dev/null
 
 # --- silent gate (applies to watch/prep/play; --check reports instead) -------
 gate_ok() {
@@ -91,6 +90,35 @@ build_meta() {
         | md5sum | cut -d' ' -f1)"
 }
 
+# --- run directories ----------------------------------------------------------
+# Every generation gets its OWN timestamped folder under the day —
+#   Data/Briefing/<YYYY-MM-DD>/<HHMMSS>/
+# so refreshing keeps each earlier run intact (you can still replay the last one)
+# and replay can pick whichever run is newest. Folder names sort chronologically.
+new_run() {                              # fresh run dir for a NEW generation
+    RUN_DIR="$TODAY_DIR/$(date '+%H%M%S')"
+    mkdir -p "$RUN_DIR" 2>/dev/null
+    # Keep only the newest 12 runs in today's folder so it can't grow forever.
+    ls -1d "$TODAY_DIR"/*/ 2>/dev/null | sort | head -n -12 \
+        | while IFS= read -r d; do rm -rf "$d"; done
+}
+# Newest run (any day) that actually has playable audio. Echoes its path, or ''.
+latest_run() {
+    local d
+    for d in $(ls -1d "$CACHE_DIR"/*/*/ 2>/dev/null | sort -r); do
+        [ -s "${d}item_001.mp3" ] && { printf '%s' "${d%/}"; return 0; }
+    done
+    return 1
+}
+# Newest playable run for TODAY only (used to skip regenerating an identical one).
+latest_run_today() {
+    local d
+    for d in $(ls -1d "$TODAY_DIR"/*/ 2>/dev/null | sort -r); do
+        [ -s "${d}item_001.mp3" ] && { printf '%s' "${d%/}"; return 0; }
+    done
+    return 1
+}
+
 # --- TTS one one-liner into its own mp3 (atomic; rejects JSON error bodies) ---
 tts_line() {
     local text="$1" out="$2" tmp
@@ -105,18 +133,17 @@ tts_line() {
     rm -f "$tmp"; return 1
 }
 
-# --- generate the whole briefing: build items from feeds, TTS each one-liner ---
-# Cached per day. Pass 1 writes ALL item_NNN.cat/.line/.url and item.count up
-# front (so playback knows the full list as soon as anything lands); pass 2 TTS
-# each one-liner into item_NNN.mp3 in order, a few at a time.
-gen_briefing() {
+# --- build the whole briefing INTO $RUN_DIR (caller sets + mkdir's it) --------
+# Pass 1 writes ALL item_NNN.cat/.line/.url and item.count up front (so playback
+# knows the full list as soon as anything lands); pass 2 TTS each one-liner into
+# item_NNN.mp3 in order, a few at a time. Stamps briefing.hash on success.
+gen_into_run() {
     build_meta
-    local done_marker="$TODAY_CACHE/briefing_${BRIEFING_HASH}.done"
-    [ -s "$done_marker" ] && return 0
+    [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ] || return 1
 
     # Weather card data (drives the spoken weather line AND primes the 20-min
     # cache that photo.lua's right-pane card reuses).
-    local wxf="$TODAY_CACHE/weather.card"
+    local wxf="$RUN_DIR/weather.card"
     bash "$CFG_DIR/weather-card.sh" "$wxf" 2>/dev/null
 
     # Build the WHOLE briefing from curated balanced RSS feeds + live ticker
@@ -127,7 +154,7 @@ gen_briefing() {
              DAY_NAME="$(date '+%A')" \
              NEWS_FEEDS="${GROK_NEWS_FEEDS:-}" TECH_FEEDS="${GROK_TECH_FEEDS:-}" \
              python3 "$CFG_DIR/news-build.py" 2>/dev/null)"
-    printf '%s' "$items" > "$TODAY_CACHE/briefing.resp" 2>/dev/null   # keep for diagnosis
+    printf '%s' "$items" > "$RUN_DIR/briefing.resp" 2>/dev/null   # keep for diagnosis
 
     local n; n="$(printf '%s' "$items" | jq 'length' 2>/dev/null)"
     [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 1
@@ -135,38 +162,51 @@ gen_briefing() {
     # Pass 1: write every line/url/category and a manifest (category<TAB>line
     # per item, in order), so playback — and photo.lua's grouped left column —
     # see the full list the instant the first clip is ready.
-    rm -f "$TODAY_CACHE"/item_*.line "$TODAY_CACHE"/item_*.url \
-          "$TODAY_CACHE"/item_*.cat "$TODAY_CACHE"/item_*.mp3 "$TODAY_CACHE/briefing.manifest" 2>/dev/null
     local i num line url cat
-    : > "$TODAY_CACHE/briefing.manifest"
+    : > "$RUN_DIR/briefing.manifest"
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
         cat="$(printf '%s' "$items" | jq -r ".[$i].cat")"
         line="$(printf '%s' "$items" | jq -r ".[$i].line")"
         url="$(printf '%s' "$items" | jq -r ".[$i].url")"
-        printf '%s' "$cat"  > "$TODAY_CACHE/item_${num}.cat"
-        printf '%s' "$line" > "$TODAY_CACHE/item_${num}.line"
-        printf '%s' "$url"  > "$TODAY_CACHE/item_${num}.url"
-        printf '%s\t%s\n' "$cat" "$line" >> "$TODAY_CACHE/briefing.manifest"
+        printf '%s' "$cat"  > "$RUN_DIR/item_${num}.cat"
+        printf '%s' "$line" > "$RUN_DIR/item_${num}.line"
+        printf '%s' "$url"  > "$RUN_DIR/item_${num}.url"
+        printf '%s\t%s\n' "$cat" "$line" >> "$RUN_DIR/briefing.manifest"
     done
-    printf '%s' "$n" > "$TODAY_CACHE/item.count"
+    printf '%s' "$n" > "$RUN_DIR/item.count"
 
     # Pass 2: TTS each one-liner into its own clip, up to 4 at a time.
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
-        line="$(cat "$TODAY_CACHE/item_${num}.line")"
-        tts_line "$line" "$TODAY_CACHE/item_${num}.mp3" &
+        line="$(cat "$RUN_DIR/item_${num}.line")"
+        tts_line "$line" "$RUN_DIR/item_${num}.mp3" &
         [ "$(( (i+1) % 4 ))" = 0 ] && wait
     done
     wait
 
     # Need at least the first clip to call it a success.
-    [ -s "$TODAY_CACHE/item_001.mp3" ] || return 1
-    printf 'ok' > "$done_marker"
+    [ -s "$RUN_DIR/item_001.mp3" ] || return 1
+    printf '%s' "$BRIEFING_HASH" > "$RUN_DIR/briefing.hash"
     return 0
 }
 
-prep() { have_net || return 1; gen_briefing; }
+# Decide which run a generation request should use, then build it (foreground).
+# $1="force" → always a brand-new run; otherwise reuse today's run if its inputs
+# are unchanged (same hash), so the scheduler's pre-gen + the play that follows
+# don't generate twice.
+prep() {
+    have_net || return 1
+    build_meta
+    if [ "${1:-}" != "force" ]; then
+        local prev; prev="$(latest_run_today)"
+        if [ -n "$prev" ] && [ "$(cat "$prev/briefing.hash" 2>/dev/null)" = "$BRIEFING_HASH" ]; then
+            RUN_DIR="$prev"; return 0
+        fi
+    fi
+    new_run
+    gen_into_run
+}
 
 # --- playback ----------------------------------------------------------------
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
@@ -283,40 +323,67 @@ play_welcome() {
     CUR_FFPLAY=""; rm -f "$FFPLAY_PID_FILE"
 }
 
+# $1="force" → REFRESH (always build a new run). Otherwise REPLAY/scheduled:
+# play the newest finished run as-is, building one only if none exists yet.
 play() {
-    # single instance — don't start if a briefing is already playing
-    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null && return 0
     build_meta
-    have_net || return 1
-
-    echo $$ > "$PID_FILE"
+    # ATOMIC single-instance lock. Claim the PID file with noclobber BEFORE any
+    # slow work (the network probe). The old guard checked then wrote the PID
+    # file only AFTER an up-to-8s have_net call, leaving a window in which a
+    # double-click — or an overlapping scheduled run — started a SECOND briefing:
+    # two background tracks and two voices at once. This closes that window.
+    if ! ( set -o noclobber; printf '%s' "$$" > "$PID_FILE" ) 2>/dev/null; then
+        local op; op="$(cat "$PID_FILE" 2>/dev/null)"
+        [ -n "$op" ] && kill -0 "$op" 2>/dev/null && return 0   # a briefing is live
+        printf '%s' "$$" > "$PID_FILE"                          # stale lock → take over
+    fi
     trap on_skip SIGUSR1
     trap on_prev SIGUSR2
     trap end_play SIGTERM SIGINT EXIT
 
-    # Generate in the background; DON'T touch the screensaver until the first
-    # one-liner's clip is ready (it keeps playing normally meanwhile).
-    prep >/dev/null 2>&1 & PREP_BG=$!
+    local force="${1:-}"
+    RUN_DIR=""
+    [ "$force" != "force" ] && RUN_DIR="$(latest_run)"   # replay the newest run
 
-    local first="$TODAY_CACHE/item_001.mp3" waited=0
-    while [ ! -s "$first" ] && [ "$waited" -lt 360 ] && [ "$SKIP" = 0 ]; do
-        sleep 0.5; waited=$((waited+1))
-    done
-    [ -s "$first" ] || end_play     # nothing came back — abort quietly (nothing touched yet)
+    if [ -z "$RUN_DIR" ] || [ ! -s "$RUN_DIR/item_001.mp3" ]; then
+        # No run to play (first-ever GENERATE) or a forced REFRESH → build one.
+        # Decide the folder HERE so the background generator and this loop agree
+        # on the path; fill the wait with an instant welcome clip.
+        # Offline? Replay the last good run rather than failing with nothing.
+        if ! have_net; then RUN_DIR="$(latest_run)"; [ -n "$RUN_DIR" ] || end_play; fi
+        if [ "$force" != "force" ] && [ -z "$RUN_DIR" ]; then
+            local prev; prev="$(latest_run_today)"
+            [ -n "$prev" ] && [ "$(cat "$prev/briefing.hash" 2>/dev/null)" = "$BRIEFING_HASH" ] && RUN_DIR="$prev"
+        fi
+        if [ -z "$RUN_DIR" ] || [ ! -s "$RUN_DIR/item_001.mp3" ]; then
+            new_run
+            gen_into_run >/dev/null 2>&1 & PREP_BG=$!
+            local first="$RUN_DIR/item_001.mp3" waited=0
+            while [ ! -s "$first" ] && [ "$waited" -lt 360 ] && [ "$SKIP" = 0 ]; do
+                sleep 0.5; waited=$((waited+1))
+            done
+            if [ ! -s "$first" ]; then
+                # Build gave up (no net / feeds / TTS). Rather than show nothing,
+                # fall back to the last good run if there is one.
+                local fb; fb="$(latest_run)"
+                [ -n "$fb" ] && { RUN_DIR="$fb"; PREP_BG=""; } || end_play
+            fi
+        fi
+    fi
 
     # READY → flip into briefing mode (fade music down, hide HUD, start bgm).
     go_live
     [ -n "$BGM_PID" ] && sleep "$SPEAK_DELAY"
-    play_welcome
+    [ -n "$PREP_BG" ] && play_welcome     # only the still-generating path needs filler
 
     # The grouped left column needs the whole item list up front.
-    set_manifest "$TODAY_CACHE/briefing.manifest"
-    local total; total="$(cat "$TODAY_CACHE/item.count" 2>/dev/null)"
+    set_manifest "$RUN_DIR/briefing.manifest"
+    local total; total="$(cat "$RUN_DIR/item.count" 2>/dev/null)"
     [ -n "$total" ] || total=0
     local idx=1
     while [ "$idx" -le "$total" ] && [ "$idx" -ge 1 ]; do
         local num; num="$(printf '%03d' "$idx")"
-        local mp3="$TODAY_CACHE/item_${num}.mp3"
+        local mp3="$RUN_DIR/item_${num}.mp3"
         SKIP=0; STEP=1
 
         # Wait for this item's clip (up to ~45s); bail early if skipped/stopped.
@@ -328,9 +395,9 @@ play() {
         [ -s "$mp3" ] || { idx=$((idx+1)); continue; }
 
         # Publish the source URL + current index FIRST, then the one-liner caption.
-        set_url "$TODAY_CACHE/item_${num}.url"
+        set_url "$RUN_DIR/item_${num}.url"
         set_idx "$idx"
-        [ -s "$TODAY_CACHE/item_${num}.line" ] && sub_show "$(cat "$TODAY_CACHE/item_${num}.line")" || sub_hide
+        [ -s "$RUN_DIR/item_${num}.line" ] && sub_show "$(cat "$RUN_DIR/item_${num}.line")" || sub_hide
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$mp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
         wait "$CUR_FFPLAY" 2>/dev/null
@@ -360,7 +427,7 @@ watch_loop() {
             last_clean="$today"
         fi
         if [ "$last_prep" != "$today/$target" ] && [ "$now" -ge "$prep_at" ] && [ "$now" -lt "$target" ]; then
-            TODAY="$today"; TODAY_CACHE="$CACHE_DIR/$today"; mkdir -p "$TODAY_CACHE"
+            TODAY="$today"; TODAY_DIR="$CACHE_DIR/$today"
             prep >/dev/null 2>&1; last_prep="$today/$target"
         fi
         if [ "$last_play" != "$today/$target" ] && [ "$now" -ge "$target" ] && [ "$now" -lt $(( target + 5 )) ]; then
@@ -393,9 +460,9 @@ check() {
     printf "  net:   reaching api.x.ai ... "
     if have_net; then echo "ok"; else echo "FAIL (no network, or key rejected)"; echo "──"; return; fi
     printf "  gen:   building today's briefing from feeds ... "
-    if gen_briefing; then
-        local cnt; cnt="$(cat "$TODAY_CACHE/item.count" 2>/dev/null)"
-        echo "ok — ${cnt:-?} items (weather + news feeds + markets), audio cached"
+    if prep force; then
+        local cnt; cnt="$(cat "$RUN_DIR/item.count" 2>/dev/null)"
+        echo "ok — ${cnt:-?} items (weather + news feeds + markets) in ${RUN_DIR#$CACHE_DIR/}"
         echo "  => the briefing pipeline works. If it still doesn't fire on its"
         echo "     own, the scheduler isn't being started (reinstall to refresh"
         echo "     launch.sh), or the screensaver wasn't restarted."
@@ -408,10 +475,7 @@ check() {
 case "$MODE" in
     --check) check ;;
     --prep)  gate_ok || exit 0; prep ;;
-    --play)  gate_ok || exit 0; play ;;                 # play today's cached briefing
-    --fresh) gate_ok || exit 0;                         # discard today's cache, make a new one
-             rm -f "$TODAY_CACHE"/item_*.* "$TODAY_CACHE"/item.count \
-                   "$TODAY_CACHE"/briefing.manifest "$TODAY_CACHE"/briefing_*.done 2>/dev/null
-             play ;;
+    --play)  gate_ok || exit 0; play ;;        # replay the newest run (build only if none)
+    --fresh) gate_ok || exit 0; play force ;;  # REFRESH: always build a new run, keep old ones
     *)       gate_ok || exit 0; watch_loop ;;
 esac

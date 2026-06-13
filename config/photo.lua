@@ -3116,11 +3116,48 @@ local function draw_controls()
     controls_ov:update()
 end
 
--- True if today's briefing is already generated (has cached audio).
-function briefing_has_cache()
-    local files = utils.readdir(DATA_DIR .. "/Briefing/" .. os.date("%Y-%m-%d"), "files")
-    if files then for _, f in ipairs(files) do if f:match("%.mp3$") then return true end end end
-    return false
+-- Newest generated run's date + HHMMSS, or nil. Each generation lives in its own
+-- folder Data/Briefing/<YYYY-MM-DD>/<HHMMSS>/ (grok-briefing.sh), with an
+-- item_001.mp3 once it has audio — so replay/refresh keeps every earlier run and
+-- we can tell the user when the last one was made.
+function briefing_last_run()
+    local base = DATA_DIR .. "/Briefing"
+    local days = utils.readdir(base, "dirs")
+    if not days then return nil end
+    table.sort(days)
+    for di = #days, 1, -1 do
+        local runs = utils.readdir(base .. "/" .. days[di], "dirs")
+        if runs then
+            table.sort(runs)
+            for ri = #runs, 1, -1 do
+                if file_exists(base .. "/" .. days[di] .. "/" .. runs[ri] .. "/item_001.mp3") then
+                    return days[di], runs[ri]
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- True if any finished briefing exists to replay.
+function briefing_has_cache() return briefing_last_run() ~= nil end
+
+-- "2:30 PM · today" / "...· Jun 12" — when the newest run was generated.
+function briefing_last_run_label()
+    local day, hhmmss = briefing_last_run()
+    if not day then return nil end
+    local h  = tonumber(hhmmss:sub(1, 2)) or 0
+    local mn = hhmmss:sub(3, 4)
+    local ap = h < 12 and "AM" or "PM"
+    local h12 = h % 12; if h12 == 0 then h12 = 12 end
+    local when
+    if day == os.date("%Y-%m-%d") then
+        when = "today"
+    else
+        local y, m, d = day:match("(%d+)-(%d+)-(%d+)")
+        when = os.date("%b %d", os.time({ year = y, month = m, day = d, hour = 12 }))
+    end
+    return string.format("last run %d:%s %s · %s", h12, mn, ap, when)
 end
 
 -- Idle chooser: Replay/Refresh once today's briefing exists, else a single
@@ -3160,6 +3197,15 @@ local function draw_menu()
                 BD.preparing = true; BD.t0 = mp.get_time(); LB.spoke = false
             end end)(d.mode) }
         cursor = cursor + bw + g
+    end
+    -- Tiny caption under the buttons telling you when the newest run was made
+    -- (so Replay's source is never a mystery). Refresh keeps the old runs.
+    local lr = briefing_last_run_label and briefing_last_run_label()
+    if lr then
+        parts[#parts + 1] = string.format("{\\an8\\pos(%d,%d)\\fnMontserrat\\fs%d"
+            .. "\\bord0\\shad0\\1c&HCFCFCF&\\1a&H40&}%s",
+            L.x + math.floor(L.w / 2), by + bh + math.floor(fs * 0.45),
+            math.floor(fs * 0.62), lr)
     end
     controls_ov.res_x = L.W; controls_ov.res_y = L.H
     controls_ov.data = table.concat(parts, "\n")

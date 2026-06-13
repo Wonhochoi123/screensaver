@@ -174,7 +174,11 @@ item at a time, and the briefing ends on a closing remark rather than cutting of
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
 for a **Replay / Refresh** chooser (or **Generate** if none is cached yet) to run
-one on demand. When the screensaver is idle, a small line under the clock shows
+one on demand; a small caption shows **when the last run was made**. **Replay**
+plays that last run instantly (no network needed); **Refresh** builds a brand-new
+run but keeps the previous ones, so each generation is saved under
+`Data/Briefing/<date>/<time>/` and a failed refresh never loses the last good
+briefing. When the screensaver is idle, a small line under the clock shows
 **what's coming up** — the next briefing and the quiet-hours window — with the
 sooner of the two on top and brighter as it approaches.
 
