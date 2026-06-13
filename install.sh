@@ -256,6 +256,7 @@ copy_file config/trash-music.sh   "$CFG/trash-music.sh"   0755
 copy_file config/fetch-article.sh "$CFG/fetch-article.sh" 0755
 copy_file config/weather-card.sh  "$CFG/weather-card.sh"  0755
 copy_file config/stock-card.sh    "$CFG/stock-card.sh"    0755
+copy_file config/make-demo.sh     "$CFG/make-demo.sh"     0755
 copy_file config/news-build.py    "$CFG/news-build.py"    0644
 copy_file config/build-title.sh   "$CFG/build-title.sh"   0755
 copy_file config/build-geodb.sh   "$CFG/build-geodb.sh"   0755

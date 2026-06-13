@@ -281,6 +281,32 @@ Place data © [GeoNames](https://www.geonames.org), CC-BY 4.0.
 
 ---
 
+## Record a demo video (lag-free)
+
+```
+~/Screensaver-App/config/make-demo.sh [seconds] [output.mp4]
+# e.g. make-demo.sh 60 ~/demo.mp4        (defaults: 60s, ~/screensaver-demo.mp4)
+```
+
+Normal screen recorders stutter because the H.264 encoder fights the screensaver
+for the machine in real time. `make-demo.sh` removes that contention so the clip
+stays smooth at your screen's **native HD resolution**:
+
+- If your GPU has a hardware encoder (**NVENC / VAAPI / QSV**) the GPU does the
+  encoding and the CPU stays free — it probes each one and uses the first that
+  actually works.
+- Otherwise it captures near-lossless at the cheapest CPU setting, then
+  **re-encodes the polished HD file offline** (after recording), so the capture
+  phase never lags.
+
+Knobs (env): `DEMO_FPS` (60), `DEMO_RES` (e.g. `1920x1080`; default = whole
+screen), `DEMO_AUDIO=0` to skip sound, `DEMO_LAUNCH=1` to start the screensaver
+first and stop it after. Have the screensaver on screen before you run it (or use
+`DEMO_LAUNCH=1`). X11/XWayland only — on a pure Wayland session it points you at
+`wf-recorder` (which also hardware-encodes).
+
+---
+
 ## Settings menu (press `s`)
 
 You don't need a text editor to configure anything. Press **`s`** while the
