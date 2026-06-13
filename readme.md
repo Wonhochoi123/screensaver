@@ -144,17 +144,18 @@ Notes:
 | `c` | Hide / show captions |
 | `x` | Stop the briefing |
 
-The whole briefing is fetched in **one** web-search call as categorized
-**one-liner + detail** items (weather, top news, tech & finance, your tickers, a
-watchlist, and a closing sign-off). While it plays the screen **stays split**:
-the **left** lists every one-liner in the **current category** stacked together,
-with the line being read **right now highlighted in blue** and the rest dimmed,
-so you can see where you are; the **right** auto-shows that line's longer
-explanation — the numbers, context, and why it matters. Nothing to click; it
-tracks the voice line-by-line, fading softly as each new category appears. The
-wheel scrolls a long detail. Each one-liner is its own spoken clip, so `.` / `,`
-step one item at a time, and the briefing ends on a closing remark rather than
-cutting off.
+The whole briefing is fetched in **one** web-search call as categorized items
+(weather, top news, tech & finance, your tickers, a watchlist, and a closing
+sign-off), each carrying its **source link**. While it plays the screen **stays
+split**: the **left** lists every one-liner in the **current category** stacked
+together, with the line being read **right now highlighted in blue** and the rest
+dimmed, so you can see where you are; the **right** auto-fetches and shows that
+line's **real source article**, distilled to readable text. Nothing to click —
+it tracks the voice line-by-line, fading softly as each new category appears, and
+the wheel scrolls a long article. Sources are steered toward readable news sites
+(it avoids YouTube, Reuters, and paywalls); an item with no usable source just
+notes that. Each one-liner is its own spoken clip, so `.` / `,` step one item at
+a time, and the briefing ends on a closing remark rather than cutting off.
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
 for a **Replay / Refresh** chooser (or **Generate** if none is cached yet) to run
