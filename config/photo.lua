@@ -951,7 +951,7 @@ mp.register_script_message("handle-left-click", function()
     -- Reading pane open: the left half is the headline menu — clicking another
     -- linked headline switches the article on the right; clicking empty space
     -- on the left closes the pane. Clicks on the article side just stay put.
-    if RD and RD.on and mouse then
+    if RD and RD.on and not RD.auto and mouse then
         if mouse.x < (RD.x0 or 0) then
             if briefing_boxes then
                 for _, b in ipairs(briefing_boxes) do
@@ -2319,7 +2319,7 @@ mp.register_script_message("month-prev", function() if bo_wake() then return end
 -- else still quits the screensaver.
 mp.register_script_message("handle-right-click", function()
     if bo_wake() then return end
-    if RD and RD.on then rd_close(); return end   -- close the reading pane, don't quit
+    if RD and RD.on and not RD.auto then rd_close(); return end   -- close the reading pane, don't quit
     local mouse = mp.get_property_native("mouse-pos")
     if mouse and gp_section_at and not (briefing_active and briefing_active()) then
         local hv = gp_section_at(mouse.x, mouse.y)
@@ -2715,6 +2715,7 @@ local function draw_briefing()
             briefing_shown = nil
             BC.gen = BC.gen + 1
             briefing_boxes = nil
+            briefing_detail_clear()
             briefing_ov:remove()
         end
         return
@@ -2728,34 +2729,24 @@ local function draw_briefing()
     briefing_shown = txt
     if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
         BC.gen = BC.gen + 1   -- cancel any in-flight fade
-        briefing_boxes = nil  -- no captions on screen → nothing to click
+        briefing_boxes = nil  -- no captions on screen
+        briefing_detail_clear()
         briefing_ov:remove(); return
     end
 
     local w, h = refresh_display_size()
-    -- Reading pane open: captions become the "menu" on the LEFT half (the
-    -- article details fill the right); otherwise they own the full width.
-    local split   = RD and RD.on
+    -- Auto-follow detail: grok-briefing.sh publishes the current one-liner's
+    -- paired explanation to /tmp/ss_briefing.detail (already separated, no fetch).
+    -- When there's a detail we ALWAYS split — the one-liner big on the LEFT, its
+    -- detail on the RIGHT — updating automatically as each line plays. No detail
+    -- (e.g. the welcome greeting) → the caption owns the full width.
+    local dfh = io.open("/tmp/ss_briefing.detail", "r")
+    local detail = dfh and (dfh:read("*a") or "") or ""
+    if dfh then dfh:close() end
+    detail = detail:gsub("%s+$", "")
+    local split   = detail ~= ""
     local cap_cx  = split and math.floor(w * 0.25) or math.floor(w / 2)
     local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
-    -- Per-sentence source links: grok-briefing.sh publishes "sentence<TAB>url"
-    -- lines whose sentences are split the SAME way as above. Only trust them
-    -- when their joined text matches exactly (guards the brief write race); then
-    -- each displayed sentence carries its own clickable reference.
-    local urls = {}
-    local lf = io.open("/tmp/ss_briefing.links", "r")
-    if lf then
-        local ls, lu = {}, {}
-        for line in lf:lines() do
-            local t, u = line:match("^(.-)\t(.*)$")
-            if not t then t, u = line, "" end
-            ls[#ls + 1] = t; lu[#lu + 1] = u
-        end
-        lf:close()
-        if #ls > 0 and table.concat(ls, " ") == txt then
-            sentences = ls; urls = lu
-        end
-    end
     -- Fill the screen below the badge/controls at the top.
     local regionTop = math.floor(h * 0.20)
     local regionH   = h - regionTop - math.floor(h * 0.04)
@@ -2789,35 +2780,22 @@ local function draw_briefing()
     end
     if #lines == 0 then briefing_boxes = nil; briefing_ov:remove(); return end
 
-    -- Stash the positioned lines; briefing_fade animates them in. Each SENTENCE
-    -- gets its own clickable box (full-width band spanning its wrapped lines)
-    -- carrying that sentence's source URL, so captions are independently
-    -- clickable (global — handle-left-click is defined earlier in the chunk,
-    -- and globals don't count toward Lua's 200-local cap).
+    -- Stash the positioned lines; briefing_fade animates them in. Captions are
+    -- no longer clickable (the detail is auto-shown, not link-fetched), so there
+    -- are no caption boxes.
     local y = regionTop + math.floor((regionH - totalH) / 2)   -- centered below the top
     BC.lines, BC.w, BC.h = {}, w, h
-    local boxes, bx0, bx1
-    if split then boxes, bx0, bx1 = {}, math.floor(w * 0.02), math.floor(w * 0.48)
-    else          boxes, bx0, bx1 = {}, math.floor(w * 0.05), math.floor(w * 0.95) end
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
-        local top = y
         BC.lines[#BC.lines + 1] = { text = L.text, cx = cap_cx,
                                     cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
         y = y + lineH
-        if L.si then
-            local b = boxes[L.si]
-            if b then b.y1 = y
-            else boxes[L.si] = { x0 = bx0, x1 = bx1, y0 = top, y1 = y,
-                                 url = urls[L.si] or "" } end
-        end
     end
-    briefing_boxes = {}
-    for _, b in pairs(boxes) do
-        if b.url ~= "" then briefing_boxes[#briefing_boxes + 1] = b end
-    end
+    briefing_boxes = nil
     BC.t0 = mp.get_time(); BC.gen = BC.gen + 1
     briefing_fade()
+    -- Auto-follow: show this line's paired detail on the right (or clear if none).
+    if split then briefing_detail_show(detail) else briefing_detail_clear() end
 end
 mp.add_periodic_timer(0.3, draw_briefing)
 
@@ -3911,13 +3889,31 @@ end)
 -- GROK_LINK_BROWSER=yes in the conf to use the browser instead.
 -- (Globals — the main chunk is at Lua's 200-local cap.)
 -- ----------------------------------------------------------------------------
-RD = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0,
+RD = { ov = mp.create_osd_overlay("ass-events"), on = false, auto = false, gen = 0,
        paras = nil, scroll = 0, url = "", x0 = 0 }
 RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
+
+-- Auto-follow detail pane: driven by draw_briefing (not by clicks). Shows the
+-- current one-liner's paired detail on the right half, updated as each line
+-- plays. No voice pausing and no key bindings — it's part of the briefing, not a
+-- manual reading pane. (Globals — the main chunk is at Lua's 200-local cap.)
+function briefing_detail_show(detail)
+    RD.auto = true
+    RD.on = true
+    RD.gen = RD.gen + 1
+    rd_set_text(detail)        -- sets paras, resets scroll, draws on the right half
+end
+function briefing_detail_clear()
+    if RD.on and RD.auto then
+        RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
+        RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
+    end
+end
 
 function rd_close()
     if not RD.on then return end
     RD.on = false
+    RD.auto = false
     RD.gen = RD.gen + 1
     RD.paras = nil
     RD.ov:remove(); RD.ov.data = ""
@@ -4010,10 +4006,12 @@ function rd_draw()
             .. rrect_path(sbx, thumb_y, sbw, thumb_h, math.floor(sbw / 2)) .. "{\\p0}"
     end
 
-    ev[#ev + 1] = string.format(
-        "{\\an2\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad0\\1c&H808080&}"
-        .. "SCROLL ↑↓\\h\\h\\h•\\h\\h\\hESC close",
-        x0 + math.floor((w - x0) / 2), h - math.floor(pad * 0.5), math.floor(fs * 0.8))
+    if not RD.auto then
+        ev[#ev + 1] = string.format(
+            "{\\an2\\pos(%d,%d)\\fnMontserrat SemiBold\\fs%d\\bord0\\shad0\\1c&H808080&}"
+            .. "SCROLL ↑↓\\h\\h\\h•\\h\\h\\hESC close",
+            x0 + math.floor((w - x0) / 2), h - math.floor(pad * 0.5), math.floor(fs * 0.8))
+    end
 
     RD.ov.res_x = w; RD.ov.res_y = h
     RD.ov.data = table.concat(ev, "\n")
