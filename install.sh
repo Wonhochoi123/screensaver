@@ -254,6 +254,7 @@ copy_file config/build-thumb.sh   "$CFG/build-thumb.sh"   0755
 copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755
 copy_file config/trash-music.sh   "$CFG/trash-music.sh"   0755
 copy_file config/fetch-article.sh "$CFG/fetch-article.sh" 0755
+copy_file config/fetch-chart.sh   "$CFG/fetch-chart.sh"   0755
 copy_file config/build-title.sh   "$CFG/build-title.sh"   0755
 copy_file config/build-geodb.sh   "$CFG/build-geodb.sh"   0755
 copy_file config/geo-resolve.sh   "$CFG/geo-resolve.sh"   0755

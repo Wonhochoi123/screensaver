@@ -2848,7 +2848,7 @@ local function draw_briefing()
             local b = boxes[L.si]
             if b then b.y1 = y
             else boxes[L.si] = { x0 = bx0, x1 = bx1, y0 = top, y1 = y,
-                                 url = urls[L.si] or "" } end
+                                 url = urls[L.si] or "", text = sentences[L.si] or "" } end
         end
     end
     briefing_boxes = {}
@@ -3954,6 +3954,27 @@ RD = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0,
        paras = nil, scroll = 0, url = "", x0 = 0, video = false }
 RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
 
+-- Rectangular BGRA size guard (overlay-add SIGBUSes if the file is short).
+function bgra_ok(path, w, h)
+    local fi = utils.file_info(path)
+    return fi and fi.size and fi.size >= w * h * 4
+end
+
+-- Pull a stock ticker out of an item's text: the first ALL-CAPS 2–5 letter word
+-- that isn't a common acronym. nil when the item isn't about a single stock.
+function extract_ticker(s)
+    local stop = { FOR = 1, THE = 1, AND = 1, USD = 1, CEO = 1, CFO = 1, IPO = 1,
+        US = 1, USA = 1, UK = 1, EU = 1, GDP = 1, CPI = 1, FED = 1, ETF = 1, AI = 1,
+        NEW = 1, NYSE = 1, ALL = 1, WHY = 1, ITS = 1, NOW = 1, ONE = 1, TWO = 1,
+        SEC = 1, FBI = 1, CDC = 1, WHO = 1, NASA = 1, OPEC = 1 }
+    for tok in (s or ""):gmatch("[A-Za-z]+") do
+        if tok:match("^%u%u+$") and #tok >= 2 and #tok <= 5 and not stop[tok] then
+            return tok
+        end
+    end
+    return nil
+end
+
 -- Recognise links that mpv can play directly (it uses yt-dlp for the sites).
 function is_video_url(u)
     u = (u or ""):lower()
@@ -3982,6 +4003,8 @@ function rd_play_video(url)
     RD.on = true; RD.video = true; RD.url = url
     RD.gen = RD.gen + 1
     local gen = RD.gen
+    pcall(mp.command_native, { "overlay-remove", 5 })   -- no chart behind a video
+    RD.chart = nil
     briefing_paused = true
     voice_pause(true); bgm_pause(true)
     briefing_shown = nil
@@ -4011,6 +4034,8 @@ function rd_close()
     for _, n in ipairs({ "ss-rd-esc", "ss-rd-up", "ss-rd-down" }) do
         mp.remove_key_binding(n)
     end
+    pcall(mp.command_native, { "overlay-remove", 5 })   -- remove the stock chart
+    RD.chart = nil
     if was_video then
         -- Close the video window if it's still up, and resume the briefing music.
         mp.commandv("run", "/bin/sh", "-c",
@@ -4051,6 +4076,16 @@ function rd_draw()
     end
 
     local top_y  = math.floor(h * 0.20)              -- aligned with the captions region
+    -- A stock chart, when ready, sits at the top of the pane; the article text
+    -- flows below it. overlay-add bitmaps render above ASS, so the chart simply
+    -- covers this reserved strip.
+    if RD.chart and RD.chart.ready and RD.chart.path and bgra_ok(RD.chart.path, RD.chart.w, RD.chart.h) then
+        mp.command_native({ "overlay-add", 5, RD.chart.x, RD.chart.y, RD.chart.path,
+            0, "bgra", RD.chart.w, RD.chart.h, RD.chart.w * 4 })
+        top_y = RD.chart.y + RD.chart.h + math.floor(h * 0.02)
+    else
+        pcall(mp.command_native, { "overlay-remove", 5 })
+    end
     local foot_h = math.floor(fs * 2.2)
     local gapH   = math.floor(lh * 0.45)
     local availH = h - top_y - foot_h - math.floor(h * 0.04)
@@ -4144,7 +4179,40 @@ function rd_open(url)
     local gen = RD.gen
     RD.paras = { { text = "FETCHING…", head = true } }
     RD.scroll = 0
+    pcall(mp.command_native, { "overlay-remove", 5 })   -- drop any previous chart
+    RD.chart = nil
     if not first then briefing_redraw() end   -- recolour: new item blue, old reverts
+
+    -- Stock item? Pull the ticker from the clicked caption's text and fetch a
+    -- live chart to sit at the top of the right pane (above the article text).
+    local itext = ""
+    if briefing_boxes then
+        for _, b in ipairs(briefing_boxes) do
+            if b.url == url then itext = b.text or ""; break end
+        end
+    end
+    local tk = extract_ticker(itext)
+    if tk then
+        local w, h = refresh_display_size()
+        if w > 0 then
+            local x0  = math.floor(w * 0.5)
+            local pad = math.floor(h * 0.04)
+            local cw  = w - x0 - pad * 2;  cw = cw - cw % 2
+            local ch  = math.floor(cw / 2.2); ch = ch - ch % 2
+            RD.chart = { x = x0 + pad, y = math.floor(h * 0.20), w = cw, h = ch, ready = false }
+            local out = "/tmp/ss_chart.bgra"
+            os.remove(out)
+            mp.command_native_async({
+                name = "subprocess", playback_only = false,
+                args = { CFG_DIR .. "/fetch-chart.sh", tk, tostring(cw), tostring(ch), out },
+            }, function()
+                if not RD.on or gen ~= RD.gen or not RD.chart then return end
+                if bgra_ok(out, RD.chart.w, RD.chart.h) then
+                    RD.chart.path = out; RD.chart.ready = true; rd_draw()
+                end
+            end)
+        end
+    end
     mp.add_forced_key_binding("ESC",  "ss-rd-esc",  function() rd_close() end)
     mp.add_forced_key_binding("UP",   "ss-rd-up",   function() rd_scroll(-1) end, { repeatable = true })
     mp.add_forced_key_binding("DOWN", "ss-rd-down", function() rd_scroll(1) end,  { repeatable = true })
