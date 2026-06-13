@@ -2770,10 +2770,9 @@ local function draw_briefing()
     end
 
     local w, h = refresh_display_size()
-    -- Reading pane open (article mode): captions become the "menu" on the LEFT
-    -- half (the article fills the right). Video mode covers the screen with its
-    -- own window, so captions keep the full width there.
-    local split   = RD and RD.on and not RD.video
+    -- Reading pane open: captions become the "menu" on the LEFT half; the right
+    -- half holds the article text (or the video, confined there via margins).
+    local split   = RD and RD.on
     local cap_cx  = split and math.floor(w * 0.25) or math.floor(w / 2)
     local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
     -- Per-sentence source links: grok-briefing.sh publishes "sentence<TAB>url"
@@ -3179,6 +3178,7 @@ end
 -- while the briefing is live). Only photo indices are ever selected, so videos
 -- never load.
 function backdrop_tick()
+    if RD and RD.video then return end   -- a clip is playing in the right half; don't advance
     if not LB.hud_off or not LB.photos or #LB.photos == 0 then return end
     LB.pidx = (LB.pidx % #LB.photos) + 1
     mp.set_property_number("playlist-pos", LB.photos[LB.pidx])
@@ -3233,8 +3233,12 @@ local function logo_tick()
     end
     if not logo then return end
 
-    -- Mute the whole screensaver while a briefing speaks; restore after.
-    if active and not LB.muted then
+    -- Mute the whole screensaver while a briefing speaks; restore after. EXCEPT
+    -- while a clicked video plays in the right half — that IS the main player, so
+    -- it must keep its sound (the spoken voice is paused meanwhile).
+    if RD and RD.video then
+        if LB.muted then mp.set_property_number("volume", LB.vol or 70); LB.muted = false end
+    elseif active and not LB.muted then
         LB.vol = mp.get_property_number("volume") or LB.vol
         mp.set_property_number("volume", 0); LB.muted = true
     elseif not active and LB.muted then
@@ -3996,31 +4000,36 @@ function voice_pause(stop)   -- STOP/CONT the spoken-voice ffplay
         .. (stop and "STOP" or "CONT") .. ' "$p" 2>/dev/null')
 end
 
--- A video link plays in its own mpv window (right half, best effort — some
--- Wayland compositors ignore client positioning) while the briefing audio is
--- paused. Closing that window (q) resumes everything via the exit callback.
+-- A video link plays in the screensaver's OWN player, confined to the right
+-- half with video margins (the only way to land it there on Wayland, where a
+-- second window can't be positioned). Captions move to the left; the briefing
+-- voice + bgm pause. ESC / Q / the clip ending restores everything.
 function rd_play_video(url)
-    RD.on = true; RD.video = true; RD.url = url
-    RD.gen = RD.gen + 1
-    local gen = RD.gen
     pcall(mp.command_native, { "overlay-remove", 5 })   -- no chart behind a video
     RD.chart = nil
+    RD.ov:remove(); RD.ov.data = ""                     -- no article text either
+    RD.on = true; RD.video = true; RD.url = url
+    RD.gen = RD.gen + 1
+    RD.x0 = math.floor((refresh_display_size()) / 2)    -- left half = the headline menu
+    -- Remember what to come back to.
+    RD.vsaved_pos = mp.get_property_number("playlist-pos")
     briefing_paused = true
     voice_pause(true); bgm_pause(true)
+    -- Confine playback to the right half, clear the backdrop blur, and play the
+    -- clip as an appended item (mpv's ytdl hook resolves YouTube & co).
+    mp.set_property("video-margin-ratio-left", "0.5")
+    mp.set_property("vf", "")
+    mp.commandv("loadfile", url, "append-play")
+    RD.video_idx = (mp.get_property_number("playlist-count") or 1) - 1
+    mp.add_forced_key_binding("ESC", "ss-rd-esc",  function() rd_close() end)
+    mp.add_forced_key_binding("q",   "ss-rd-q",    function() rd_close() end)
     briefing_shown = nil
-    if briefing_redraw then briefing_redraw() end
-    mp.command_native_async({
-        name = "subprocess", playback_only = false,
-        args = { "/bin/sh", "-c",
-            'exec mpv --no-config --force-window=yes --ontop --no-terminal '
-            .. '--geometry=50%x90%+99%+5% --autofit=49%x90% --keep-open=no '
-            .. '--ytdl=yes --input-ipc-server=/tmp/ss_video.sock --title="ss-video" -- "$1"',
-            "_", url },
-    }, function()
-        if gen ~= RD.gen then return end     -- a newer open/close superseded us
-        rd_close()
-    end)
+    draw_briefing()                                     -- captions re-flow to the left
 end
+-- The clip ending (eof) closes the pane just like pressing ESC.
+mp.register_event("end-file", function(e)
+    if RD and RD.video and e and e.reason == "eof" then rd_close() end
+end)
 
 function rd_close()
     if not RD.on then return end
@@ -4031,16 +4040,21 @@ function rd_close()
     RD.gen = RD.gen + 1
     RD.paras = nil
     RD.ov:remove(); RD.ov.data = ""
-    for _, n in ipairs({ "ss-rd-esc", "ss-rd-up", "ss-rd-down" }) do
+    for _, n in ipairs({ "ss-rd-esc", "ss-rd-q", "ss-rd-up", "ss-rd-down" }) do
         mp.remove_key_binding(n)
     end
     pcall(mp.command_native, { "overlay-remove", 5 })   -- remove the stock chart
     RD.chart = nil
     if was_video then
-        -- Close the video window if it's still up, and resume the briefing music.
-        mp.commandv("run", "/bin/sh", "-c",
-            "printf '%s\\n' '{\"command\":[\"quit\"]}' | socat -t1 - UNIX-CONNECT:/tmp/ss_video.sock 2>/dev/null; rm -f /tmp/ss_video.sock")
+        -- Undo the right-half confine, drop the appended clip, return to where
+        -- the backdrop was, and resume the briefing music. Loading the photo
+        -- re-applies its blur via the on_load hook, so the backdrop comes back.
+        mp.set_property("video-margin-ratio-left", "0")
+        if RD.vsaved_pos then mp.set_property_number("playlist-pos", RD.vsaved_pos) end
+        if RD.video_idx then pcall(mp.commandv, "playlist-remove", tostring(RD.video_idx)) end
+        RD.video_idx = nil
         bgm_pause(false)
+        mp.add_timeout(0.3, function() if not (RD and RD.video) then backdrop_tick() end end)
     end
     -- Resume the briefing voice we paused on open (no-op if it ended), and let
     -- the captions take the full width again (recoloured: nothing open now).
@@ -4170,6 +4184,7 @@ function rd_set_text(txt)
 end
 
 function rd_open(url)
+    if RD.video then rd_close() end       -- tear a playing clip down before switching
     if is_video_url(url) then return rd_play_video(url) end
     local first = not RD.on               -- switching articles keeps the split as-is
     RD.url = url
