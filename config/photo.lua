@@ -902,9 +902,12 @@ mp.observe_property("pause", "bool", function(_, v) set_pause_indicator(v or fal
 
 mp.register_script_message("ss-toggle-pause", function()
     if bo_wake() then return end
-    -- During a briefing OR quiet hours the music is held silent and must not be
-    -- (re)started by space / clicks.
-    if (briefing_active and briefing_active()) or (is_sleep_time and is_sleep_time()) then return end
+    -- During a briefing, SPACE pauses/resumes the spoken voice (same as 'b').
+    -- During quiet hours the music is held silent and must not be (re)started.
+    if briefing_active and briefing_active() then
+        mp.commandv("script-message", "ss-briefing-pause"); return
+    end
+    if is_sleep_time and is_sleep_time() then return end
     local newp = not mp.get_property_bool("pause")
     mp.set_property_bool("pause", newp)
     local v = newp and "true" or "false"
@@ -926,6 +929,8 @@ end
 
 mp.register_script_message("hud-zoom-in", function()
     if bo_wake() then return end
+    -- During a briefing the arrows scroll the right pane instead of zooming.
+    if briefing_active and briefing_active() then if RD and RD.on then rd_scroll(-1) end; return end
     cur.auto = false
     if not cur.lat then return end
     local ni = math.min(#ZOOMS, cur.zidx + 1)
@@ -936,6 +941,7 @@ end)
 
 mp.register_script_message("hud-zoom-out", function()
     if bo_wake() then return end
+    if briefing_active and briefing_active() then if RD and RD.on then rd_scroll(1) end; return end
     cur.auto = false
     if not cur.lat then return end
     local ni = math.max(1, cur.zidx - 1)
@@ -1819,9 +1825,14 @@ mp.register_script_message("ss-wheel", function(dir)
     end
 end)
 
--- Slideshow prev/next (arrow keys). Photo-only during a briefing.
+-- Slideshow prev/next (arrow keys). During a briefing the same arrows step
+-- through the briefing items instead (previous / next one-liner).
 mp.register_script_message("ss-nav", function(dir)
     if bo_wake() then return end
+    if briefing_active and briefing_active() then
+        mp.commandv("script-message", dir == "next" and "ss-briefing-skip" or "ss-briefing-prev")
+        return
+    end
     local d = (dir == "next") and 1 or -1
     if backdrop_step and backdrop_step(d) then return end
     mp.command(d > 0 and "playlist-next" or "playlist-prev")
@@ -2717,6 +2728,7 @@ local function draw_briefing()
             BC.gen = BC.gen + 1
             BC.group = nil
             briefing_boxes = nil
+            if WX then WX.card = nil end     -- next briefing refetches the weather
             briefing_detail_clear()
             briefing_ov:remove()
         end
@@ -2847,9 +2859,15 @@ local function draw_briefing()
         BC.t0 = mp.get_time() - 100
     end
     briefing_fade()
-    -- Auto-follow: fetch this line's source article on the right (or clear the
-    -- pane for the centered welcome/closing lines).
-    if split then briefing_article_show(url) else briefing_detail_clear() end
+    -- Auto-follow on the right: the WEATHER item draws a weather card; every
+    -- other grouped item fetches its source article; centered welcome/closing
+    -- lines clear the pane entirely.
+    if split then
+        if mani[cur] and mani[cur].cat == "WEATHER" then wx_show()
+        else briefing_article_show(url) end
+    else
+        briefing_detail_clear()
+    end
 end
 mp.add_periodic_timer(0.3, draw_briefing)
 
@@ -3948,6 +3966,7 @@ RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
 -- current one-liner's source article on the right half, refreshing as each line
 -- plays. No voice pausing and no key bindings — it's part of the briefing.
 function briefing_article_show(url)
+    if wx_hide then wx_hide() end          -- leaving the weather item → drop its card
     RD.auto = true
     RD.on = true
     if url == "" then          -- filtered-out / sourceless item (weather, etc.)
@@ -3981,6 +4000,7 @@ function briefing_article_show(url)
     end)
 end
 function briefing_detail_clear()
+    if wx_hide then wx_hide() end
     if RD.on and RD.auto then
         RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
         RD.url = ""; RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
@@ -4157,4 +4177,241 @@ function rd_open(url)
         if txt == "" then txt = "Could not load the page.\n\n" .. url end
         rd_set_text(txt)
     end)
+end
+
+-- ----------------------------------------------------------------------------
+-- Weather card (right pane). When the active briefing line is the WEATHER item,
+-- the right half draws a Google-Weather-style card instead of fetching a source
+-- article: current conditions with a vector glyph + big temperature, hi/lo,
+-- wind, humidity, sunrise/sunset, and an 8-hour strip with a temperature
+-- sparkline. Data comes from config/weather-card.sh (Open-Meteo, no API key).
+-- (Globals — the main chunk is at Lua's 200-local cap.)
+-- ----------------------------------------------------------------------------
+WX = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0, card = nil }
+WX.ov.z = 1900
+
+-- Draw one weather glyph as ASS vector shapes into ev (a list of \pos events).
+-- kind ∈ sun moon pcloud npcloud cloud fog drizzle rain snow storm. cx,cy is the
+-- glyph centre, s its overall radius. Sun is yellow, clouds grey, rain blue.
+function wx_glyph(ev, kind, cx, cy, s)
+    cx, cy, s = math.floor(cx), math.floor(cy), s
+    local YEL, GRY, BLU, WHT = "&H00D7FF&", "&HE6E6E6&", "&HFFB464&", "&HF6F6F6&"
+    local function fill(path, col, a)
+        ev[#ev + 1] = string.format(
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c%s\\1a&H%02X&\\p1}%s{\\p0}", col, a or 0x10, path)
+    end
+    local function disc(x, y, r, col, a) fill(ass_circle(math.floor(x), math.floor(y), math.floor(r)), col, a) end
+    local function sun(x, y, r)
+        local r1, r2, wd = r * 1.05, r * 1.55, math.max(2, r * 0.13)
+        local p = {}
+        for i = 0, 7 do
+            local a = i * math.pi / 4
+            local dx, dy, px, py = math.cos(a), math.sin(a), -math.sin(a), math.cos(a)
+            local function pt(rr, sg) return math.floor(x + dx * rr + px * wd * sg), math.floor(y + dy * rr + py * wd * sg) end
+            local x1, y1 = pt(r1, 1); local x2, y2 = pt(r2, 1); local x3, y3 = pt(r2, -1); local x4, y4 = pt(r1, -1)
+            p[#p + 1] = string.format("m %d %d l %d %d %d %d %d %d", x1, y1, x2, y2, x3, y3, x4, y4)
+        end
+        fill(table.concat(p, " "), YEL, 0x10)
+        disc(x, y, r * 0.66, YEL, 0x00)
+    end
+    local function moon(x, y, r) disc(x, y, r * 0.78, "&HE8F4F4&", 0x10) end
+    local function cloud(x, y, r, col)
+        col = col or GRY
+        disc(x - r * 0.55, y + r * 0.18, r * 0.5, col, 0x10)
+        disc(x + r * 0.55, y + r * 0.20, r * 0.45, col, 0x10)
+        disc(x + r * 0.02, y - r * 0.18, r * 0.6, col, 0x10)
+        fill(rrect_path(math.floor(x - r), math.floor(y + r * 0.16),
+            math.floor(r * 2), math.floor(r * 0.6), math.floor(r * 0.3)), col, 0x10)
+    end
+    local function drops(x, y, r, n, len, col)
+        local wd = math.max(2, r * 0.12)
+        for i = 1, n do
+            local dx = x + (i - (n + 1) / 2) * r * 0.55
+            local x2 = dx - r * 0.18
+            fill(string.format("m %d %d l %d %d l %d %d l %d %d",
+                math.floor(dx - wd), math.floor(y), math.floor(dx + wd), math.floor(y),
+                math.floor(x2 + wd), math.floor(y + len), math.floor(x2 - wd), math.floor(y + len)), col, 0x10)
+        end
+    end
+    local function flakes(x, y, r, n)
+        for i = 1, n do
+            local dx = x + (i - (n + 1) / 2) * r * 0.55
+            disc(dx, y + (i % 2) * r * 0.3 + r * 0.15, r * 0.13, WHT, 0x10)
+        end
+    end
+    local function bolt(x, y, r)
+        fill(string.format("m %d %d l %d %d l %d %d l %d %d l %d %d l %d %d",
+            math.floor(x + r * 0.12), math.floor(y - r * 0.1), math.floor(x - r * 0.3), math.floor(y + r * 0.5),
+            math.floor(x), math.floor(y + r * 0.5), math.floor(x - r * 0.22), math.floor(y + r),
+            math.floor(x + r * 0.36), math.floor(y + r * 0.28), math.floor(x + r * 0.06), math.floor(y + r * 0.28)),
+            YEL, 0x00)
+    end
+    if kind == "sun" then sun(cx, cy, s * 0.62)
+    elseif kind == "moon" then moon(cx, cy, s)
+    elseif kind == "pcloud" then sun(cx - s * 0.3, cy - s * 0.32, s * 0.4); cloud(cx + s * 0.18, cy + s * 0.18, s * 0.6)
+    elseif kind == "npcloud" then moon(cx - s * 0.3, cy - s * 0.3, s * 0.8); cloud(cx + s * 0.18, cy + s * 0.18, s * 0.6)
+    elseif kind == "cloud" then cloud(cx, cy, s * 0.8)
+    elseif kind == "fog" then
+        cloud(cx, cy - s * 0.2, s * 0.72)
+        for i = 0, 2 do
+            fill(rrect_path(math.floor(cx - s * 0.7), math.floor(cy + s * 0.45 + i * s * 0.28),
+                math.floor(s * 1.4), math.max(2, math.floor(s * 0.1)), math.floor(s * 0.05)), GRY, 0x20)
+        end
+    elseif kind == "drizzle" then cloud(cx, cy - s * 0.25, s * 0.72); drops(cx, cy + s * 0.5, s * 0.7, 3, s * 0.32, BLU)
+    elseif kind == "rain" then cloud(cx, cy - s * 0.25, s * 0.72); drops(cx, cy + s * 0.5, s * 0.8, 4, s * 0.5, BLU)
+    elseif kind == "snow" then cloud(cx, cy - s * 0.25, s * 0.72); flakes(cx, cy + s * 0.5, s * 0.8, 4)
+    elseif kind == "storm" then cloud(cx, cy - s * 0.25, s * 0.72); bolt(cx, cy + s * 0.35, s * 0.7)
+    else cloud(cx, cy, s * 0.8) end
+end
+
+-- Parse weather-card.sh output (TAB-delimited) into a card table, or false.
+function wx_parse(t)
+    if not t or t == "" then return false end
+    local c = { hours = {} }
+    for line in (t .. "\n"):gmatch("(.-)\n") do
+        local tag, rest = line:match("^(%u+)\t(.*)$")
+        if tag == "PLACE" then c.place = rest
+        elseif tag == "NOW" then
+            local a, b, d, k = rest:match("^(.-)\t(.-)\t(.-)\t(.-)\t.*$")
+            c.temp, c.feels, c.desc, c.kind = tonumber(a), tonumber(b), d, k
+        elseif tag == "HILO" then local hi, lo = rest:match("^(.-)\t(.*)$"); c.hi, c.lo = tonumber(hi), tonumber(lo)
+        elseif tag == "WIND" then c.wind = rest
+        elseif tag == "HUM" then c.hum = rest
+        elseif tag == "SUN" then local a, b = rest:match("^(.-)\t(.*)$"); c.sunrise, c.sunset = a, b
+        elseif tag == "HOUR" then
+            local lbl, tp, k, pp = rest:match("^(.-)\t(.-)\t(.-)\t(.*)$")
+            c.hours[#c.hours + 1] = { lbl = lbl, temp = tonumber(tp), kind = k, pop = tonumber(pp) or 0 }
+        end
+    end
+    if not c.temp then return false end
+    return c
+end
+
+function wx_hide()
+    if WX.on then WX.on = false; WX.gen = WX.gen + 1; WX.ov:remove(); WX.ov.data = "" end
+end
+
+-- Show the weather card (called from draw_briefing for the WEATHER item). Hides
+-- the article pane, draws a LOADING placeholder, then fetches + draws the card.
+-- WX.card is cached for the life of the briefing (the script also caches 20 min).
+function wx_show()
+    if RD and RD.on then
+        RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
+        RD.url = ""; RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
+    end
+    WX.on = true
+    if WX.card ~= nil then wx_draw(); return end
+    WX.gen = WX.gen + 1
+    local gen = WX.gen
+    wx_draw()                                   -- LOADING placeholder
+    local out = string.format("/tmp/ss_weather_%d.txt", gen)
+    os.remove(out)
+    mp.command_native_async({ name = "subprocess", playback_only = false,
+        args = { CFG_DIR .. "/weather-card.sh", out } }, function()
+        local f = io.open(out, "r")
+        local t = f and (f:read("*a") or "") or ""
+        if f then f:close() end
+        os.remove(out)
+        if not WX.on or gen ~= WX.gen then return end
+        WX.card = wx_parse(t)
+        wx_draw()
+    end)
+end
+
+function wx_draw()
+    if not WX.on then return end
+    local w, h = refresh_display_size()
+    if w <= 0 then return end
+    local x0 = math.floor(w * 0.5)
+    local pad = math.floor(h * 0.04)
+    local top_y = math.floor(h * 0.20)
+    local availH = h - top_y - math.floor(h * 0.06)
+    local cx = x0 + math.floor((w - x0) / 2)
+    local ev = {}
+    -- Divider, matching the article pane.
+    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\1a&HC8&\\p1}"
+        .. string.format("m %d %d l %d %d %d %d %d %d",
+            x0, top_y, x0 + 2, top_y, x0 + 2, top_y + availH, x0, top_y + availH) .. "{\\p0}"
+    local function txt(s, x, y, fs, col, an, font, alpha)
+        ev[#ev + 1] = string.format(
+            "{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\fsp%d\\1c%s%s\\alpha&H%02X&}%s",
+            an or 5, math.floor(x), math.floor(y), font or "Montserrat ExtraBold", math.floor(fs),
+            math.floor(fs * 0.02 + 0.5), col or "&HFFFFFF&", glow(fs), alpha or 0x18, s)
+    end
+    local function finish() WX.ov.res_x = w; WX.ov.res_y = h; WX.ov.data = table.concat(ev, "\n"); WX.ov:update() end
+    local c = WX.card
+    if c == nil then
+        txt("LOADING WEATHER…", cx, top_y + math.floor(availH * 0.4), math.floor(h * 0.030), "&HFFFFFF&", 5,
+            "Montserrat SemiBold", 0x30); finish(); return
+    end
+    if c == false then
+        txt("Weather unavailable", cx, top_y + math.floor(availH * 0.4), math.floor(h * 0.028), "&HBBBBBB&", 5,
+            "Montserrat SemiBold", 0x30); finish(); return
+    end
+    local y = top_y + math.floor(h * 0.005)
+    txt((c.place or ""):upper(), cx, y, math.floor(h * 0.022), "&HCFCFCF&", 5, "Montserrat SemiBold", 0x30)
+    y = y + math.floor(h * 0.05)
+    -- Current conditions: glyph on the left, big temperature on the right.
+    local gs = math.floor(h * 0.07)
+    local gy = y + gs
+    wx_glyph(ev, c.kind or "cloud", cx - math.floor((w - x0) * 0.22), gy, gs)
+    txt(c.temp .. "°", cx + math.floor((w - x0) * 0.05), gy, math.floor(h * 0.11), "&HFFFFFF&", 5)
+    y = gy + gs + math.floor(h * 0.012)
+    txt(c.desc or "", cx, y, math.floor(h * 0.030), "&HFFFFFF&", 5); y = y + math.floor(h * 0.038)
+    if c.feels then
+        txt("Feels like " .. c.feels .. "°", cx, y, math.floor(h * 0.022), "&HBBBBBB&", 5, "Montserrat SemiBold", 0x28)
+        y = y + math.floor(h * 0.05)
+    end
+    -- Stat row: high · low · wind · humidity.
+    local cells = { { "HIGH", c.hi and c.hi .. "°" or "—" }, { "LOW", c.lo and c.lo .. "°" or "—" },
+                    { "WIND", c.wind or "—" }, { "HUMIDITY", c.hum or "—" } }
+    local cw = (w - x0 - pad * 2) / #cells
+    for i, cell in ipairs(cells) do
+        local cxx = x0 + pad + cw * (i - 0.5)
+        txt(cell[1], cxx, y, math.floor(h * 0.017), "&H9A9A9A&", 5, "Montserrat SemiBold", 0x40)
+        txt(cell[2], cxx, y + math.floor(h * 0.032), math.floor(h * 0.027), "&HFFFFFF&", 5)
+    end
+    y = y + math.floor(h * 0.075)
+    if c.sunrise then
+        txt("SUNRISE " .. c.sunrise .. "      SUNSET " .. (c.sunset or ""), cx, y,
+            math.floor(h * 0.020), "&HCFCFCF&", 5, "Montserrat SemiBold", 0x30)
+        y = y + math.floor(h * 0.05)
+    end
+    -- Hourly strip with a temperature sparkline.
+    local hrs = c.hours
+    if #hrs > 0 then
+        local bx0, bw = x0 + pad, w - x0 - pad * 2
+        local cwh = bw / #hrs
+        local labY = y
+        local glyY = y + math.floor(h * 0.028)
+        local sparkTop = glyY + math.floor(h * 0.030)
+        local sparkH = math.floor(h * 0.07)
+        local tmin, tmax = 1e9, -1e9
+        for _, hh in ipairs(hrs) do tmin = math.min(tmin, hh.temp); tmax = math.max(tmax, hh.temp) end
+        if tmax <= tmin then tmax = tmin + 1 end
+        local pts = {}
+        for i, hh in ipairs(hrs) do
+            pts[i] = { x = bx0 + cwh * (i - 0.5),
+                       y = sparkTop + sparkH - (hh.temp - tmin) / (tmax - tmin) * sparkH }
+        end
+        local seg = {}
+        for i, p in ipairs(pts) do
+            seg[#seg + 1] = string.format("%s %d %d", i == 1 and "m" or "l", math.floor(p.x), math.floor(p.y))
+        end
+        ev[#ev + 1] = string.format(
+            "{\\an7\\pos(0,0)\\1a&HFF&\\bord%d\\3c&HFFB464&\\3a&H30&\\shad0\\p1}%s{\\p0}",
+            math.max(1, math.floor(h * 0.0022)), table.concat(seg, " "))
+        for i, hh in ipairs(hrs) do
+            local px = pts[i].x
+            txt(hh.lbl, px, labY, math.floor(h * 0.016), "&HBBBBBB&", 5, "Montserrat SemiBold", 0x40)
+            wx_glyph(ev, hh.kind, px, glyY + math.floor(h * 0.010), math.floor(h * 0.017))
+            txt(hh.temp .. "°", px, pts[i].y - math.floor(h * 0.022), math.floor(h * 0.018),
+                "&HFFFFFF&", 5, "Montserrat SemiBold", 0x20)
+            if hh.pop and hh.pop >= 20 then
+                txt(hh.pop .. "%", px, sparkTop + sparkH + math.floor(h * 0.024), math.floor(h * 0.015),
+                    "&HFFB464&", 5, "Montserrat SemiBold", 0x20)
+            end
+        end
+    end
+    finish()
 end

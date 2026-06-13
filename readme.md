@@ -138,11 +138,15 @@ Notes:
 
 | Key | Does |
 |---|---|
-| `.` | Skip to next section |
-| `,` | Previous section |
-| `b` | Pause / resume the briefing |
-| `c` | Hide / show captions |
+| `←` / `→` | Previous / next item |
+| `Space` | Pause / resume the voice |
+| `↑` / `↓` | Scroll the right pane |
 | `x` | Stop the briefing |
+| `c` | Hide / show captions |
+| `.` `,` `b` | Old aliases for next / previous / pause (still work) |
+
+While a briefing plays the arrows, `Space`, and the wheel do the obvious thing —
+no need to remember the letter keys.
 
 The whole briefing is fetched in **one** web-search call as categorized items
 (weather, top news, tech & finance, your tickers, a watchlist, and a closing
@@ -150,11 +154,15 @@ sign-off), each carrying its **source link**. While it plays the screen **stays
 split**: the **left** lists every one-liner in the **current category** stacked
 together, with the line being read **right now highlighted in blue** and the rest
 dimmed, so you can see where you are; the **right** auto-fetches and shows that
-line's **real source article**, distilled to readable text. Nothing to click —
-it tracks the voice line-by-line, fading softly as each new category appears, and
+line's **real source article**, distilled to readable text. The one exception is
+the **weather** item, whose right pane is a **live weather card** — a vector
+condition glyph + big temperature, today's high/low, wind, humidity, sunrise and
+sunset, and an **8-hour strip with a temperature sparkline** — pulled from
+[Open-Meteo](https://open-meteo.com) (free, no API key). Nothing to click — it
+tracks the voice line-by-line, fading softly as each new category appears, and
 the wheel scrolls a long article. Sources are steered toward readable news sites
 (it avoids YouTube, Reuters, and paywalls); an item with no usable source just
-notes that. Each one-liner is its own spoken clip, so `.` / `,` step one item at
+notes that. Each one-liner is its own spoken clip, so `←` / `→` step one item at
 a time, and the briefing ends on a closing remark rather than cutting off.
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it
