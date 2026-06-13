@@ -135,20 +135,20 @@ else
 fi
 case "$PM" in
   dnf)
-    PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip yt-dlp"
+    PKGS="mpv perl-Image-ExifTool python3 python3-qrcode python3-pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
     INSTALL="sudo dnf install -y"
     ;;
   apt-get)
-    PKGS="mpv libimage-exiftool-perl python3 python3-qrcode python3-pil curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool unzip yt-dlp"
+    PKGS="mpv libimage-exiftool-perl python3 python3-qrcode python3-pil curl qrencode ffmpeg socat playerctl pulseaudio-utils imagemagick fontconfig xdotool unzip"
     sudo apt-get update -y || true
     INSTALL="sudo apt-get install -y"
     ;;
   pacman)
-    PKGS="mpv perl-image-exiftool python python-qrcode python-pillow curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool unzip yt-dlp"
+    PKGS="mpv perl-image-exiftool python python-qrcode python-pillow curl qrencode ffmpeg socat playerctl libpulse imagemagick fontconfig xdotool unzip"
     INSTALL="sudo pacman -S --needed --noconfirm"
     ;;
   zypper)
-    PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip yt-dlp"
+    PKGS="mpv exiftool python3 python3-qrcode python3-Pillow curl qrencode ffmpeg socat playerctl pulseaudio-utils ImageMagick fontconfig xdotool unzip"
     INSTALL="sudo zypper install -y"
     ;;
   skip)
@@ -254,7 +254,6 @@ copy_file config/build-thumb.sh   "$CFG/build-thumb.sh"   0755
 copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755
 copy_file config/trash-music.sh   "$CFG/trash-music.sh"   0755
 copy_file config/fetch-article.sh "$CFG/fetch-article.sh" 0755
-copy_file config/fetch-chart.sh   "$CFG/fetch-chart.sh"   0755
 copy_file config/build-title.sh   "$CFG/build-title.sh"   0755
 copy_file config/build-geodb.sh   "$CFG/build-geodb.sh"   0755
 copy_file config/geo-resolve.sh   "$CFG/geo-resolve.sh"   0755

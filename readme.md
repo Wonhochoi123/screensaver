@@ -146,19 +146,13 @@ Notes:
 
 **Click a caption item** to read **its own source** — every topic (each
 headline, each ticker, each pick) is its own block carrying the reference it
-was built from. A linked item turns **light blue under the mouse** (so you can
-tell it's clickable) and **blue while it's the one open**.
-
-On click the **voice pauses**, takes a beat, and the screen **divides in
-half**: the headlines re-flow onto the **left** (same style, still clickable —
-pick another to switch) and the article's text fills the **right** in the same
-caption style, just smaller. Wheel or `↑`/`↓` scrolls; `Esc`, right-click, or a
-click on empty space at the left closes the pane and the voice resumes.
-
-If the link is a **video** (YouTube and friends, via `yt-dlp`), it **plays** in
-its own window instead — the briefing audio pauses while it runs and resumes
-when you close it (`q`). Links are never shown on screen or read aloud, and an
-item with no source isn't clickable. Prefer your browser for everything? Set
+was built from. On click the **voice pauses**, takes a beat, and the screen
+**divides in half**: the headlines re-flow onto the **left** (same style,
+still clickable — pick another to switch articles) and the article's text
+fills the **right** in the same caption style, just smaller. Wheel or `↑`/`↓`
+scrolls; `Esc`, right-click, or a click on empty space at the left closes the
+pane and the voice resumes. Links are never shown on screen or read aloud,
+and an item with no source isn't clickable. Prefer your browser instead? Set
 `GROK_LINK_BROWSER=yes` (also in the settings menu).
 
 The **"MORNING BRIEFING"** badge at center-top reveals on mouse-hover. Click it

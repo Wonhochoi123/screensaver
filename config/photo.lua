@@ -2684,32 +2684,7 @@ end
 -- Caption "fancy appear": each line fades in (staggered), like the rest of the
 -- stylish text. (Backdrop is photos-only during a briefing, so add_timeout isn't
 -- starved by video decode.)
-local BC = { lines = {}, w = 0, h = 0, t0 = 0, gen = 0, hover_url = "", settled = false }
--- Caption fill colour by link state (ASS is &HBBGGRR&). A linked line is white
--- normally, LIGHT BLUE under the mouse (so you can tell it's clickable), and
--- BLUE while its article/video is the one open. Unlinked lines stay white.
-function cap_color(url)
-    if not url or url == "" then return "FFFFFF" end
-    if RD and RD.on and url == RD.url then return "F0821E" end   -- open: blue
-    if url == BC.hover_url then return "FFC882" end              -- hover: light blue
-    return "FFFFFF"
-end
-function cap_line_str(L, a)   -- global: main chunk is at Lua's 200-local cap
-    return string.format(
-        "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&H%s&%s\\alpha&H%02X&}%s",
-        L.cx, L.cy, L.fs, L.fsp, cap_color(L.url), glow(L.fs), a, L.text)
-end
--- Redraw the captions at their settled alpha with current colours — used when
--- only the link state changed (hover moved, article opened/closed), so it must
--- NOT restart the fade animation.
-function briefing_redraw()
-    if not BC.lines or #BC.lines == 0 then return end
-    local parts = {}
-    for _, L in ipairs(BC.lines) do parts[#parts + 1] = cap_line_str(L, 0x12) end
-    briefing_ov.res_x = BC.w; briefing_ov.res_y = BC.h
-    briefing_ov.data = table.concat(parts, "\n")
-    briefing_ov:update()
-end
+local BC = { lines = {}, w = 0, h = 0, t0 = 0, gen = 0 }
 function briefing_fade()
     local gen = BC.gen
     local el  = mp.get_time() - BC.t0
@@ -2718,29 +2693,17 @@ function briefing_fade()
         local p = (el - (i - 1) * 0.06) / 0.35           -- 0.35s fade, 0.06s/line stagger
         local a = (p <= 0) and 0xFF or (p >= 1) and 0x12
             or math.floor(0xFF + (0x12 - 0xFF) * p + 0.5)
-        parts[#parts + 1] = cap_line_str(L, a)
+        parts[#parts + 1] = string.format(
+            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
+            L.cx, L.cy, L.fs, L.fsp, glow(L.fs), a, L.text)
     end
     briefing_ov.res_x = BC.w; briefing_ov.res_y = BC.h
     briefing_ov.data = table.concat(parts, "\n")
     briefing_ov:update()
     if el < (#BC.lines - 1) * 0.06 + 0.36 then
-        BC.settled = false
         mp.add_timeout(0.033, function() if gen == BC.gen then briefing_fade() end end)
-    else
-        BC.settled = true
     end
 end
--- Hover tracking: light up the caption under the cursor (clickable affordance).
-mp.observe_property("mouse-pos", "native", function(_, m)
-    if not (briefing_active and briefing_active()) or not BC.settled then return end
-    local hu = ""
-    if m and briefing_boxes then
-        for _, b in ipairs(briefing_boxes) do
-            if m.x >= b.x0 and m.x <= b.x1 and m.y >= b.y0 and m.y <= b.y1 then hu = b.url; break end
-        end
-    end
-    if hu ~= BC.hover_url then BC.hover_url = hu; briefing_redraw() end
-end)
 
 local function draw_briefing()
     -- Only ever paint captions while a briefing is genuinely LIVE. Without this,
@@ -2770,8 +2733,8 @@ local function draw_briefing()
     end
 
     local w, h = refresh_display_size()
-    -- Reading pane open: captions become the "menu" on the LEFT half; the right
-    -- half holds the article text (or the video, confined there via margins).
+    -- Reading pane open: captions become the "menu" on the LEFT half (the
+    -- article details fill the right); otherwise they own the full width.
     local split   = RD and RD.on
     local cap_cx  = split and math.floor(w * 0.25) or math.floor(w / 2)
     local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
@@ -2840,14 +2803,13 @@ local function draw_briefing()
         if L.gap_before then y = y + sgap end
         local top = y
         BC.lines[#BC.lines + 1] = { text = L.text, cx = cap_cx,
-                                    cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp,
-                                    url = L.si and urls[L.si] or "" }
+                                    cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
         y = y + lineH
         if L.si then
             local b = boxes[L.si]
             if b then b.y1 = y
             else boxes[L.si] = { x0 = bx0, x1 = bx1, y0 = top, y1 = y,
-                                 url = urls[L.si] or "", text = sentences[L.si] or "" } end
+                                 url = urls[L.si] or "" } end
         end
     end
     briefing_boxes = {}
@@ -3178,7 +3140,6 @@ end
 -- while the briefing is live). Only photo indices are ever selected, so videos
 -- never load.
 function backdrop_tick()
-    if RD and RD.video then return end   -- a clip is playing in the right half; don't advance
     if not LB.hud_off or not LB.photos or #LB.photos == 0 then return end
     LB.pidx = (LB.pidx % #LB.photos) + 1
     mp.set_property_number("playlist-pos", LB.photos[LB.pidx])
@@ -3233,12 +3194,8 @@ local function logo_tick()
     end
     if not logo then return end
 
-    -- Mute the whole screensaver while a briefing speaks; restore after. EXCEPT
-    -- while a clicked video plays in the right half — that IS the main player, so
-    -- it must keep its sound (the spoken voice is paused meanwhile).
-    if RD and RD.video then
-        if LB.muted then mp.set_property_number("volume", LB.vol or 70); LB.muted = false end
-    elseif active and not LB.muted then
+    -- Mute the whole screensaver while a briefing speaks; restore after.
+    if active and not LB.muted then
         LB.vol = mp.get_property_number("volume") or LB.vol
         mp.set_property_number("volume", 0); LB.muted = true
     elseif not active and LB.muted then
@@ -3955,111 +3912,23 @@ end)
 -- (Globals — the main chunk is at Lua's 200-local cap.)
 -- ----------------------------------------------------------------------------
 RD = { ov = mp.create_osd_overlay("ass-events"), on = false, gen = 0,
-       paras = nil, scroll = 0, url = "", x0 = 0, video = false }
+       paras = nil, scroll = 0, url = "", x0 = 0 }
 RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
-
--- Rectangular BGRA size guard (overlay-add SIGBUSes if the file is short).
-function bgra_ok(path, w, h)
-    local fi = utils.file_info(path)
-    return fi and fi.size and fi.size >= w * h * 4
-end
-
--- Pull a stock ticker out of an item's text: the first ALL-CAPS 2–5 letter word
--- that isn't a common acronym. nil when the item isn't about a single stock.
-function extract_ticker(s)
-    local stop = { FOR = 1, THE = 1, AND = 1, USD = 1, CEO = 1, CFO = 1, IPO = 1,
-        US = 1, USA = 1, UK = 1, EU = 1, GDP = 1, CPI = 1, FED = 1, ETF = 1, AI = 1,
-        NEW = 1, NYSE = 1, ALL = 1, WHY = 1, ITS = 1, NOW = 1, ONE = 1, TWO = 1,
-        SEC = 1, FBI = 1, CDC = 1, WHO = 1, NASA = 1, OPEC = 1 }
-    for tok in (s or ""):gmatch("[A-Za-z]+") do
-        if tok:match("^%u%u+$") and #tok >= 2 and #tok <= 5 and not stop[tok] then
-            return tok
-        end
-    end
-    return nil
-end
-
--- Recognise links that mpv can play directly (it uses yt-dlp for the sites).
-function is_video_url(u)
-    u = (u or ""):lower()
-    return u:match("youtube%.com") or u:match("youtu%.be") or u:match("vimeo%.com")
-        or u:match("dailymotion%.com") or u:match("twitch%.tv")
-        or u:match("%.mp4") or u:match("%.webm") or u:match("%.mkv") or u:match("%.mov") and true or false
-end
-
--- Pause/resume the briefing background music (its own mpv on /tmp/ss_bgm.sock).
--- (Globals: main chunk is at Lua's 200-local cap.)
-function bgm_pause(p)
-    mp.commandv("run", "/bin/sh", "-c",
-        "printf '%s\\n' '{\"command\":[\"set_property\",\"pause\"," .. (p and "true" or "false")
-        .. "]}' | socat -t1 - UNIX-CONNECT:/tmp/ss_bgm.sock 2>/dev/null")
-end
-function voice_pause(stop)   -- STOP/CONT the spoken-voice ffplay
-    mp.commandv("run", "/bin/sh", "-c",
-        'p=$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null); [ -n "$p" ] && kill -'
-        .. (stop and "STOP" or "CONT") .. ' "$p" 2>/dev/null')
-end
-
--- A video link plays in the screensaver's OWN player, confined to the right
--- half with video margins (the only way to land it there on Wayland, where a
--- second window can't be positioned). Captions move to the left; the briefing
--- voice + bgm pause. ESC / Q / the clip ending restores everything.
-function rd_play_video(url)
-    pcall(mp.command_native, { "overlay-remove", 5 })   -- no chart behind a video
-    RD.chart = nil
-    RD.ov:remove(); RD.ov.data = ""                     -- no article text either
-    RD.on = true; RD.video = true; RD.url = url
-    RD.gen = RD.gen + 1
-    RD.x0 = math.floor((refresh_display_size()) / 2)    -- left half = the headline menu
-    -- Remember what to come back to.
-    RD.vsaved_pos = mp.get_property_number("playlist-pos")
-    briefing_paused = true
-    voice_pause(true); bgm_pause(true)
-    -- Confine playback to the right half, clear the backdrop blur, and play the
-    -- clip as an appended item (mpv's ytdl hook resolves YouTube & co).
-    mp.set_property("video-margin-ratio-left", "0.5")
-    mp.set_property("vf", "")
-    mp.commandv("loadfile", url, "append-play")
-    RD.video_idx = (mp.get_property_number("playlist-count") or 1) - 1
-    mp.add_forced_key_binding("ESC", "ss-rd-esc",  function() rd_close() end)
-    mp.add_forced_key_binding("q",   "ss-rd-q",    function() rd_close() end)
-    briefing_shown = nil
-    draw_briefing()                                     -- captions re-flow to the left
-end
--- The clip ending (eof) closes the pane just like pressing ESC.
-mp.register_event("end-file", function(e)
-    if RD and RD.video and e and e.reason == "eof" then rd_close() end
-end)
 
 function rd_close()
     if not RD.on then return end
-    local was_video = RD.video
     RD.on = false
-    RD.video = false
-    RD.url = ""
     RD.gen = RD.gen + 1
     RD.paras = nil
     RD.ov:remove(); RD.ov.data = ""
-    for _, n in ipairs({ "ss-rd-esc", "ss-rd-q", "ss-rd-up", "ss-rd-down" }) do
+    for _, n in ipairs({ "ss-rd-esc", "ss-rd-up", "ss-rd-down" }) do
         mp.remove_key_binding(n)
     end
-    pcall(mp.command_native, { "overlay-remove", 5 })   -- remove the stock chart
-    RD.chart = nil
-    if was_video then
-        -- Undo the right-half confine, drop the appended clip, return to where
-        -- the backdrop was, and resume the briefing music. Loading the photo
-        -- re-applies its blur via the on_load hook, so the backdrop comes back.
-        mp.set_property("video-margin-ratio-left", "0")
-        if RD.vsaved_pos then mp.set_property_number("playlist-pos", RD.vsaved_pos) end
-        if RD.video_idx then pcall(mp.commandv, "playlist-remove", tostring(RD.video_idx)) end
-        RD.video_idx = nil
-        bgm_pause(false)
-        mp.add_timeout(0.3, function() if not (RD and RD.video) then backdrop_tick() end end)
-    end
     -- Resume the briefing voice we paused on open (no-op if it ended), and let
-    -- the captions take the full width again (recoloured: nothing open now).
+    -- the captions take the full width again.
     briefing_paused = false
-    voice_pause(false)
+    mp.commandv("run", "/bin/sh", "-c",
+        'p=$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null); [ -n "$p" ] && kill -CONT "$p" 2>/dev/null')
     briefing_shown = nil
     draw_briefing()
 end
@@ -4090,16 +3959,6 @@ function rd_draw()
     end
 
     local top_y  = math.floor(h * 0.20)              -- aligned with the captions region
-    -- A stock chart, when ready, sits at the top of the pane; the article text
-    -- flows below it. overlay-add bitmaps render above ASS, so the chart simply
-    -- covers this reserved strip.
-    if RD.chart and RD.chart.ready and RD.chart.path and bgra_ok(RD.chart.path, RD.chart.w, RD.chart.h) then
-        mp.command_native({ "overlay-add", 5, RD.chart.x, RD.chart.y, RD.chart.path,
-            0, "bgra", RD.chart.w, RD.chart.h, RD.chart.w * 4 })
-        top_y = RD.chart.y + RD.chart.h + math.floor(h * 0.02)
-    else
-        pcall(mp.command_native, { "overlay-remove", 5 })
-    end
     local foot_h = math.floor(fs * 2.2)
     local gapH   = math.floor(lh * 0.45)
     local availH = h - top_y - foot_h - math.floor(h * 0.04)
@@ -4184,50 +4043,13 @@ function rd_set_text(txt)
 end
 
 function rd_open(url)
-    if RD.video then rd_close() end       -- tear a playing clip down before switching
-    if is_video_url(url) then return rd_play_video(url) end
     local first = not RD.on               -- switching articles keeps the split as-is
     RD.url = url
-    RD.video = false
     RD.on = true
     RD.gen = RD.gen + 1
     local gen = RD.gen
     RD.paras = { { text = "FETCHING…", head = true } }
     RD.scroll = 0
-    pcall(mp.command_native, { "overlay-remove", 5 })   -- drop any previous chart
-    RD.chart = nil
-    if not first then briefing_redraw() end   -- recolour: new item blue, old reverts
-
-    -- Stock item? Pull the ticker from the clicked caption's text and fetch a
-    -- live chart to sit at the top of the right pane (above the article text).
-    local itext = ""
-    if briefing_boxes then
-        for _, b in ipairs(briefing_boxes) do
-            if b.url == url then itext = b.text or ""; break end
-        end
-    end
-    local tk = extract_ticker(itext)
-    if tk then
-        local w, h = refresh_display_size()
-        if w > 0 then
-            local x0  = math.floor(w * 0.5)
-            local pad = math.floor(h * 0.04)
-            local cw  = w - x0 - pad * 2;  cw = cw - cw % 2
-            local ch  = math.floor(cw / 2.2); ch = ch - ch % 2
-            RD.chart = { x = x0 + pad, y = math.floor(h * 0.20), w = cw, h = ch, ready = false }
-            local out = "/tmp/ss_chart.bgra"
-            os.remove(out)
-            mp.command_native_async({
-                name = "subprocess", playback_only = false,
-                args = { CFG_DIR .. "/fetch-chart.sh", tk, tostring(cw), tostring(ch), out },
-            }, function()
-                if not RD.on or gen ~= RD.gen or not RD.chart then return end
-                if bgra_ok(out, RD.chart.w, RD.chart.h) then
-                    RD.chart.path = out; RD.chart.ready = true; rd_draw()
-                end
-            end)
-        end
-    end
     mp.add_forced_key_binding("ESC",  "ss-rd-esc",  function() rd_close() end)
     mp.add_forced_key_binding("UP",   "ss-rd-up",   function() rd_scroll(-1) end, { repeatable = true })
     mp.add_forced_key_binding("DOWN", "ss-rd-down", function() rd_scroll(1) end,  { repeatable = true })
