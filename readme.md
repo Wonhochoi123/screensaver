@@ -169,7 +169,14 @@ highlighted in blue** and the rest dimmed, so you can see where you are; the
 to readable text. The one exception is the **weather** item, whose right pane is a
 **live weather card** — a vector condition glyph + big temperature, today's
 high/low, wind, humidity, sunrise and sunset, and an **8-hour strip with a
-temperature sparkline**. Nothing to click — it tracks the voice line-by-line,
+temperature sparkline**. The **markets** items are special too: the left half
+draws a **Google-Finance-style stock card** — ticker chips (the active one in
+blue), the company name, big price, today's change, a **1-day line vs a dashed
+previous-close**, and a day/52-week range + volume row — while the right half
+shows a **one-paragraph Grok analysis** of that ticker (the only place AI touches
+content; with live web search on, so it can cite the day's real catalyst — set
+`GROK_STOCK_SEARCH=0` for a numbers-only take). All stock data is free Yahoo
+Finance, cached per run. Nothing to click — it tracks the voice line-by-line,
 fading softly as each new category appears, and the wheel scrolls a long article.
 A partisan or unscrapable link is dropped on both sides (so the right pane never
 shows a slanted article); items with no source (markets, the sign-off) just leave

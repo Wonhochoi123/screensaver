@@ -49,6 +49,7 @@ cleanup() {
     rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}" \
           /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
           /tmp/ss_briefing.manifest /tmp/ss_briefing.idx /tmp/ss_briefing.detail \
+          /tmp/ss_briefing.stocks \
           /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid
 }
 trap cleanup EXIT INT TERM
@@ -63,6 +64,7 @@ rm -f "$AUDIO_SOCK"
 [ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
 rm -f /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
       /tmp/ss_briefing.manifest /tmp/ss_briefing.idx /tmp/ss_briefing.detail \
+      /tmp/ss_briefing.stocks \
       /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid
 
 nice -n 19 "$POLICE" >/dev/null 2>&1 &

@@ -59,6 +59,7 @@ SUB_FILE="/tmp/ss_briefing.txt"          # photo.lua reads this for the current 
 URL_FILE="/tmp/ss_briefing.url"          # photo.lua fetches this — the current line's source article
 MANIFEST_FILE="/tmp/ss_briefing.manifest"  # all items "category<TAB>line" (left column grouping)
 IDX_FILE="/tmp/ss_briefing.idx"          # 1-based index of the line being read right now
+STOCKS_FILE="/tmp/ss_briefing.stocks"    # MARKETS cards + analysis (photo.lua draws the stock cards)
 PID_FILE="/tmp/ss_briefing.pid"          # exists for the whole process (controls/single-instance)
 LIVE_FILE="/tmp/ss_briefing_live"        # exists ONLY once it's actually playing (drives the HUD)
 FFPLAY_PID_FILE="/tmp/ss_briefing_ffplay.pid"
@@ -133,6 +134,72 @@ tts_line() {
     rm -f "$tmp"; return 1
 }
 
+# --- MARKETS: per-ticker chart data + a one-paragraph Grok analysis ----------
+# News stays 100% feed-sourced; xAI is used here (and ONLY here) to ANALYZE a
+# stock — with live web search on by default (GROK_STOCK_SEARCH=0 disables it),
+# so it can cite the day's real catalyst. Cached in the run dir, so replay is
+# free and offline. Always degrades to a numbers-only note on any failure.
+stock_analysis() {            # sym name price prev pct dir outfile
+    local sym="$1" name="$2" price="$3" prev="$4" pct="$5" dir="$6" out="$7"
+    local sp='{"mode":"off"}'
+    [ "${GROK_STOCK_SEARCH:-1}" = "1" ] && sp='{"mode":"on","max_search_results":6}'
+    local sysmsg usrmsg body resp txt
+    sysmsg="You are a concise equity market analyst. Reply with ONE paragraph of 3 to 4 sentences in plain prose — no markdown, no preamble, no bullet points, no headings. Explain what most likely drove the stock's move today (cite the real catalyst if you can find it), give brief company or sector context, and a short balanced outlook. Do not give buy or sell recommendations. End with exactly: Not financial advice."
+    usrmsg="Analyze ${sym} (${name}). Today it is trading near \$${price}, ${dir} ${pct} percent from a previous close of \$${prev}. What moved it today, the context, and the outlook?"
+    body="$(jq -n --arg m "$MODEL" --arg s "$sysmsg" --arg u "$usrmsg" --argjson sp "$sp" \
+        '{model:$m, messages:[{role:"system",content:$s},{role:"user",content:$u}],
+          search_parameters:$sp, temperature:0.4}')" || return 1
+    resp="$(curl -s --max-time 70 -X POST "$API/chat/completions" \
+        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+        -d "$body")"
+    txt="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
+    [ -n "$txt" ] || return 1
+    printf '%s' "$txt" > "$out"
+}
+
+# Fetch one MARKETS item's chart card + analysis into the run dir (item_NNN.*).
+gen_stock() {                 # NNN
+    local num="$1" sym card name price prev pct dir
+    sym="$(cat "$RUN_DIR/item_${num}.sym" 2>/dev/null)"
+    [ -n "$sym" ] || return 0
+    card="$RUN_DIR/item_${num}.stock"
+    bash "$CFG_DIR/stock-card.sh" "$sym" "$card" 2>/dev/null
+    if [ -s "$card" ]; then
+        name="$(awk -F'\t' '$1=="NAME"{print $2; exit}' "$card")"
+        price="$(awk -F'\t' '$1=="PRICE"{print $2; exit}' "$card")"
+        prev="$(awk -F'\t' '$1=="PREV"{print $2; exit}' "$card")"
+        pct="$(awk -F'\t' '$1=="CHG"{print $3; exit}' "$card")"
+        dir="$(awk -F'\t' '$1=="CHG"{print $4; exit}' "$card")"
+    fi
+    [ -n "$name" ] || name="$sym"
+    stock_analysis "$sym" "$name" "${price:-?}" "${prev:-?}" "${pct:-0.0}" "${dir:-flat}" \
+        "$RUN_DIR/item_${num}.analysis" 2>/dev/null \
+        || printf '%s' "Analysis unavailable right now. Not financial advice." \
+               > "$RUN_DIR/item_${num}.analysis"
+}
+
+# Assemble all MARKETS items into one file photo.lua reads: records separated by
+# a lone "@@", each holding the card's TAB lines plus IDX, SYM and a one-line
+# ANALYSIS (newlines flattened so the record format stays line-based).
+assemble_stocks() {
+    local out="$RUN_DIR/briefing.stocks" total i num first=1
+    total="$(cat "$RUN_DIR/item.count" 2>/dev/null)"; [ -n "$total" ] || return 0
+    : > "$out"
+    for (( i=1; i<=total; i++ )); do
+        num="$(printf '%03d' "$i")"
+        [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] || continue
+        [ "$first" = 1 ] || printf '@@\n' >> "$out"; first=0
+        printf 'IDX\t%s\n' "$i" >> "$out"
+        printf 'SYM\t%s\n' "$(cat "$RUN_DIR/item_${num}.sym" 2>/dev/null)" >> "$out"
+        [ -s "$RUN_DIR/item_${num}.stock" ] && cat "$RUN_DIR/item_${num}.stock" >> "$out"
+        if [ -s "$RUN_DIR/item_${num}.analysis" ]; then
+            printf 'ANALYSIS\t' >> "$out"
+            tr '\n' ' ' < "$RUN_DIR/item_${num}.analysis" >> "$out"
+            printf '\n' >> "$out"
+        fi
+    done
+}
+
 # --- build the whole briefing INTO $RUN_DIR (caller sets + mkdir's it) --------
 # Pass 1 writes ALL item_NNN.cat/.line/.url and item.count up front (so playback
 # knows the full list as soon as anything lands); pass 2 TTS each one-liner into
@@ -165,7 +232,7 @@ gen_into_run() {
     # see the full list the instant the first clip is ready.
     # .line is the short headline shown on screen; .say is the richer text read
     # aloud (headline + the feed's summary sentence). Most items have say==line.
-    local i num line say url cat
+    local i num line say url cat sym
     : > "$RUN_DIR/briefing.manifest"
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
@@ -173,10 +240,12 @@ gen_into_run() {
         line="$(printf '%s' "$items" | jq -r ".[$i].line")"
         say="$(printf '%s' "$items" | jq -r ".[$i].say // .line")"
         url="$(printf '%s' "$items" | jq -r ".[$i].url")"
+        sym="$(printf '%s' "$items" | jq -r ".[$i].sym // \"\"")"
         printf '%s' "$cat"  > "$RUN_DIR/item_${num}.cat"
         printf '%s' "$line" > "$RUN_DIR/item_${num}.line"
         printf '%s' "$say"  > "$RUN_DIR/item_${num}.say"
         printf '%s' "$url"  > "$RUN_DIR/item_${num}.url"
+        printf '%s' "$sym"  > "$RUN_DIR/item_${num}.sym"
         printf '%s\t%s\n' "$cat" "$line" >> "$RUN_DIR/briefing.manifest"
     done
     printf '%s' "$n" > "$RUN_DIR/item.count"
@@ -189,6 +258,17 @@ gen_into_run() {
         [ "$(( (i+1) % 4 ))" = 0 ] && wait
     done
     wait
+
+    # MARKETS: in parallel, fetch each ticker's chart + Grok analysis, then
+    # assemble the file photo.lua draws the stock cards from. All best-effort.
+    for (( i=0; i<n; i++ )); do
+        num="$(printf '%03d' "$((i+1))")"
+        if [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ]; then
+            gen_stock "$num" &
+        fi
+    done
+    wait
+    assemble_stocks
 
     # Need at least the first clip to call it a success.
     [ -s "$RUN_DIR/item_001.mp3" ] || return 1
@@ -217,7 +297,15 @@ prep() {
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
     | socat -t1 - "UNIX-CONNECT:$AUDIO_SOCK" 2>/dev/null; }
 sub_show()   { printf '%s' "$1" > "$SUB_FILE"; }
-sub_hide()   { printf '__HIDE__' > "$SUB_FILE"; rm -f "$URL_FILE" "$IDX_FILE" "$MANIFEST_FILE"; }
+sub_hide()   { printf '__HIDE__' > "$SUB_FILE"; rm -f "$URL_FILE" "$IDX_FILE" "$MANIFEST_FILE" "$STOCKS_FILE"; }
+# Publish the assembled MARKETS cards+analysis (if any) so photo.lua can draw the
+# stock cards. Atomic; safe to call repeatedly (the file may land mid-playback).
+set_stocks() {
+    if [ -s "$RUN_DIR/briefing.stocks" ]; then
+        cp -f "$RUN_DIR/briefing.stocks" "$STOCKS_FILE.part" 2>/dev/null \
+            && mv -f "$STOCKS_FILE.part" "$STOCKS_FILE"
+    fi
+}
 # Publish (or clear) the current one-liner's source URL — photo.lua fetches it
 # into the right pane. Atomic (tmp+mv); published BEFORE the caption so photo.lua
 # never pairs a new line with the previous item's URL. A blank/missing url file
@@ -381,8 +469,10 @@ play() {
     [ -n "$BGM_PID" ] && sleep "$SPEAK_DELAY"
     [ -n "$PREP_BG" ] && play_welcome     # only the still-generating path needs filler
 
-    # The grouped left column needs the whole item list up front.
+    # The grouped left column needs the whole item list up front; the stock cards
+    # too if they're ready (re-published per MARKETS item in case they land later).
     set_manifest "$RUN_DIR/briefing.manifest"
+    set_stocks
     local total; total="$(cat "$RUN_DIR/item.count" 2>/dev/null)"
     [ -n "$total" ] || total=0
     local idx=1
@@ -401,6 +491,7 @@ play() {
 
         # Publish the source URL + current index FIRST, then the one-liner caption.
         set_url "$RUN_DIR/item_${num}.url"
+        [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] && set_stocks
         set_idx "$idx"
         [ -s "$RUN_DIR/item_${num}.line" ] && sub_show "$(cat "$RUN_DIR/item_${num}.line")" || sub_hide
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$mp3" >/dev/null 2>&1 &

@@ -219,9 +219,10 @@ def closing_line():
     return options[idx]
 
 
-def add(items, cat, line, url, say=None):
-    # 'line' is shown on screen (kept short); 'say' is read aloud (can be richer).
-    items.append({"cat": cat, "line": line, "say": say or line, "url": url})
+def add(items, cat, line, url, say=None, sym=""):
+    # 'line' is shown on screen (kept short); 'say' is read aloud (can be richer);
+    # 'sym' tags a MARKETS item with its ticker (drives the stock card + analysis).
+    items.append({"cat": cat, "line": line, "say": say or line, "url": url, "sym": sym})
 
 
 def main():
@@ -247,9 +248,10 @@ def main():
         add(items, "TECH & FINANCE", it["line"], it["url"], it["say"])
 
     for sym in (os.environ.get("TICKERS", "").split(",")):
-        ml = market_line(sym)
+        s = sym.strip().upper()
+        ml = market_line(s)
         if ml:
-            add(items, "MARKETS", ml, "")
+            add(items, "MARKETS", ml, "", sym=s)
 
     add(items, "CLOSING", closing_line(), "")
     print(json.dumps(items))

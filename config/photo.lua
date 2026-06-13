@@ -2776,6 +2776,16 @@ local function draw_briefing()
     local xf = io.open("/tmp/ss_briefing.idx", "r")
     if xf then cur = tonumber((xf:read("*l") or "")); xf:close() end
 
+    -- MARKETS gets its own treatment: a vector stock card + ticker list on the
+    -- LEFT (active in blue) and Grok's analysis on the RIGHT — no text captions.
+    if cur and mani[cur] and mani[cur].cat == "MARKETS" and sk_show then
+        briefing_boxes = nil
+        BC.gen = BC.gen + 1; BC.group = nil
+        briefing_ov:remove(); briefing_ov.data = ""
+        sk_show(cur, mani)
+        return
+    end
+
     -- Grouped mode when we have the manifest + a valid index AND it isn't the
     -- closing sign-off: gather the contiguous run of items sharing the current
     -- category, and remember which one is active. Otherwise (welcome / closing)
@@ -4013,6 +4023,7 @@ RD.ov.z = 1900   -- above captions/HUD, below the blackout (2000)
 -- plays. No voice pausing and no key bindings — it's part of the briefing.
 function briefing_article_show(url)
     if wx_hide then wx_hide() end          -- leaving the weather item → drop its card
+    if sk_hide then sk_hide() end          -- leaving a markets item → drop its stock card
     if url == "" then          -- no source (markets, a filtered link) → clean empty pane
         if RD.on then
             RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
@@ -4048,6 +4059,7 @@ function briefing_article_show(url)
 end
 function briefing_detail_clear()
     if wx_hide then wx_hide() end
+    if sk_hide then sk_hide() end
     if RD.on and RD.auto then
         RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
         RD.url = ""; RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
@@ -4342,6 +4354,7 @@ end
 -- the article pane, draws a LOADING placeholder, then fetches + draws the card.
 -- WX.card is cached for the life of the briefing (the script also caches 20 min).
 function wx_show()
+    if sk_hide then sk_hide() end          -- weather and stock cards never coexist
     if RD and RD.on then
         RD.on = false; RD.auto = false; RD.gen = RD.gen + 1
         RD.url = ""; RD.paras = nil; RD.ov:remove(); RD.ov.data = ""
@@ -4462,3 +4475,227 @@ function wx_draw()
     end
     finish()
 end
+
+-- ----------------------------------------------------------------------------
+-- Stock card (MARKETS items). The LEFT half draws a Google-Finance-style vector
+-- card for the active ticker — name, big price, day change, a 1-day line vs a
+-- dashed previous-close, and a stats row — with a row of ticker chips above it
+-- (the active one in blue). The RIGHT half shows Grok's one-paragraph analysis
+-- (fed straight into the article reader, so ↑/↓ scroll it). Data comes from
+-- grok-briefing.sh's /tmp/ss_briefing.stocks (Yahoo chart + xAI analysis).
+-- (Globals — the main chunk is at Lua's 200-local cap.)
+-- ----------------------------------------------------------------------------
+SK = { ov = mp.create_osd_overlay("ass-events"), on = false, sig = nil,
+       byIdx = {}, order = {}, akey = nil, cur = nil, mani = nil }
+SK.ov.z = 1900
+-- BGR up/down/flat colours (kept on SK, not new main-chunk locals — 200 cap).
+SK.cUp, SK.cDn, SK.cFl = "&H37C84A&", "&H4A4AE0&", "&HB0B0B0&"
+
+function sk_hide()
+    if SK.on then SK.on = false; SK.akey = nil; SK.cur = nil; SK.ov:remove(); SK.ov.data = "" end
+end
+
+-- Parse /tmp/ss_briefing.stocks (records split by a lone "@@") into SK.byIdx
+-- (keyed by the manifest index) + SK.order (display order). Skips re-parsing
+-- when the file is unchanged.
+function sk_load()
+    local f = io.open("/tmp/ss_briefing.stocks", "r")
+    if not f then return end
+    local raw = f:read("*a") or ""; f:close()
+    if raw == SK.sig then return end
+    SK.sig = raw
+    SK.byIdx, SK.order = {}, {}
+    for block in (raw .. "\n@@\n"):gmatch("(.-)\n@@\n") do
+        local r = { sym = "", name = "", price = "", chg = "", pct = "", dir = "flat",
+                    prev = "", dlo = "", dhi = "", w52lo = "", w52hi = "", vol = "",
+                    series = {}, analysis = "", idx = nil }
+        for line in (block .. "\n"):gmatch("(.-)\n") do
+            local tag, rest = line:match("^([%u%d]+)\t(.*)$")
+            if tag == "IDX" then r.idx = tonumber(rest)
+            elseif tag == "SYM" then r.sym = rest
+            elseif tag == "NAME" then r.name = rest
+            elseif tag == "PRICE" then r.price = rest
+            elseif tag == "CHG" then
+                local a, b, c = rest:match("^(.-)\t(.-)\t(.*)$")
+                r.chg, r.pct, r.dir = a or "", b or "", (c ~= "" and c) or "flat"
+            elseif tag == "PREV" then r.prev = rest
+            elseif tag == "DAY" then local a, b = rest:match("^(.-)\t(.*)$"); r.dlo, r.dhi = a or "", b or ""
+            elseif tag == "W52" then local a, b = rest:match("^(.-)\t(.*)$"); r.w52lo, r.w52hi = a or "", b or ""
+            elseif tag == "VOL" then r.vol = rest
+            elseif tag == "SERIES" then for v in rest:gmatch("%S+") do r.series[#r.series + 1] = tonumber(v) end
+            elseif tag == "ANALYSIS" then r.analysis = rest
+            end
+        end
+        if r.idx then SK.byIdx[r.idx] = r; SK.order[#SK.order + 1] = r end
+    end
+end
+
+function sk_show(cur, mani)
+    if wx_hide then wx_hide() end
+    sk_load()
+    SK.on = true; SK.cur = cur; SK.mani = mani
+    sk_draw(cur)
+    -- Right pane: this ticker's analysis, fed into the reader so ↑/↓ scroll it.
+    local rec = SK.byIdx[cur]
+    local key = "sk|" .. tostring(cur) .. "|" .. (rec and rec.sym or "") .. "|" .. (SK.sig and #SK.sig or 0)
+    if key ~= SK.akey then
+        SK.akey = key
+        local body
+        if rec and rec.analysis ~= "" then
+            local title = (rec.name ~= "" and rec.name ~= rec.sym)
+                and (rec.sym .. " · " .. rec.name) or rec.sym
+            body = "# " .. title .. "\n\n" .. rec.analysis
+                .. "\n\n# AI analysis · not financial advice"
+        else
+            body = "# Markets\n\nFetching analysis…"
+        end
+        RD.auto = true; RD.on = true; RD.url = key
+        rd_set_text(body)
+    end
+end
+
+-- Draw one ticker's 1-day line: faint filled area + a coloured line, with a
+-- dashed previous-close baseline. col is the up/down/flat colour. (Global, not a
+-- main-chunk local — the chunk is at Lua's 200-local cap.)
+function sk_chart(ev, rec, bx, by, bw, bh, col)
+    local s = rec.series
+    if not s or #s < 2 then return end
+    local n = #s
+    local vmin, vmax = math.huge, -math.huge
+    for _, v in ipairs(s) do vmin = math.min(vmin, v); vmax = math.max(vmax, v) end
+    local prevn = tonumber(rec.prev)
+    if prevn then vmin = math.min(vmin, prevn); vmax = math.max(vmax, prevn) end
+    if vmax <= vmin then vmax = vmin + 1 end
+    local pad = (vmax - vmin) * 0.08
+    vmin, vmax = vmin - pad, vmax + pad
+    local function X(i) return bx + (i - 1) / (n - 1) * bw end
+    local function Y(v) return by + bh - (v - vmin) / (vmax - vmin) * bh end
+    -- Dashed previous-close baseline.
+    if prevn then
+        local py = math.floor(Y(prevn))
+        local dash, dx = {}, bx
+        local dl = math.max(3, math.floor(bw * 0.02))
+        while dx < bx + bw do
+            local x2 = math.min(dx + dl, bx + bw)
+            dash[#dash + 1] = string.format("m %d %d l %d %d %d %d %d %d",
+                math.floor(dx), py, math.floor(x2), py, math.floor(x2), py + 1, math.floor(dx), py + 1)
+            dx = x2 + dl
+        end
+        ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HB0B0B0&\\1a&H50&\\p1}"
+            .. table.concat(dash, " ") .. "{\\p0}"
+    end
+    -- Filled area under the line.
+    local ax = { string.format("m %d %d", math.floor(X(1)), math.floor(by + bh)) }
+    for i, v in ipairs(s) do ax[#ax + 1] = string.format("l %d %d", math.floor(X(i)), math.floor(Y(v))) end
+    ax[#ax + 1] = string.format("l %d %d", math.floor(X(n)), math.floor(by + bh))
+    ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c" .. col .. "\\1a&HDC&\\p1}"
+        .. table.concat(ax, " ") .. "{\\p0}"
+    -- The price line itself (border-stroked polyline, same trick as the weather spark).
+    local seg = {}
+    for i, v in ipairs(s) do
+        seg[#seg + 1] = string.format("%s %d %d", i == 1 and "m" or "l", math.floor(X(i)), math.floor(Y(v)))
+    end
+    local _, hh = refresh_display_size()
+    ev[#ev + 1] = string.format("{\\an7\\pos(0,0)\\1a&HFF&\\bord%d\\3c%s\\3a&H10&\\shad0\\p1}%s{\\p0}",
+        math.max(1, math.floor(hh * 0.0024)), col, table.concat(seg, " "))
+end
+
+function sk_draw(cur)
+    if not SK.on then return end
+    local w, h = refresh_display_size()
+    if w <= 0 then return end
+    local pad = math.floor(h * 0.04)
+    local left = pad
+    local right = math.floor(w * 0.5) - pad
+    local Lw = right - left
+    local top_y = math.floor(h * 0.20)
+    local ev = {}
+    local function txt(s, x, y, fs, col, an, font, alpha)
+        ev[#ev + 1] = string.format(
+            "{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\fsp%d\\1c%s%s\\alpha&H%02X&}%s",
+            an or 4, math.floor(x), math.floor(y), font or "Montserrat ExtraBold", math.floor(fs),
+            math.floor(fs * 0.02 + 0.5), col or "&HFFFFFF&", glow(fs), alpha or 0x18, s)
+    end
+    local function finish() SK.ov.res_x = w; SK.ov.res_y = h; SK.ov.data = table.concat(ev, "\n"); SK.ov:update() end
+    local function colof(d) return d == "up" and SK.cUp or d == "down" and SK.cDn or SK.cFl end
+
+    if #SK.order == 0 then
+        txt("LOADING MARKETS…", left, top_y + math.floor(h * 0.1), math.floor(h * 0.026),
+            "&HBBBBBB&", 4, "Montserrat SemiBold", 0x30)
+        finish(); return
+    end
+
+    -- Ticker chips (active in blue), wrapping across the left column width.
+    local cf = math.floor(h * 0.020)
+    local ch = math.floor(h * 0.040)
+    local cgap = math.floor(h * 0.012)
+    local cx, cy = left, top_y
+    for _, r in ipairs(SK.order) do
+        local label = r.sym .. (r.pct ~= "" and ("  " .. (r.dir == "down" and "-" or "+") .. r.pct .. "%") or "")
+        local cw = math.floor(#label * cf * 0.58 + cf * 1.4)
+        if cx + cw > right and cx > left then cx = left; cy = cy + ch + cgap end
+        local active = (r.idx == cur)
+        ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord" .. (active and "0" or "1") .. "\\shad0\\1c"
+            .. (active and "&HFFB464&" or "&H202020&") .. "\\1a" .. (active and "&H18&" or "&HD0&")
+            .. "\\3c&H808080&\\3a&H40&\\p1}" .. rrect_path(cx, cy, cw, ch, math.floor(ch * 0.28)) .. "{\\p0}"
+        txt(label, cx + math.floor(cw / 2), cy + math.floor(ch / 2), cf,
+            active and "&H101010&" or colof(r.dir), 5, "Montserrat SemiBold", 0x10)
+        cx = cx + cw + cgap
+    end
+
+    local rec = SK.byIdx[cur]
+    local y = cy + ch + math.floor(h * 0.03)
+    if not rec then
+        txt("Fetching " .. ((SK.mani and SK.mani[cur] and SK.mani[cur].line) or "quote") .. "…",
+            left, y, math.floor(h * 0.024), "&HBBBBBB&", 4, "Montserrat SemiBold", 0x30)
+        finish(); return
+    end
+    local col = colof(rec.dir)
+
+    -- Name, big price, day change.
+    if rec.name ~= "" and rec.name ~= rec.sym then
+        txt(rec.name, left, y, math.floor(h * 0.021), "&HCFCFCF&", 4, "Montserrat SemiBold", 0x28)
+        y = y + math.floor(h * 0.034)
+    end
+    txt("$" .. rec.price, left, y, math.floor(h * 0.056), "&HFFFFFF&", 4);
+    local sign = rec.dir == "down" and "−" or (rec.dir == "up" and "+" or "")
+    if rec.chg ~= "" then
+        txt(sign .. rec.chg .. "  (" .. sign .. rec.pct .. "%)  today",
+            left + math.floor(Lw * 0.34), y + math.floor(h * 0.012), math.floor(h * 0.026), col, 4)
+    end
+    y = y + math.floor(h * 0.072)
+
+    -- 1-day chart.
+    local chTop = y
+    local chH = math.floor(h * 0.17)
+    txt("TODAY", right, chTop - math.floor(h * 0.006), math.floor(h * 0.016),
+        "&H9A9A9A&", 6, "Montserrat SemiBold", 0x40)
+    sk_chart(ev, rec, left, chTop, Lw, chH, col)
+    y = chTop + chH + math.floor(h * 0.035)
+
+    -- Stats row.
+    local function rng(a, b) return (a ~= "" and b ~= "") and (a .. "–" .. b) or "—" end
+    local cells = {
+        { "PREV CLOSE", rec.prev ~= "" and ("$" .. rec.prev) or "—" },
+        { "DAY RANGE", rng(rec.dlo, rec.dhi) },
+        { "52-WK RANGE", rng(rec.w52lo, rec.w52hi) },
+        { "VOLUME", rec.vol ~= "" and rec.vol or "—" },
+    }
+    local cw = Lw / #cells
+    for i, cell in ipairs(cells) do
+        local cxx = left + cw * (i - 0.5)
+        txt(cell[1], cxx, y, math.floor(h * 0.0155), "&H9A9A9A&", 5, "Montserrat SemiBold", 0x40)
+        txt(cell[2], cxx, y + math.floor(h * 0.030), math.floor(h * 0.022), "&HFFFFFF&", 5,
+            "Montserrat SemiBold", 0x18)
+    end
+    finish()
+end
+
+-- Refresh the markets card if its data file lands or changes mid-item (the
+-- analysis can finish generating a few seconds after the ticker starts).
+mp.add_periodic_timer(0.5, function()
+    if not (SK.on and SK.cur and briefing_active and briefing_active()) then return end
+    local before = SK.sig
+    sk_load()
+    if SK.sig ~= before then sk_show(SK.cur, SK.mani or {}) end
+end)
