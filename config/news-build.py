@@ -72,6 +72,32 @@ def clean_title(t):
     return t
 
 
+def clean_desc(d):
+    """A feed's <description>/<summary> stripped to plain prose, minus the
+    common RSS boilerplate that adds no information when read aloud."""
+    d = re.sub(r'<[^>]+>', '', html.unescape(d or ''))
+    d = re.sub(r'\s+', ' ', d).strip()
+    d = re.sub(r'\s*(continue reading.*|read more.*|the post .* appeared first on .*'
+               r'|\[\s*…?\s*\]|\(more…?\))\s*$', '', d, flags=re.I).strip()
+    return d.strip('…').strip()
+
+
+def summary_for(title, desc):
+    """One context sentence to speak after the headline — but only if it ADDS
+    something (not a near-repeat of the title), trimmed to a sane spoken length."""
+    desc = clean_desc(desc)
+    if not desc:
+        return ""
+    tkey = re.sub(r'\W+', '', title.lower())
+    dkey = re.sub(r'\W+', '', desc.lower())
+    if not dkey or dkey[:45] == tkey[:45] or dkey in tkey or tkey in dkey:
+        return ""
+    if len(desc) > 260:                            # keep ~1–2 sentences, no walls of text
+        cut = desc.rfind('.', 120, 260)
+        desc = (desc[:cut + 1] if cut > 0 else desc[:260].rstrip() + '…')
+    return desc
+
+
 def parse_feed(xmltext):
     out = []
     if not xmltext:
@@ -84,11 +110,13 @@ def parse_feed(xmltext):
         tag = it.tag.lower().split('}')[-1]
         if tag not in ('item', 'entry'):
             continue
-        title = link = ""
+        title = link = desc = ""
         for ch in it:
             c = ch.tag.lower().split('}')[-1]
             if c == 'title' and not title:
                 title = ch.text or ""
+            elif c in ('description', 'summary') and not desc:
+                desc = ch.text or ""
             elif c == 'link':
                 if ch.text and ch.text.strip():
                     link = link or ch.text.strip()
@@ -99,25 +127,33 @@ def parse_feed(xmltext):
         title = clean_title(title)
         link = (link or "").strip()
         if title and link and not BAD_HOST.search(link):
-            out.append((title, link))
+            out.append((title, link, desc))
     return out
 
 
 def collect(feeds, n):
     """Round-robin across feeds (one from each, then the next) for source
-    balance, de-duplicating by headline and link."""
+    balance, de-duplicating by headline and link. Each item carries the bare
+    headline ('line', shown on screen) AND a richer spoken version ('say',
+    headline + the feed's own summary sentence)."""
     parsed = [parse_feed(get(u)) for u in feeds]
     seen_t, seen_l, out = set(), set(), []
     for depth in range(8):
         for fi in parsed:
             if depth >= len(fi):
                 continue
-            title, link = fi[depth]
+            title, link, desc = fi[depth]
             key = re.sub(r'\W+', '', title.lower())[:60]
             if not key or key in seen_t or link in seen_l:
                 continue
             seen_t.add(key); seen_l.add(link)
-            out.append({"line": title, "url": link})
+            summ = summary_for(title, desc)
+            say = title
+            if summ:
+                say = (title if title[-1:] in '.!?' else title + '.') + ' ' + summ
+                if say[-1:] not in '.!?…':
+                    say += '.'
+            out.append({"line": title, "say": say, "url": link})
             if len(out) >= n:
                 return out
     return out
@@ -183,34 +219,39 @@ def closing_line():
     return options[idx]
 
 
+def add(items, cat, line, url, say=None):
+    # 'line' is shown on screen (kept short); 'say' is read aloud (can be richer).
+    items.append({"cat": cat, "line": line, "say": say or line, "url": url})
+
+
 def main():
     items = []
     wl = weather_line()
     if wl:
-        items.append({"cat": "WEATHER", "line": wl, "url": ""})
+        add(items, "WEATHER", wl, "")
 
     news_feeds = [u for u in (os.environ.get("NEWS_FEEDS", "").splitlines()) if u.strip()] or DEFAULT_NEWS
     tech_feeds = [u for u in (os.environ.get("TECH_FEEDS", "").splitlines()) if u.strip()] or DEFAULT_TECH
     try:
-        news_n = int(os.environ.get("NEWS_N", "3"))
+        news_n = int(os.environ.get("NEWS_N", "5"))
     except ValueError:
-        news_n = 3
+        news_n = 5
     try:
-        tech_n = int(os.environ.get("TECH_N", "3"))
+        tech_n = int(os.environ.get("TECH_N", "4"))
     except ValueError:
-        tech_n = 3
+        tech_n = 4
 
     for it in collect(news_feeds, news_n):
-        items.append({"cat": "TOP NEWS", "line": it["line"], "url": it["url"]})
+        add(items, "TOP NEWS", it["line"], it["url"], it["say"])
     for it in collect(tech_feeds, tech_n):
-        items.append({"cat": "TECH & FINANCE", "line": it["line"], "url": it["url"]})
+        add(items, "TECH & FINANCE", it["line"], it["url"], it["say"])
 
     for sym in (os.environ.get("TICKERS", "").split(",")):
         ml = market_line(sym)
         if ml:
-            items.append({"cat": "MARKETS", "line": ml, "url": ""})
+            add(items, "MARKETS", ml, "")
 
-    items.append({"cat": "CLOSING", "line": closing_line(), "url": ""})
+    add(items, "CLOSING", closing_line(), "")
     print(json.dumps(items))
 
 

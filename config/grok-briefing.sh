@@ -153,6 +153,7 @@ gen_into_run() {
     items="$(WX_FILE="$wxf" LOCATION="${LOCATION:-}" TICKERS="${TICKERS:-}" \
              DAY_NAME="$(date '+%A')" \
              NEWS_FEEDS="${GROK_NEWS_FEEDS:-}" TECH_FEEDS="${GROK_TECH_FEEDS:-}" \
+             NEWS_N="${GROK_NEWS_N:-5}" TECH_N="${GROK_TECH_N:-4}" \
              python3 "$CFG_DIR/news-build.py" 2>/dev/null)"
     printf '%s' "$items" > "$RUN_DIR/briefing.resp" 2>/dev/null   # keep for diagnosis
 
@@ -162,25 +163,29 @@ gen_into_run() {
     # Pass 1: write every line/url/category and a manifest (category<TAB>line
     # per item, in order), so playback — and photo.lua's grouped left column —
     # see the full list the instant the first clip is ready.
-    local i num line url cat
+    # .line is the short headline shown on screen; .say is the richer text read
+    # aloud (headline + the feed's summary sentence). Most items have say==line.
+    local i num line say url cat
     : > "$RUN_DIR/briefing.manifest"
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
         cat="$(printf '%s' "$items" | jq -r ".[$i].cat")"
         line="$(printf '%s' "$items" | jq -r ".[$i].line")"
+        say="$(printf '%s' "$items" | jq -r ".[$i].say // .line")"
         url="$(printf '%s' "$items" | jq -r ".[$i].url")"
         printf '%s' "$cat"  > "$RUN_DIR/item_${num}.cat"
         printf '%s' "$line" > "$RUN_DIR/item_${num}.line"
+        printf '%s' "$say"  > "$RUN_DIR/item_${num}.say"
         printf '%s' "$url"  > "$RUN_DIR/item_${num}.url"
         printf '%s\t%s\n' "$cat" "$line" >> "$RUN_DIR/briefing.manifest"
     done
     printf '%s' "$n" > "$RUN_DIR/item.count"
 
-    # Pass 2: TTS each one-liner into its own clip, up to 4 at a time.
+    # Pass 2: TTS each spoken line into its own clip, up to 4 at a time.
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
-        line="$(cat "$RUN_DIR/item_${num}.line")"
-        tts_line "$line" "$RUN_DIR/item_${num}.mp3" &
+        say="$(cat "$RUN_DIR/item_${num}.say")"
+        tts_line "$say" "$RUN_DIR/item_${num}.mp3" &
         [ "$(( (i+1) % 4 ))" = 0 ] && wait
     done
     wait

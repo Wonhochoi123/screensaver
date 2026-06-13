@@ -152,11 +152,15 @@ The briefing's content comes **straight from the news, not from an AI**. Curated
 politically **balanced** RSS feeds (BBC World, CNBC, The Hill, Christian Science
 Monitor for top news; Ars Technica, The Verge, TechCrunch, Engadget for tech)
 supply the top headlines — the feeds *are* the editorial judgment, so links are
-real, balanced, and always open. Weather comes from [Open-Meteo](https://open-meteo.com),
-live ticker prices from Yahoo Finance, and the sign-off is a friendly template.
-**xAI is used only to read the lines aloud** (text-to-speech) — no web-search or
-language-model call decides or writes the news. Feeds are configurable in
-`screensaver.conf` (`GROK_NEWS_FEEDS`, `GROK_TECH_FEEDS`).
+real, balanced, and always open. Each item is **spoken as the headline plus the
+feed's own summary sentence**, so the audio has real context while the on-screen
+line stays a clean headline (and its full article opens on the right). Weather
+comes from [Open-Meteo](https://open-meteo.com), live ticker prices from Yahoo
+Finance, and the sign-off is a friendly template. **xAI is used only to read the
+lines aloud** (text-to-speech) — no web-search or language-model call decides or
+writes the news. Feeds and how many headlines to include are configurable in
+`screensaver.conf` (`GROK_NEWS_FEEDS`, `GROK_TECH_FEEDS`, `GROK_NEWS_N`,
+`GROK_TECH_N`).
 
 While it plays the screen **stays split**: the **left** lists every one-liner in
 the **current category** stacked together, with the line being read **right now
