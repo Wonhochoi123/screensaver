@@ -4,21 +4,20 @@
 #
 #  Usage:  stock-card.sh <SYMBOL> <outfile>
 #
-#  Pulls today's intraday series + key stats from the free Yahoo Finance chart
-#  endpoint (no API key) and writes a TAB-delimited block photo.lua draws as a
-#  Google-Finance-style vector card (price, change, 1-day line vs previous close,
-#  day/52-week range, volume). Cached 20 min per symbol. Degrades silently — on
-#  any failure it writes nothing, and the card falls back to the spoken price.
+#  Quote comes from CNBC's public quote service; the intraday line from Nasdaq's
+#  chart API (both keyless, and — unlike Yahoo, which rate-limits/429s many IPs —
+#  they answer reliably). Writes a TAB-delimited block photo.lua draws as a
+#  Google-Finance-style vector card. Cached 20 min per symbol. Degrades silently.
 #
-#  Output (TAB-separated), e.g.:
+#  Output (TAB-separated):
 #     NAME<TAB>Tesla Inc
-#     PRICE<TAB>248.50
-#     CHG<TAB>3.20<TAB>1.30<TAB>up          (points, percent, up/down/flat)
-#     PREV<TAB>245.30
-#     DAY<TAB>244.00<TAB>250.10             (day low, day high)
-#     W52<TAB>138.80<TAB>278.98             (52-week low, high)
-#     VOL<TAB>98.2M
-#     SERIES<TAB>248.1 247.9 248.4 ...      (downsampled intraday closes)
+#     PRICE<TAB>406.43
+#     CHG<TAB>7.28<TAB>1.82<TAB>up          (points, percent, up/down/flat)
+#     PREV<TAB>399.15
+#     DAY<TAB>386.76<TAB>406.68             (day low, day high)
+#     W52<TAB>288.77<TAB>498.83             (52-week low, high)
+#     VOL<TAB>60.3M
+#     SERIES<TAB>398.0 399.5 ...            (downsampled intraday closes)
 # =============================================================================
 set -u
 SYM="${1:-}"; OUT="${2:-}"
@@ -38,88 +37,119 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 
-def get(url):
+def get(url, accept="*/*"):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
         with urllib.request.urlopen(req, timeout=12) as r:
             return r.read().decode("utf-8", "replace")
     except Exception:
         return ""
 
 
-def fetch(rng, interval):
-    for host in ("query1", "query2"):
-        t = get(f"https://{host}.finance.yahoo.com/v8/finance/chart/"
-                f"{urllib.parse.quote(sym)}?range={rng}&interval={interval}")
-        if t:
-            try:
-                return json.loads(t)["chart"]["result"][0]
-            except Exception:
-                continue
-    return None
-
-
-res = fetch("1d", "5m")
-# Pre-market / closed day can come back empty — fall back to a 5-day view.
-def closes_of(r):
+def num(s):
+    if s is None:
+        return None
+    s = str(s).replace(",", "").replace("%", "").replace("$", "").replace("+", "").strip()
     try:
-        return [c for c in r["indicators"]["quote"][0]["close"] if c is not None]
+        return float(s)
     except Exception:
-        return []
+        return None
 
-if not res or len(closes_of(res)) < 3:
-    res = fetch("5d", "15m") or res
-if not res:
-    sys.exit(1)
 
-meta = res.get("meta", {})
-price = meta.get("regularMarketPrice")
-prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+# --- Quote from CNBC (name, price, change, ranges, volume) --------------------
+q = {}
+txt = get("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+          f"?symbols={urllib.parse.quote(sym)}&requestMethod=itv&noform=1&partnerId=2"
+          "&fund=1&exthrs=1&output=json")
+try:
+    q = json.loads(txt)["FormattedQuoteResult"]["FormattedQuote"][0]
+except Exception:
+    q = {}
+
+name = q.get("name") or sym
+price = num(q.get("last"))
+prev = num(q.get("previous_day_closing"))
+chg = num(q.get("change"))
+pct = num(q.get("change_pct"))
+ctype = (q.get("changetype") or "").upper()
+dlo, dhi = num(q.get("low")), num(q.get("high"))
+wlo, whi = num(q.get("yrloprice")), num(q.get("yrhiprice"))
+vol_alt = q.get("volume_alt")           # already human ("60.3M")
+vol_raw = q.get("volume")               # raw ("60,272,904")
+
+# Fallback quote from Nasdaq if CNBC gave nothing.
+if price is None:
+    nd = get(f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(sym)}/info?assetclass=stocks",
+             accept="application/json")
+    try:
+        pd = json.loads(nd)["data"]["primaryData"]
+        price = num(pd.get("lastSalePrice"))
+        chg = num(pd.get("netChange"))
+        pct = num(pd.get("percentageChange"))
+    except Exception:
+        pass
+
 if price is None:
     sys.exit(1)
 
-name = meta.get("shortName") or meta.get("longName") or sym
-series = closes_of(res)
-if not series:
-    series = [price]
+# Direction.
+if ctype in ("UP", "DOWN"):
+    dirn = ctype.lower()
+elif chg is not None:
+    dirn = "up" if chg > 0 else ("down" if chg < 0 else "flat")
+elif prev is not None:
+    dirn = "up" if price > prev else ("down" if price < prev else "flat")
+else:
+    dirn = "flat"
+# Derive change/pct/prev from each other where possible.
+if prev is None and chg is not None:
+    prev = price - chg
+if chg is None and prev is not None:
+    chg = price - prev
+if pct is None and prev:
+    pct = (price - prev) / prev * 100.0
 
-# Downsample to ~72 points so the on-screen line stays smooth but light.
-MAXP = 72
-if len(series) > MAXP:
-    step = len(series) / MAXP
-    series = [series[min(len(series) - 1, int(i * step))] for i in range(MAXP)]
+# --- Intraday series from Nasdaq (for the line chart) ------------------------
+series = []
+nd = get(f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(sym)}/chart?assetclass=stocks",
+         accept="application/json")
+try:
+    for pt in json.loads(nd)["data"]["chart"]:
+        v = num(pt.get("y") if isinstance(pt, dict) else None)
+        if v is not None:
+            series.append(v)
+except Exception:
+    series = []
+if len(series) > 72:
+    step = len(series) / 72
+    series = [series[min(len(series) - 1, int(i * step))] for i in range(72)]
 
 
 def human(v):
-    try:
-        v = float(v)
-    except Exception:
-        return "—"
+    if v is None:
+        return None
+    v = float(v)
     for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
         if abs(v) >= div:
             return f"{v / div:.1f}{suf}"
     return f"{v:.0f}"
 
 
-out = []
-out.append(f"NAME\t{name}")
-out.append(f"PRICE\t{price:.2f}")
-if prev:
-    pts = price - prev
-    pct = pts / prev * 100.0
-    dirn = "up" if pts > 0.0001 else ("down" if pts < -0.0001 else "flat")
-    out.append(f"CHG\t{pts:.2f}\t{abs(pct):.2f}\t{dirn}")
+out = [f"NAME\t{name}", f"PRICE\t{price:.2f}"]
+if pct is not None:
+    out.append(f"CHG\t{abs(chg):.2f}\t{abs(pct):.2f}\t{dirn}"
+               if chg is not None else f"CHG\t\t{abs(pct):.2f}\t{dirn}")
+if prev is not None:
     out.append(f"PREV\t{prev:.2f}")
-dl, dh = meta.get("regularMarketDayLow"), meta.get("regularMarketDayHigh")
-if dl is not None and dh is not None:
-    out.append(f"DAY\t{dl:.2f}\t{dh:.2f}")
-wl, wh = meta.get("fiftyTwoWeekLow"), meta.get("fiftyTwoWeekHigh")
-if wl is not None and wh is not None:
-    out.append(f"W52\t{wl:.2f}\t{wh:.2f}")
-vol = meta.get("regularMarketVolume")
-if vol:
-    out.append(f"VOL\t{human(vol)}")
-out.append("SERIES\t" + " ".join(f"{v:.2f}" for v in series))
+if dlo is not None and dhi is not None:
+    out.append(f"DAY\t{dlo:.2f}\t{dhi:.2f}")
+if wlo is not None and whi is not None:
+    out.append(f"W52\t{wlo:.2f}\t{whi:.2f}")
+hv = vol_alt if vol_alt else human(num(vol_raw))
+if hv:
+    out.append(f"VOL\t{hv}")
+if len(series) >= 2:
+    out.append("SERIES\t" + " ".join(f"{v:.2f}" for v in series))
 print("\n".join(out))
 PY
 

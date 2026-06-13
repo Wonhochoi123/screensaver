@@ -134,10 +134,10 @@ tts_line() {
     rm -f "$tmp"; return 1
 }
 
-# --- MARKETS: per-ticker chart data + a one-paragraph Grok analysis ----------
+# --- MARKETS: per-ticker live quote (CNBC/Nasdaq) + a Grok analysis ----------
 # News stays 100% feed-sourced; xAI is used here (and ONLY here) to ANALYZE a
-# stock — with live web search on by default (GROK_STOCK_SEARCH=0 disables it),
-# so it can cite the day's real catalyst. Cached in the run dir, so replay is
+# stock — it reasons over the REAL live numbers from the card (xAI's own live
+# search is deprecated, so we don't use it). Cached in the run dir, so replay is
 # free and offline. Always degrades to a numbers-only note on any failure.
 # A trivial completion works for this model? (validates the model id + key.)
 chat_ping() {
@@ -160,43 +160,31 @@ resolve_chat_model() {
     return 1
 }
 
-# Generate one stock's analysis. Tries hard: resolves a working model, attempts
-# WITH live search then WITHOUT (a key without search still gets analysis), and
-# logs the raw API error to the run dir for diagnosis. No temperature (some
-# reasoning models reject it). Returns 1 only if nothing worked.
+# Generate one stock's analysis. The LIVE numbers come from the CNBC/Nasdaq card
+# (passed in); Grok reasons over them for the recommendation. Plain chat — xAI's
+# live search is deprecated, so we don't use it. No temperature (reasoning models
+# can reject it). Logs the raw API error for diagnosis; returns 1 on failure.
 stock_analysis() {            # sym name price prev pct dir outfile
     local sym="$1" name="$2" price="$3" prev="$4" pct="$5" dir="$6" out="$7"
-    local sysmsg usrmsg
-    sysmsg="You are a sharp, decisive equity analyst writing a morning brief. In ONE paragraph of 4 to 6 sentences, plain prose (no markdown, no bullet points, no headings, no preamble): say what most likely drove the stock today (cite the real catalyst if you can find it), the key context, and then give a CLEAR, opinionated recommendation — your stance (Buy, Accumulate, Hold, Trim, or Sell), your conviction level, and the price levels or risks you are watching. Be specific and confident, not wishy-washy. End with exactly: Not financial advice."
-    usrmsg="Analyze ${sym} (${name}) for an investor this morning. It is trading near \$${price}, ${dir} ${pct} percent from a previous close of \$${prev}. What drove it today, the outlook, and your recommendation?"
+    local sysmsg usrmsg body resp txt err
+    sysmsg="You are a sharp, decisive equity analyst writing a morning brief. You are given the stock's REAL current price and today's move — treat those numbers as accurate. In ONE paragraph of 4 to 6 sentences, plain prose (no markdown, no bullet points, no headings, no preamble): explain what is likely driving the stock and the key context, then give a CLEAR, opinionated recommendation — your stance (Buy, Accumulate, Hold, Trim, or Sell), your conviction level, and the specific price levels or risks you are watching (use the real numbers given). Be specific and confident, not wishy-washy. End with exactly: Not financial advice."
+    usrmsg="Analyze ${sym} (${name}) for an investor this morning. It is trading near \$${price}, ${dir} ${pct} percent from a previous close of \$${prev}. Give the context, outlook, and your recommendation."
     resolve_chat_model || { printf '[no working chat model — check GROK_MODEL]\n' \
         >> "$RUN_DIR/stock_debug.log" 2>/dev/null; return 1; }
-
-    local want_search=0; [ "${GROK_STOCK_SEARCH:-1}" = "1" ] && want_search=1
-    local attempt body resp txt err
-    for attempt in 1 2; do
-        if [ "$attempt" = 1 ] && [ "$want_search" = 1 ]; then
-            body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sysmsg" --arg u "$usrmsg" \
-                '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}],
-                  search_parameters:{mode:"on",max_search_results:6}}')"
-        else
-            body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sysmsg" --arg u "$usrmsg" \
-                '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
-        fi
-        resp="$(curl -s --max-time 70 -X POST "$API/chat/completions" \
-            -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$body")"
-        txt="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
-        if [ -n "$txt" ]; then printf '%s' "$txt" > "$out"; return 0; fi
-        err="$(printf '%s' "$resp" | jq -rc '.error.message // .error // "blank response"' 2>/dev/null | head -c 300)"
-        printf '[try %s model=%s search=%s] %s\n' "$attempt" "$CHAT_MODEL" \
-            "$([ "$attempt" = 1 ] && echo "$want_search" || echo 0)" "$err" \
-            >> "$RUN_DIR/stock_debug.log" 2>/dev/null
-        [ "$want_search" = 1 ] || break       # no search → both attempts identical
-    done
+    body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sysmsg" --arg u "$usrmsg" \
+        '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
+    resp="$(curl -s --max-time 70 -X POST "$API/chat/completions" \
+        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$body")"
+    txt="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
+    if [ -n "$txt" ]; then printf '%s' "$txt" > "$out"; return 0; fi
+    err="$(printf '%s' "$resp" | jq -rc '.error.message // .error // "blank response"' 2>/dev/null | head -c 300)"
+    printf '[model=%s] %s\n' "$CHAT_MODEL" "$err" >> "$RUN_DIR/stock_debug.log" 2>/dev/null
     return 1
 }
 
-# Fetch one MARKETS item's chart card + analysis into the run dir (item_NNN.*).
+# Fetch one MARKETS item's card + analysis into the run dir (item_NNN.*).
+# Live quote + intraday line come from CNBC/Nasdaq (config/stock-card.sh); the
+# recommendation comes from Grok, reasoning over those real numbers.
 gen_stock() {                 # NNN
     local num="$1" sym card name price prev pct dir
     sym="$(cat "$RUN_DIR/item_${num}.sym" 2>/dev/null)"
@@ -211,13 +199,12 @@ gen_stock() {                 # NNN
         dir="$(awk -F'\t' '$1=="CHG"{print $4; exit}' "$card")"
     fi
     [ -n "$name" ] || name="$sym"
-    stock_analysis "$sym" "$name" "${price:-?}" "${prev:-?}" "${pct:-0.0}" "${dir:-flat}" \
+    stock_analysis "$sym" "$name" "${price:-?}" "${prev:-?}" "${pct:-}" "${dir:-flat}" \
         "$RUN_DIR/item_${num}.analysis" 2>/dev/null \
-        || printf '%s' "${sym} is ${dir:-flat} ${pct:-0} percent today, near \$${price:-?} versus a previous close of \$${prev:-?}. Live analysis is temporarily unavailable. Not financial advice." \
+        || printf '%s' "${name} (${sym})${price:+ is near \$$price}${pct:+, ${dir} ${pct} percent today}. Live analysis is temporarily unavailable. Not financial advice." \
                > "$RUN_DIR/item_${num}.analysis"
     # Publish what we have NOW (each ticker as it finishes), so the card fills in
-    # progressively instead of waiting for the whole run — and never gets stuck on
-    # "Fetching…" if playback reaches the markets items before generation ends.
+    # progressively and never gets stuck on "Fetching…".
     assemble_stocks; set_stocks
 }
 
@@ -604,10 +591,13 @@ check() {
     if [ -z "$API_KEY" ]; then echo "── stop: no key, can't test the API ──"; return; fi
     printf "  net:   reaching api.x.ai ... "
     if have_net; then echo "ok"; else echo "FAIL (no network, or key rejected)"; echo "──"; return; fi
-    # Stock analysis is the one place we call the chat model (with live search).
-    # Test it directly so a wrong model id or a no-search key is obvious here.
-    printf "  stock: analysis test (AAPL, GROK_MODEL=%s, search=%s) ... " "$MODEL" "${GROK_STOCK_SEARCH:-1}"
+    # Live quote (CNBC) + the chat model (analysis). Test both so a blocked quote
+    # source or a wrong model id is obvious here.
+    printf "  quote: CNBC/Nasdaq for AAPL ... "
     RUN_DIR="$(mktemp -d)"
+    bash "$CFG_DIR/stock-card.sh" "AAPL" "$RUN_DIR/c" 2>/dev/null
+    [ -s "$RUN_DIR/c" ] && echo "ok ($(awk -F'\t' '$1=="PRICE"{print "$"$2}' "$RUN_DIR/c"))" || echo "FAIL (quote sources blocked)"
+    printf "  stock: analysis test (AAPL, GROK_MODEL=%s) ... " "$MODEL"
     if stock_analysis "AAPL" "Apple Inc" "230.00" "228.00" "0.9" "up" "$RUN_DIR/a" && [ -s "$RUN_DIR/a" ]; then
         echo "ok (using model: ${CHAT_MODEL:-$MODEL})"
         echo "         “$(head -c 220 "$RUN_DIR/a")…”"
@@ -639,7 +629,7 @@ stocktest() {
     [ -n "$API_KEY" ] || { echo "no XAI_API_KEY in environment"; return; }
     RUN_DIR="$(mktemp -d)"
     echo "── stock test: $sym ────────────────────────────────────"
-    echo "  GROK_MODEL (configured): $MODEL    search: ${GROK_STOCK_SEARCH:-1}"
+    echo "  GROK_MODEL (configured): $MODEL"
     printf "  resolving a working chat model ... "
     if resolve_chat_model; then echo "$CHAT_MODEL"; else echo "NONE"; fi
     echo "  models on your key: $(curl -s --max-time 15 "$API/models" \

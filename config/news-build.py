@@ -182,27 +182,25 @@ def weather_line():
 
 
 def market_line(sym):
+    # Spoken price line from CNBC's public quote (Yahoo rate-limits/429s many IPs).
     sym = sym.strip().upper()
     if not sym:
         return None
     enc = urllib.parse.quote(sym)
-    for host in ("query1", "query2"):
-        txt = get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{enc}?range=1d&interval=1d")
-        if not txt:
-            continue
-        try:
-            meta = json.loads(txt)["chart"]["result"][0]["meta"]
-            price = meta.get("regularMarketPrice")
-            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-            if price is None:
-                continue
-            if prev:
-                chg = (price - prev) / prev * 100.0
-                dirn = "up" if chg >= 0 else "down"
-                return f"{sym} is trading at ${price:,.2f}, {dirn} {abs(chg):.1f} percent today."
-            return f"{sym} is trading at ${price:,.2f}."
-        except Exception:
-            continue
+    txt = get("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+              f"?symbols={enc}&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json")
+    try:
+        q = json.loads(txt)["FormattedQuoteResult"]["FormattedQuote"][0]
+        price = float(str(q.get("last")).replace(",", ""))
+        name = q.get("name") or sym
+        pct = q.get("change_pct")          # e.g. "+1.82%"
+        if pct:
+            up = "down" if pct.strip().startswith("-") else "up"
+            p = pct.replace("+", "").replace("-", "").replace("%", "").strip()
+            return f"{name} is trading at ${price:,.2f}, {up} {p} percent today."
+        return f"{name} is trading at ${price:,.2f}."
+    except Exception:
+        return None
     return None
 
 
@@ -247,11 +245,15 @@ def main():
     for it in collect(tech_feeds, tech_n):
         add(items, "TECH & FINANCE", it["line"], it["url"], it["say"])
 
+    # One MARKETS item per ticker — ALWAYS (even if the price lookup fails), so
+    # the stock card + Grok analysis still run. Yahoo is often rate-limited (429);
+    # when it is, grok-briefing.sh fills the price/stats in from Grok instead.
     for sym in (os.environ.get("TICKERS", "").split(",")):
         s = sym.strip().upper()
-        ml = market_line(s)
-        if ml:
-            add(items, "MARKETS", ml, "", sym=s)
+        if not s:
+            continue
+        ml = market_line(s) or f"Here's a look at {s} today."
+        add(items, "MARKETS", ml, "", sym=s)
 
     add(items, "CLOSING", closing_line(), "")
     print(json.dumps(items))

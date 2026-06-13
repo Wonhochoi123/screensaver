@@ -4681,20 +4681,33 @@ function sk_draw(cur)
         txt(rec.name, left, y, math.floor(h * 0.021), "&HCFCFCF&", 4, "Montserrat SemiBold", 0x28)
         y = y + math.floor(h * 0.034)
     end
-    txt("$" .. rec.price, left, y, math.floor(h * 0.056), "&HFFFFFF&", 4);
+    if rec.price ~= "" then
+        txt("$" .. rec.price, left, y, math.floor(h * 0.056), "&HFFFFFF&", 4)
+    end
     local sign = rec.dir == "down" and "−" or (rec.dir == "up" and "+" or "")
-    if rec.chg ~= "" then
-        txt(sign .. rec.chg .. "  (" .. sign .. rec.pct .. "%)  today",
-            left + math.floor(Lw * 0.34), y + math.floor(h * 0.012), math.floor(h * 0.026), col, 4)
+    -- Show points + percent when both known; percent alone when that's all we
+    -- have (the Grok-sourced quote may not include exact point change).
+    local chgstr
+    if rec.chg ~= "" and rec.pct ~= "" then chgstr = sign .. rec.chg .. "  (" .. sign .. rec.pct .. "%)"
+    elseif rec.pct ~= "" then chgstr = sign .. rec.pct .. "%"
+    elseif rec.chg ~= "" then chgstr = sign .. rec.chg end
+    if chgstr then
+        txt(chgstr .. "  today", left + math.floor(Lw * 0.34), y + math.floor(h * 0.012),
+            math.floor(h * 0.026), col, 4)
     end
     y = y + math.floor(h * 0.072)
 
-    -- 1-day chart.
+    -- 1-day chart (only when we actually have an intraday series, i.e. Yahoo
+    -- worked). Without it, leave the space for the stats rather than an empty box.
     local chTop = y
     local chH = math.floor(h * 0.17)
-    txt("TODAY", right, chTop - math.floor(h * 0.006), math.floor(h * 0.016),
-        "&H9A9A9A&", 6, "Montserrat SemiBold", 0x40)
-    sk_chart(ev, rec, left, chTop, Lw, chH, col)
+    if rec.series and #rec.series >= 2 then
+        txt("TODAY", right, chTop - math.floor(h * 0.006), math.floor(h * 0.016),
+            "&H9A9A9A&", 6, "Montserrat SemiBold", 0x40)
+        sk_chart(ev, rec, left, chTop, Lw, chH, col)
+    else
+        chH = math.floor(h * 0.02)   -- no chart → tighten up to the stats row
+    end
     y = chTop + chH + math.floor(h * 0.035)
 
     -- Stats row.
