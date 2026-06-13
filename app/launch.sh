@@ -46,11 +46,24 @@ cleanup() {
     [ -n "$GROK_PID" ]     && kill "$GROK_PID" 2>/dev/null
     [ -f /tmp/ss_briefing_ffplay.pid ] && kill "$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null)" 2>/dev/null
     [ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
-    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}" /tmp/ss_briefing.txt /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid
+    rm -f "$AUDIO_SOCK" "${LOAD_SOCK:-}" \
+          /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
+          /tmp/ss_briefing.manifest /tmp/ss_briefing.idx /tmp/ss_briefing.detail \
+          /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid
 }
 trap cleanup EXIT INT TERM
 
 rm -f "$AUDIO_SOCK"
+
+# Clear any stale briefing state left by a previous (possibly hard-killed) session
+# or a manual `grok-briefing.sh --play` test. The crucial one is ss_briefing_live:
+# photo.lua treats its mere presence as "a briefing is playing", so a leftover
+# marker makes the loading screen render the briefing (its first item is weather).
+[ -f /tmp/ss_briefing_ffplay.pid ] && kill "$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null)" 2>/dev/null
+[ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
+rm -f /tmp/ss_briefing_live /tmp/ss_briefing.txt /tmp/ss_briefing.url \
+      /tmp/ss_briefing.manifest /tmp/ss_briefing.idx /tmp/ss_briefing.detail \
+      /tmp/ss_briefing.pid /tmp/ss_briefing_ffplay.pid
 
 nice -n 19 "$POLICE" >/dev/null 2>&1 &
 POLICE_PID=$!
