@@ -2684,18 +2684,19 @@ end
 -- Caption "fancy appear": each line fades in (staggered), like the rest of the
 -- stylish text. (Backdrop is photos-only during a briefing, so add_timeout isn't
 -- starved by video decode.)
-local BC = { lines = {}, w = 0, h = 0, t0 = 0, gen = 0 }
+local BC = { lines = {}, w = 0, h = 0, t0 = 0, gen = 0, group = nil }
 function briefing_fade()
     local gen = BC.gen
     local el  = mp.get_time() - BC.t0
     local parts = {}
     for i, L in ipairs(BC.lines) do
+        local amin = L.amin or 0x12                      -- settled alpha (lower = brighter)
         local p = (el - (i - 1) * 0.06) / 0.35           -- 0.35s fade, 0.06s/line stagger
-        local a = (p <= 0) and 0xFF or (p >= 1) and 0x12
-            or math.floor(0xFF + (0x12 - 0xFF) * p + 0.5)
+        local a = (p <= 0) and 0xFF or (p >= 1) and amin
+            or math.floor(0xFF + (amin - 0xFF) * p + 0.5)
         parts[#parts + 1] = string.format(
-            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&HFFFFFF&%s\\alpha&H%02X&}%s",
-            L.cx, L.cy, L.fs, L.fsp, glow(L.fs), a, L.text)
+            "{\\an5\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\1c&H%s&%s\\alpha&H%02X&}%s",
+            L.cx, L.cy, L.fs, L.fsp, L.col or "FFFFFF", glow(L.fs), a, L.text)
     end
     briefing_ov.res_x = BC.w; briefing_ov.res_y = BC.h
     briefing_ov.data = table.concat(parts, "\n")
@@ -2714,6 +2715,7 @@ local function draw_briefing()
         if briefing_shown ~= nil then        -- was showing → tear down once
             briefing_shown = nil
             BC.gen = BC.gen + 1
+            BC.group = nil
             briefing_boxes = nil
             briefing_detail_clear()
             briefing_ov:remove()
@@ -2729,24 +2731,56 @@ local function draw_briefing()
     briefing_shown = txt
     if txt == "" or txt == "__HIDE__" or briefing_subs_hidden then
         BC.gen = BC.gen + 1   -- cancel any in-flight fade
+        BC.group = nil
         briefing_boxes = nil  -- no captions on screen
         briefing_detail_clear()
         briefing_ov:remove(); return
     end
 
     local w, h = refresh_display_size()
-    -- Auto-follow detail: grok-briefing.sh publishes the current one-liner's
-    -- paired explanation to /tmp/ss_briefing.detail (already separated, no fetch).
-    -- When there's a detail we ALWAYS split — the one-liner big on the LEFT, its
-    -- detail on the RIGHT — updating automatically as each line plays. No detail
-    -- (e.g. the welcome greeting) → the caption owns the full width.
+    -- grok-briefing.sh publishes three things: the current one-liner's paired
+    -- detail (/tmp/ss_briefing.detail), the full item list as "category<TAB>line"
+    -- (/tmp/ss_briefing.manifest), and the 1-based index of the line being read
+    -- now (/tmp/ss_briefing.idx). Together they drive a GROUPED left column: all
+    -- of the current category's one-liners stacked, the active line highlighted
+    -- in blue, its detail auto-shown on the RIGHT. No manifest/index (e.g. the
+    -- welcome greeting) → the single caption owns the full width, as before.
     local dfh = io.open("/tmp/ss_briefing.detail", "r")
     local detail = dfh and (dfh:read("*a") or "") or ""
     if dfh then dfh:close() end
     detail = detail:gsub("%s+$", "")
+
+    local mani = {}
+    local mf = io.open("/tmp/ss_briefing.manifest", "r")
+    if mf then
+        for ln in mf:lines() do
+            local c, t = ln:match("^(.-)\t(.*)$")
+            if t then mani[#mani + 1] = { cat = c, line = t } end
+        end
+        mf:close()
+    end
+    local cur
+    local xf = io.open("/tmp/ss_briefing.idx", "r")
+    if xf then cur = tonumber((xf:read("*l") or "")); xf:close() end
+
+    -- Grouped mode when we have the manifest + a valid index: gather the
+    -- contiguous run of items sharing the current category, and remember which
+    -- one is active. Otherwise fall back to the single current line.
+    local sentences, active_pos, group_sig
+    if cur and mani[cur] then
+        local cat = mani[cur].cat
+        local g0 = cur; while g0 > 1 and mani[g0 - 1].cat == cat do g0 = g0 - 1 end
+        local g1 = cur; while mani[g1 + 1] and mani[g1 + 1].cat == cat do g1 = g1 + 1 end
+        sentences = {}
+        for i = g0, g1 do sentences[#sentences + 1] = mani[i].line end
+        active_pos = cur - g0 + 1
+        group_sig  = cat .. "|" .. g0 .. "|" .. g1
+    else
+        sentences = split_sentences(txt:gsub("[\r\n]+", " "))
+    end
+
     local split   = detail ~= ""
     local cap_cx  = split and math.floor(w * 0.25) or math.floor(w / 2)
-    local sentences = split_sentences(txt:gsub("[\r\n]+", " "))
     -- Fill the screen below the badge/controls at the top.
     local regionTop = math.floor(h * 0.20)
     local regionH   = h - regionTop - math.floor(h * 0.04)
@@ -2771,28 +2805,44 @@ local function draw_briefing()
         return lines, lineH, sgap, fsp, totalH
     end
 
-    local fs = math.floor(h * 0.060)
+    -- A grouped column of several one-liners starts smaller so they all fit.
+    local fs = math.floor(h * (active_pos and #sentences > 2 and 0.044 or 0.060))
     local lines, lineH, sgap, fsp, totalH
-    for _ = 1, 9 do
+    for _ = 1, 12 do
         lines, lineH, sgap, fsp, totalH = layout(fs)
-        if totalH <= maxH or fs <= math.floor(h * 0.020) then break end
+        if totalH <= maxH or fs <= math.floor(h * 0.018) then break end
         fs = math.floor(fs * 0.88)
     end
     if #lines == 0 then briefing_boxes = nil; briefing_ov:remove(); return end
 
-    -- Stash the positioned lines; briefing_fade animates them in. Captions are
-    -- no longer clickable (the detail is auto-shown, not link-fetched), so there
-    -- are no caption boxes.
+    -- Position the lines and colour them: in grouped mode the active one-liner is
+    -- sky blue and bright, the rest of its category recede to dim white; a single
+    -- ungrouped caption (welcome greeting) is plain bright white.
     local y = regionTop + math.floor((regionH - totalH) / 2)   -- centered below the top
     BC.lines, BC.w, BC.h = {}, w, h
     for _, L in ipairs(lines) do
         if L.gap_before then y = y + sgap end
+        local col, amin
+        if not active_pos then          col, amin = "FFFFFF", 0x12   -- single caption
+        elseif L.si == active_pos then  col, amin = "FFB464", 0x10   -- BGR sky blue, active
+        else                            col, amin = "FFFFFF", 0x80   -- other lines, dimmed
+        end
         BC.lines[#BC.lines + 1] = { text = L.text, cx = cap_cx,
-                                    cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp }
+                                    cy = y + math.floor(lineH / 2), fs = fs, fsp = fsp,
+                                    col = col, amin = amin }
         y = y + lineH
     end
     briefing_boxes = nil
-    BC.t0 = mp.get_time(); BC.gen = BC.gen + 1
+    BC.gen = BC.gen + 1
+    -- Soft staggered fade-in when the GROUP changes (new category, or the
+    -- ungrouped fallback); an instant settled repaint when only the highlighted
+    -- line moves within the same group — so the blue glides down without the
+    -- whole column re-fading each line.
+    if group_sig ~= BC.group then
+        BC.group = group_sig; BC.t0 = mp.get_time()
+    else
+        BC.t0 = mp.get_time() - 100
+    end
     briefing_fade()
     -- Auto-follow: show this line's paired detail on the right (or clear if none).
     if split then briefing_detail_show(detail) else briefing_detail_clear() end

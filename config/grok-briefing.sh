@@ -53,6 +53,8 @@ TODAY="$(date '+%Y-%m-%d')"
 TODAY_CACHE="$CACHE_DIR/$TODAY"
 SUB_FILE="/tmp/ss_briefing.txt"          # photo.lua reads this for the current one-liner
 DETAIL_FILE="/tmp/ss_briefing.detail"    # photo.lua reads this for the current line's detail
+MANIFEST_FILE="/tmp/ss_briefing.manifest"  # all items "category<TAB>line" (left column grouping)
+IDX_FILE="/tmp/ss_briefing.idx"          # 1-based index of the line being read right now
 PID_FILE="/tmp/ss_briefing.pid"          # exists for the whole process (controls/single-instance)
 LIVE_FILE="/tmp/ss_briefing_live"        # exists ONLY once it's actually playing (drives the HUD)
 FFPLAY_PID_FILE="/tmp/ss_briefing_ffplay.pid"
@@ -80,28 +82,36 @@ TODAY_HUMAN="$(date '+%A, %B %d, %Y')"
 BRIEFING_PROMPT=""; BRIEFING_HASH=""
 build_prompt() {
     local loc="${LOCATION:-your area}" tick=""
-    [ -n "$TICKERS" ] && tick=$'\n- One item for EACH of these tickers, with its current price, percent change today, and one key news point: '"$TICKERS"
+    [ -n "$TICKERS" ] && tick=$'\n- MARKETS: one item for EACH of these tickers — '"$TICKERS"$' — the one-liner naming it with its price and percent move, the detail covering what is driving it and what it means for a holder.'
     BRIEFING_PROMPT="You are preparing a spoken morning briefing for $TODAY_HUMAN, for someone in $loc. Search the web for current, real information as of today.
 
-Produce the briefing as a sequence of ITEMS. Each item has TWO parts:
-  1) A ONE-LINER: a single spoken sentence (a headline) in plain conversational English. It is read aloud, so use NO markdown, NO URLs, NO bracketed citations, NO bullet markers, NO asterisks, and NO emojis.
-  2) A DETAIL: two to four sentences expanding on the one-liner with the specifics, numbers, and context, also plain spoken English with NO URLs, citations, brackets, markdown, or emojis.
+Produce the briefing as a sequence of ITEMS. Each item has THREE parts:
+  1) CATEGORY: one of these exact labels — WEATHER, TOP NEWS, TECH & FINANCE, MARKETS, WATCHLIST, CLOSING.
+  2) ONE-LINER: a single spoken headline sentence in plain conversational English. Read aloud, so use NO markdown, NO URLs, NO bracketed citations, NO bullet markers, NO asterisks, NO emojis.
+  3) DETAIL: a substantial, genuinely insightful explanation of FOUR to SIX sentences. Give the concrete numbers and facts, the context behind the story, WHY it matters, and a takeaway or what to watch next. Be specific and analytical, not a restatement of the one-liner. Plain spoken English only — NO URLs, citations, brackets, markdown, or emojis.
 
-Output EXACTLY in this format and nothing else — no preamble, no headings, no closing remarks:
+Output EXACTLY in this format and nothing else — no preamble, no extra headings, no commentary:
 @@ITEM@@
+@@CAT@@
+<category label>
+@@LINE@@
 <one-liner sentence here>
 @@DETAIL@@
-<the detail sentences here>
+<four to six sentences of real insight here>
 @@ITEM@@
-<next one-liner sentence here>
+@@CAT@@
+<category label>
+@@LINE@@
+<one-liner sentence here>
 @@DETAIL@@
-<the detail sentences here>
+<four to six sentences of real insight here>
 
-Cover these, in this order, one ITEM each unless noted:
-- Today's weather for $loc (1 item)
-- The three most important world or national news stories happening right now (3 items)
-- Three technology headlines and two financial-market headlines (5 items)$tick
-- Two stocks or investments worth watching today, each one-liner naming it, each detail saying why it matters today plus a one-sentence risk note (2 items)
+Cover these, in this exact order:
+- WEATHER: today's weather for $loc (1 item).
+- TOP NEWS: the three most important world or national stories right now (3 items).
+- TECH & FINANCE: three technology stories and two financial-market stories (5 items).$tick
+- WATCHLIST: two stocks or investments worth watching today, each detail saying why it matters today and giving a one-sentence risk note (2 items).
+- CLOSING: one warm, brief sign-off wishing the listener a good day (1 item); for this item only, the DETAIL may be a single short sentence.
 
 Never put URLs, source names in brackets, citation numbers, asterisks, or emojis anywhere."
     BRIEFING_HASH="$(printf '%s' "$BRIEFING_PROMPT" | md5sum | cut -d' ' -f1)"
@@ -138,9 +148,9 @@ gen_briefing() {
     # Keep the raw response beside the cache for diagnosis.
     printf '%s' "$resp" > "$TODAY_CACHE/briefing.resp" 2>/dev/null
 
-    # Parse the response text into a JSON array of {line, detail}. The model is
-    # asked for a strict @@ITEM@@ / @@DETAIL@@ format, which is trivially
-    # separable; we still clean each part of any stray markdown/URLs as a guard.
+    # Parse the response text into a JSON array of {cat, line, detail}. The model
+    # is asked for a strict @@ITEM@@/@@CAT@@/@@LINE@@/@@DETAIL@@ format, which is
+    # trivially separable; we still clean each part of stray markdown/URLs.
     local items
     items="$(BRIEF_RESP="$resp" python3 - <<'PY'
 import os, re, json
@@ -176,30 +186,51 @@ def clean(s):
     s = re.sub(r'\(\s*\)', '', s)                              # emptied parentheses
     return s.strip()
 
+VALID = {"WEATHER", "TOP NEWS", "TECH & FINANCE", "MARKETS", "WATCHLIST", "CLOSING"}
+def grab(ch, a, b):
+    # text after marker a, up to marker b (or end)
+    pat = r'@@\s*' + a + r'\s*@@(.*?)(?=@@\s*' + (b or 'ZZZ') + r'\s*@@|$)'
+    m = re.search(pat, ch, re.S)
+    return m.group(1) if m else ""
+
 items = []
+last_cat = "BRIEFING"
 # Drop anything before the first marker (preamble), then split into items.
 for ch in re.split(r'@@\s*ITEM\s*@@', text)[1:]:
-    parts = re.split(r'@@\s*DETAIL\s*@@', ch, maxsplit=1)
-    line = re.sub(r'\s*\n\s*', ' ', clean(parts[0])).strip()
-    detail = clean(parts[1]) if len(parts) > 1 else ""
-    if line:
-        items.append({"line": line, "detail": detail})
+    cat = re.sub(r'\s+', ' ', clean(grab(ch, 'CAT', 'LINE'))).strip().upper()
+    line = re.sub(r'\s*\n\s*', ' ', clean(grab(ch, 'LINE', 'DETAIL'))).strip()
+    md = re.search(r'@@\s*DETAIL\s*@@(.*)$', ch, re.S)
+    detail = clean(md.group(1)) if md else ""
+    if not line:
+        continue
+    # Snap odd category spellings to the nearest valid label; keep the last seen
+    # one if the model omitted it (so an item still groups with its neighbours).
+    if cat not in VALID:
+        cat = next((v for v in VALID if cat and (v in cat or cat in v)), last_cat)
+    last_cat = cat
+    items.append({"cat": cat, "line": line, "detail": detail})
 print(json.dumps(items))
 PY
 )"
     local n; n="$(printf '%s' "$items" | jq 'length' 2>/dev/null)"
     [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 1
 
-    # Pass 1: write every line/detail and the count, so playback sees the full
-    # list the instant the first clip is ready.
-    rm -f "$TODAY_CACHE"/item_*.line "$TODAY_CACHE"/item_*.detail "$TODAY_CACHE"/item_*.mp3 2>/dev/null
-    local i num line detail
+    # Pass 1: write every line/detail/category and a manifest (category<TAB>line
+    # per item, in order), so playback — and photo.lua's grouped left column —
+    # see the full list the instant the first clip is ready.
+    rm -f "$TODAY_CACHE"/item_*.line "$TODAY_CACHE"/item_*.detail \
+          "$TODAY_CACHE"/item_*.cat "$TODAY_CACHE"/item_*.mp3 "$TODAY_CACHE/briefing.manifest" 2>/dev/null
+    local i num line detail cat
+    : > "$TODAY_CACHE/briefing.manifest"
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
+        cat="$(printf '%s' "$items" | jq -r ".[$i].cat")"
         line="$(printf '%s' "$items" | jq -r ".[$i].line")"
         detail="$(printf '%s' "$items" | jq -r ".[$i].detail")"
+        printf '%s' "$cat"    > "$TODAY_CACHE/item_${num}.cat"
         printf '%s' "$line"   > "$TODAY_CACHE/item_${num}.line"
         printf '%s' "$detail" > "$TODAY_CACHE/item_${num}.detail"
+        printf '%s\t%s\n' "$cat" "$line" >> "$TODAY_CACHE/briefing.manifest"
     done
     printf '%s' "$n" > "$TODAY_CACHE/item.count"
 
@@ -224,7 +255,7 @@ prep() { have_net || return 1; gen_briefing; }
 ss_music_pause() { printf '{"command":["set_property","pause",%s]}\n' "$1" \
     | socat -t1 - "UNIX-CONNECT:$AUDIO_SOCK" 2>/dev/null; }
 sub_show()   { printf '%s' "$1" > "$SUB_FILE"; }
-sub_hide()   { printf '__HIDE__' > "$SUB_FILE"; rm -f "$DETAIL_FILE"; }
+sub_hide()   { printf '__HIDE__' > "$SUB_FILE"; rm -f "$DETAIL_FILE" "$IDX_FILE" "$MANIFEST_FILE"; }
 # Publish (or clear) the current one-liner's detail. Atomic (tmp+mv); callers
 # publish it BEFORE the caption so photo.lua never pairs a new line with the
 # previous item's detail.
@@ -233,6 +264,23 @@ set_detail() {
         cp -f "$1" "$DETAIL_FILE.part" 2>/dev/null && mv -f "$DETAIL_FILE.part" "$DETAIL_FILE"
     else
         rm -f "$DETAIL_FILE"
+    fi
+}
+# Publish the full item list (so photo.lua can show a category's lines together),
+# and the index of the line being read (so it can highlight where we are). Both
+# atomic. set_idx clears when given nothing (welcome greeting → no grouping).
+set_manifest() {
+    if [ -n "$1" ] && [ -s "$1" ]; then
+        cp -f "$1" "$MANIFEST_FILE.part" 2>/dev/null && mv -f "$MANIFEST_FILE.part" "$MANIFEST_FILE"
+    else
+        rm -f "$MANIFEST_FILE"
+    fi
+}
+set_idx() {
+    if [ -n "$1" ]; then
+        printf '%s' "$1" > "$IDX_FILE.part" && mv -f "$IDX_FILE.part" "$IDX_FILE"
+    else
+        rm -f "$IDX_FILE"
     fi
 }
 
@@ -308,7 +356,7 @@ play_welcome() {
     wmp3="$(find "$WELCOME_DIR" -maxdepth 1 -type f -iname '*.mp3' 2>/dev/null | shuf -n1)"
     [ -n "$wmp3" ] && [ -s "$wmp3" ] || return 0
     wtxt="${wmp3%.*}.txt"
-    set_detail ""                       # the greeting has no detail
+    set_detail ""; set_idx ""           # the greeting has no detail and no grouping
     [ -s "$wtxt" ] && sub_show "$(cat "$wtxt")" || sub_hide
     SKIP=0; STEP=1
     ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$wmp3" >/dev/null 2>&1 &
@@ -343,6 +391,8 @@ play() {
     [ -n "$BGM_PID" ] && sleep "$SPEAK_DELAY"
     play_welcome
 
+    # The grouped left column needs the whole item list up front.
+    set_manifest "$TODAY_CACHE/briefing.manifest"
     local total; total="$(cat "$TODAY_CACHE/item.count" 2>/dev/null)"
     [ -n "$total" ] || total=0
     local idx=1
@@ -359,8 +409,9 @@ play() {
         [ "$SKIP" = 1 ] && { idx=$(( idx + STEP )); [ "$idx" -lt 1 ] && idx=1; continue; }
         [ -s "$mp3" ] || { idx=$((idx+1)); continue; }
 
-        # Publish the detail FIRST, then the one-liner caption.
+        # Publish the detail + current index FIRST, then the one-liner caption.
         set_detail "$TODAY_CACHE/item_${num}.detail"
+        set_idx "$idx"
         [ -s "$TODAY_CACHE/item_${num}.line" ] && sub_show "$(cat "$TODAY_CACHE/item_${num}.line")" || sub_hide
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$mp3" >/dev/null 2>&1 &
         CUR_FFPLAY=$!; echo "$CUR_FFPLAY" > "$FFPLAY_PID_FILE"
@@ -441,7 +492,8 @@ case "$MODE" in
     --prep)  gate_ok || exit 0; prep ;;
     --play)  gate_ok || exit 0; play ;;                 # play today's cached briefing
     --fresh) gate_ok || exit 0;                         # discard today's cache, make a new one
-             rm -f "$TODAY_CACHE"/item_*.* "$TODAY_CACHE"/item.count "$TODAY_CACHE"/briefing_*.done 2>/dev/null
+             rm -f "$TODAY_CACHE"/item_*.* "$TODAY_CACHE"/item.count \
+                   "$TODAY_CACHE"/briefing.manifest "$TODAY_CACHE"/briefing_*.done 2>/dev/null
              play ;;
     *)       gate_ok || exit 0; watch_loop ;;
 esac
