@@ -3547,8 +3547,6 @@ SET.schema = {
       desc = "Soft-drop of the briefing music when it ends." },
     { key = "GROK_FADE_RESUME", label = "Music resume fade", typ = "num", min = 0, max = 10, step = 0.1, dec = 1, unit = "s",
       desc = "Soft return of the slideshow music afterwards." },
-    { key = "GROK_LINK_BROWSER", label = "Links open in browser", typ = "bool", on = "yes", off = "no", def = "no", live = true,
-      desc = "OFF reads sources in a split-screen pane; ON launches your browser." },
 
     { head = "PLACE NAMES" },
     { key = "GEONAMES_COUNTRIES", label = "Countries indexed", typ = "str",
