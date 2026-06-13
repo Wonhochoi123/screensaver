@@ -648,10 +648,32 @@ function bgra_complete(path, S)   -- GLOBAL: main chunk is at the 200-local cap
     return fi and fi.size and fi.size >= S * S * 4
 end
 
+-- The QR(1) / minimap(2) / album-thumb(THUMB_ID) are overlay-add BITMAPS, and
+-- mpv composites those ABOVE every ASS overlay regardless of z — so the quiet-
+-- hours black rectangle (an ASS overlay) can't cover them. We instead remember
+-- each one's last overlay-add args, suppress drawing while blacked out, and
+-- actually remove/restore the bitmaps around the blackout. GLOBAL: 200-local cap.
+HUD_BMP = {}
+function hud_bmp_add(args)          -- args = a full {"overlay-add", id, ...} table
+    HUD_BMP[args[2]] = args
+    if BO and BO.on then return end -- don't paint bitmaps over the blackout
+    mp.command_native(args)
+end
+function hud_bmp_remove_all()
+    for _, id in ipairs({ 1, 2, THUMB_ID }) do pcall(mp.command_native, { "overlay-remove", id }) end
+end
+function hud_bmp_restore()
+    if briefing_active and briefing_active() then return end   -- briefing hides these on purpose
+    for _, id in ipairs({ 1, 2, THUMB_ID }) do
+        local a = HUD_BMP[id]
+        if a then pcall(mp.command_native, a) end
+    end
+end
+
 local function apply_qr(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
-    mp.command_native({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
+    hud_bmp_add({"overlay-add", 1, L.qr_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
     -- Invitation on the label line between the QR square and its coordinates
     -- (bitmaps cover ASS, so it can't sit on the square itself). The QR opens
     -- the spot in Google Maps; the wording is a conf knob, empty hides it.
@@ -681,7 +703,7 @@ ZL = { ov = mp.create_osd_overlay("ass-events"),
 local function apply_minimap(bgra_path, L)
     if briefing_active and briefing_active() then return end
     if not bgra_complete(bgra_path, L.S) then return end
-    mp.command_native({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
+    hud_bmp_add({"overlay-add", 2, L.map_x, L.img_top, bgra_path, 0, "bgra", L.S, L.S, L.S * 4})
     -- Zoom-scale read-out on the label line between the map square and its
     -- coordinates (overlay-add bitmaps render on top of all ASS text, so it
     -- can't sit on the square itself). Styled like the coordinate labels;
@@ -1884,7 +1906,7 @@ local function draw_thumb()
     if not (fi and fi.size and fi.size >= thumb.d * thumb.d * 4) then return end
     TH.shown = want
     music_thumb_ov:remove()              -- the bitmap has its own baked ring on top
-    mp.command_native({"overlay-add", THUMB_ID, thumb.x, thumb.y,
+    hud_bmp_add({"overlay-add", THUMB_ID, thumb.x, thumb.y,
         want, 0, "bgra", thumb.d, thumb.d, thumb.d * 4})
 end
 
@@ -2164,6 +2186,7 @@ function bo_show()
     if BO.on then return end
     BO.on = true
     BO.was_paused = mp.get_property_bool("pause")
+    hud_bmp_remove_all()    -- the QR/minimap/thumb are bitmaps ASS can't cover; pull them
     -- Gentle ~1.2s fade to black; decode pauses only once fully dark. A wake
     -- mid-fade cancels via the gen counter.
     BO.gen = (BO.gen or 0) + 1
@@ -2190,6 +2213,7 @@ function bo_hide()
     BO.gen = (BO.gen or 0) + 1                       -- cancel an in-flight fade
     BO.ov:remove()
     if not BO.was_paused then mp.set_property_bool("pause", false) end
+    hud_bmp_restore()                                -- bring the QR/minimap/thumb back
 end
 -- Reset the idle clock; if we were blacked out, wake and report it (so the input
 -- that woke us is swallowed instead of also triggering its action, like a phone).
