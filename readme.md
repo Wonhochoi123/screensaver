@@ -171,9 +171,10 @@ to readable text. The one exception is the **weather** item, whose right pane is
 high/low, wind, humidity, sunrise and sunset, and an **8-hour strip with a
 temperature sparkline**. The **markets** items are special too: the left half
 draws a **Google-Finance-style stock card** — ticker chips (the active one in
-blue), the company name, big price, today's change, a **line chart that cycles
-through TODAY / 1 MONTH / 1 YEAR** (each labelled with its % move; the 1-day view
-has a dashed previous-close line), and a day/52-week range + volume row — while the right half
+blue), the company name, big price, today's change, a line chart with clickable
+**1D / 1M / 1Y range buttons** (it gently auto-cycles them until you click one;
+each is labelled with its % move, and the 1-day view has a dashed previous-close
+line), and a day/52-week range + volume row — while the right half
 shows a **one-paragraph Grok analysis** of that ticker — what moved it, the
 context, and a **clear, opinionated recommendation** (Buy / Accumulate / Hold /
 Trim / Sell with the levels it's watching, reasoned over the real live numbers).

@@ -1003,6 +1003,11 @@ mp.register_script_message("handle-left-click", function()
         if active then
             local act = controls_hit and controls_hit(mouse.x, mouse.y)
             if act then act(); return end
+            -- Click a stock card's range button (1D/1M/1Y) to switch the chart.
+            if SK and SK.on and sk_btn_hit then
+                local ri = sk_btn_hit(mouse.x, mouse.y)
+                if ri then SK.range_idx = ri; SK.range_manual = true; sk_draw(SK.cur); return end
+            end
             -- Click a caption SENTENCE to open its own source in a browser. Each
             -- sentence box carries the reference xAI cited for that sentence; the
             -- link is never spoken or shown. A click off any linked sentence falls
@@ -4509,8 +4514,9 @@ end
 -- grok-briefing.sh's /tmp/ss_briefing.stocks (Yahoo chart + xAI analysis).
 -- (Globals — the main chunk is at Lua's 200-local cap.)
 -- ----------------------------------------------------------------------------
-SK = { ov = mp.create_osd_overlay("ass-events"), on = false, sig = nil,
-       byIdx = {}, order = {}, akey = nil, cur = nil, mani = nil, range_idx = 0 }
+SK = { ov = mp.create_osd_overlay("ass-events"), on = false, sig = nil, btns = {},
+       byIdx = {}, order = {}, akey = nil, cur = nil, mani = nil, range_idx = 0,
+       range_manual = false }
 SK.ov.z = 1900
 -- BGR up/down/flat colours (kept on SK, not new main-chunk locals — 200 cap).
 SK.cUp, SK.cDn, SK.cFl = "&H37C84A&", "&H4A4AE0&", "&HB0B0B0&"
@@ -4557,9 +4563,9 @@ function sk_load()
         -- the 1-month and 1-year history when available. The card cycles through
         -- whichever exist.
         r.ranges = {}
-        if #r.series >= 2 then r.ranges[#r.ranges + 1] = { label = "TODAY", s = r.series, base = true } end
-        if #r.s1m >= 2 then r.ranges[#r.ranges + 1] = { label = "1 MONTH", s = r.s1m } end
-        if #r.s1y >= 2 then r.ranges[#r.ranges + 1] = { label = "1 YEAR", s = r.s1y } end
+        if #r.series >= 2 then r.ranges[#r.ranges + 1] = { label = "TODAY", short = "1D", s = r.series, base = true } end
+        if #r.s1m >= 2 then r.ranges[#r.ranges + 1] = { label = "1 MONTH", short = "1M", s = r.s1m } end
+        if #r.s1y >= 2 then r.ranges[#r.ranges + 1] = { label = "1 YEAR", short = "1Y", s = r.s1y } end
         if r.idx then SK.byIdx[r.idx] = r; SK.order[#SK.order + 1] = r end
     end
 end
@@ -4567,7 +4573,7 @@ end
 function sk_show(cur, mani)
     if wx_hide then wx_hide() end
     sk_load()
-    if cur ~= SK.cur then SK.range_idx = 0 end   -- new ticker → start at TODAY
+    if cur ~= SK.cur then SK.range_idx = 0; SK.range_manual = false end   -- new ticker → TODAY, auto again
     SK.on = true; SK.cur = cur; SK.mani = mani
     sk_draw(cur)
     -- Right pane: this ticker's analysis, fed into the reader so ↑/↓ scroll it.
@@ -4631,6 +4637,14 @@ function sk_chart(ev, s, prevn, bx, by, bw, bh, col)
     local _, hh = refresh_display_size()
     ev[#ev + 1] = string.format("{\\an7\\pos(0,0)\\1a&HFF&\\bord%d\\3c%s\\3a&H10&\\shad0\\p1}%s{\\p0}",
         math.max(1, math.floor(hh * 0.0024)), col, table.concat(seg, " "))
+end
+
+-- Hit-test the chart range buttons (1D/1M/1Y). Returns the range_idx to set, or nil.
+function sk_btn_hit(mx, my)
+    for _, b in ipairs(SK.btns or {}) do
+        if mx >= b.x0 and mx <= b.x1 and my >= b.y0 and my <= b.y1 then return b.ri end
+    end
+    return nil
 end
 
 function sk_draw(cur)
@@ -4706,27 +4720,44 @@ function sk_draw(cur)
     end
     y = y + math.floor(h * 0.072)
 
-    -- Switchable line chart: cycles TODAY / 1 MONTH / 1 YEAR (whichever exist),
-    -- labelled with that range's % move. Without any series (e.g. crypto), leave
-    -- the space for the stats rather than an empty box.
-    local chTop = y
-    local chH = math.floor(h * 0.17)
+    -- Switchable line chart with clickable range buttons (1D / 1M / 1Y). The %
+    -- move for the selected range sits top-left; the buttons top-right (active in
+    -- blue). Without any series (e.g. crypto) leave the space for the stats.
+    SK.btns = {}
+    local chTop = y + math.floor(h * 0.034)   -- leave a row above the chart for the buttons
+    local chH = math.floor(h * 0.16)
     local ranges = rec.ranges or {}
     if #ranges > 0 then
-        local rng = ranges[(SK.range_idx % #ranges) + 1]
+        local sel = (SK.range_idx % #ranges) + 1
+        local rng = ranges[sel]
         local s = rng.s
         local rcol, rpct = col, nil
         if s[1] and s[1] ~= 0 then
             rpct = (s[#s] - s[1]) / s[1] * 100
             rcol = rpct >= 0 and SK.cUp or SK.cDn
         end
-        local lbl = rng.label
-        if rpct then lbl = lbl .. string.format("   %s%.1f%%", rpct >= 0 and "+" or "−", math.abs(rpct)) end
-        txt(lbl, right, chTop - math.floor(h * 0.006), math.floor(h * 0.016), rcol, 6,
-            "Montserrat SemiBold", 0x30)
+        -- Selected range's % move (top-left, above the chart).
+        local rowY = y
+        if rpct then
+            txt(string.format("%s %s%.1f%%", rng.label, rpct >= 0 and "+" or "−", math.abs(rpct)),
+                left, rowY + math.floor(h * 0.012), math.floor(h * 0.018), rcol, 4, "Montserrat SemiBold", 0x20)
+        end
+        -- Buttons (top-right).
+        local bw, bh, bg = math.floor(h * 0.046), math.floor(h * 0.030), math.floor(h * 0.010)
+        local bx = right - (#ranges * bw + (#ranges - 1) * bg)
+        for i, rg in ipairs(ranges) do
+            local x0 = bx + (i - 1) * (bw + bg)
+            local on = (i == sel)
+            ev[#ev + 1] = "{\\an7\\pos(0,0)\\bord" .. (on and "0" or "1") .. "\\shad0\\1c"
+                .. (on and "&HFFB464&" or "&H242424&") .. "\\1a" .. (on and "&H10&" or "&HC0&")
+                .. "\\3c&H808080&\\3a&H40&\\p1}" .. rrect_path(x0, rowY, bw, bh, math.floor(bh * 0.3)) .. "{\\p0}"
+            txt(rg.short, x0 + math.floor(bw / 2), rowY + math.floor(bh / 2), math.floor(h * 0.018),
+                on and "&H101010&" or "&HBBBBBB&", 5, "Montserrat SemiBold", 0x10)
+            SK.btns[#SK.btns + 1] = { x0 = x0, y0 = rowY, x1 = x0 + bw, y1 = rowY + bh, ri = i - 1 }
+        end
         sk_chart(ev, s, rng.base and tonumber(rec.prev) or nil, left, chTop, Lw, chH, rcol)
     else
-        chH = math.floor(h * 0.02)   -- no chart → tighten up to the stats row
+        chTop = y; chH = math.floor(h * 0.02)   -- no chart → tighten up to the stats row
     end
     y = chTop + chH + math.floor(h * 0.035)
 
@@ -4756,9 +4787,10 @@ mp.add_periodic_timer(0.5, function()
     sk_load()
     if SK.sig ~= before then sk_show(SK.cur, SK.mani or {}) end
 end)
--- Auto-cycle the chart's time range (TODAY → 1 MONTH → 1 YEAR) every ~5s, like
--- the minimap's auto-zoom, so all ranges are seen without needing a key.
-mp.add_periodic_timer(5, function()
+-- Until you click a range button, gently auto-cycle TODAY → 1 MONTH → 1 YEAR
+-- every ~6s (nice on a no-mouse TV); the moment you click one, it stays put.
+mp.add_periodic_timer(6, function()
+    if SK.range_manual then return end
     if not (SK.on and SK.cur and briefing_active and briefing_active()) then return end
     local rec = SK.byIdx[SK.cur]
     if rec and rec.ranges and #rec.ranges > 1 then
