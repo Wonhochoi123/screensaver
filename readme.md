@@ -177,9 +177,11 @@ shows a **one-paragraph Grok analysis** of that ticker — what moved it, the
 context, and a **clear, opinionated recommendation** (Buy / Accumulate / Hold /
 Trim / Sell with the levels it's watching). It's the only place AI touches
 content; with live web search on, so it can cite the day's real catalyst — set
-`GROK_STOCK_SEARCH=0` for a numbers-only take. If the analysis ever comes up
-blank, run `~/Screensaver-App/config/grok-briefing.sh --check`, which tests the
-chat model and prints the valid model ids for your key. All stock data is free Yahoo
+`GROK_STOCK_SEARCH=0` for a numbers-only take. The chat model is auto-resolved —
+if `GROK_MODEL` is wrong it falls back to the first working grok model on your
+key. If the analysis ever comes up blank, run
+`~/Screensaver-App/config/grok-briefing.sh --stocktest TSLA` for a one-shot
+diagnosis (resolved model, the Yahoo card, the analysis, and the raw API error). All stock data is free Yahoo
 Finance, cached per run. Nothing to click — it tracks the voice line-by-line,
 fading softly as each new category appears, and the wheel scrolls a long article.
 A partisan or unscrapable link is dropped on both sides (so the right pane never

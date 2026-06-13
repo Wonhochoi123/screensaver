@@ -139,22 +139,61 @@ tts_line() {
 # stock — with live web search on by default (GROK_STOCK_SEARCH=0 disables it),
 # so it can cite the day's real catalyst. Cached in the run dir, so replay is
 # free and offline. Always degrades to a numbers-only note on any failure.
+# A trivial completion works for this model? (validates the model id + key.)
+chat_ping() {
+    local r; r="$(curl -s --max-time 25 -X POST "$API/chat/completions" \
+        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+        -d "$(jq -n --arg m "$1" '{model:$m,messages:[{role:"user",content:"hi"}],max_tokens:8}')")"
+    printf '%s' "$r" | jq -e '.choices[0].message.content' >/dev/null 2>&1
+}
+# Resolve a usable chat model once: the configured GROK_MODEL if it works, else
+# the first grok text model the key can actually see (auto-fixes a wrong id).
+CHAT_MODEL=""
+resolve_chat_model() {
+    [ -n "$CHAT_MODEL" ] && return 0
+    if chat_ping "$MODEL"; then CHAT_MODEL="$MODEL"; return 0; fi
+    local m
+    m="$(curl -s --max-time 15 "$API/models" -H "Authorization: Bearer $API_KEY" \
+         | jq -r '.data[].id' 2>/dev/null | grep -iE '^grok' \
+         | grep -viE 'image|vision|tts|embed|fast' | head -1)"
+    [ -n "$m" ] && chat_ping "$m" && { CHAT_MODEL="$m"; return 0; }
+    return 1
+}
+
+# Generate one stock's analysis. Tries hard: resolves a working model, attempts
+# WITH live search then WITHOUT (a key without search still gets analysis), and
+# logs the raw API error to the run dir for diagnosis. No temperature (some
+# reasoning models reject it). Returns 1 only if nothing worked.
 stock_analysis() {            # sym name price prev pct dir outfile
     local sym="$1" name="$2" price="$3" prev="$4" pct="$5" dir="$6" out="$7"
-    local sp='{"mode":"off"}'
-    [ "${GROK_STOCK_SEARCH:-1}" = "1" ] && sp='{"mode":"on","max_search_results":6}'
-    local sysmsg usrmsg body resp txt
+    local sysmsg usrmsg
     sysmsg="You are a sharp, decisive equity analyst writing a morning brief. In ONE paragraph of 4 to 6 sentences, plain prose (no markdown, no bullet points, no headings, no preamble): say what most likely drove the stock today (cite the real catalyst if you can find it), the key context, and then give a CLEAR, opinionated recommendation — your stance (Buy, Accumulate, Hold, Trim, or Sell), your conviction level, and the price levels or risks you are watching. Be specific and confident, not wishy-washy. End with exactly: Not financial advice."
     usrmsg="Analyze ${sym} (${name}) for an investor this morning. It is trading near \$${price}, ${dir} ${pct} percent from a previous close of \$${prev}. What drove it today, the outlook, and your recommendation?"
-    body="$(jq -n --arg m "$MODEL" --arg s "$sysmsg" --arg u "$usrmsg" --argjson sp "$sp" \
-        '{model:$m, messages:[{role:"system",content:$s},{role:"user",content:$u}],
-          search_parameters:$sp, temperature:0.4}')" || return 1
-    resp="$(curl -s --max-time 70 -X POST "$API/chat/completions" \
-        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-        -d "$body")"
-    txt="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
-    [ -n "$txt" ] || return 1
-    printf '%s' "$txt" > "$out"
+    resolve_chat_model || { printf '[no working chat model — check GROK_MODEL]\n' \
+        >> "$RUN_DIR/stock_debug.log" 2>/dev/null; return 1; }
+
+    local want_search=0; [ "${GROK_STOCK_SEARCH:-1}" = "1" ] && want_search=1
+    local attempt body resp txt err
+    for attempt in 1 2; do
+        if [ "$attempt" = 1 ] && [ "$want_search" = 1 ]; then
+            body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sysmsg" --arg u "$usrmsg" \
+                '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}],
+                  search_parameters:{mode:"on",max_search_results:6}}')"
+        else
+            body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sysmsg" --arg u "$usrmsg" \
+                '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
+        fi
+        resp="$(curl -s --max-time 70 -X POST "$API/chat/completions" \
+            -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$body")"
+        txt="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
+        if [ -n "$txt" ]; then printf '%s' "$txt" > "$out"; return 0; fi
+        err="$(printf '%s' "$resp" | jq -rc '.error.message // .error // "blank response"' 2>/dev/null | head -c 300)"
+        printf '[try %s model=%s search=%s] %s\n' "$attempt" "$CHAT_MODEL" \
+            "$([ "$attempt" = 1 ] && echo "$want_search" || echo 0)" "$err" \
+            >> "$RUN_DIR/stock_debug.log" 2>/dev/null
+        [ "$want_search" = 1 ] || break       # no search → both attempts identical
+    done
+    return 1
 }
 
 # Fetch one MARKETS item's chart card + analysis into the run dir (item_NNN.*).
@@ -257,24 +296,27 @@ gen_into_run() {
     done
     printf '%s' "$n" > "$RUN_DIR/item.count"
 
-    # Pass 2: TTS each spoken line into its own clip, up to 4 at a time.
+    # Kick off MARKETS FIRST — the chart + live-search analysis are the slowest
+    # part, so start them now (concurrent with TTS) to be ready by the time the
+    # markets items play. gen_stock also publishes each card as it lands.
+    local mkt_pids=() tts_pids=()
+    for (( i=0; i<n; i++ )); do
+        num="$(printf '%03d' "$((i+1))")"
+        [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] && { gen_stock "$num" & mkt_pids+=($!); }
+    done
+
+    # Pass 2: TTS each spoken line, 4 at a time — wait ONLY on the TTS jobs so the
+    # markets jobs keep running in the background.
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
         say="$(cat "$RUN_DIR/item_${num}.say")"
-        tts_line "$say" "$RUN_DIR/item_${num}.mp3" &
-        [ "$(( (i+1) % 4 ))" = 0 ] && wait
+        tts_line "$say" "$RUN_DIR/item_${num}.mp3" & tts_pids+=($!)
+        if [ "$(( (i+1) % 4 ))" = 0 ]; then wait "${tts_pids[@]}" 2>/dev/null; tts_pids=(); fi
     done
-    wait
+    [ "${#tts_pids[@]}" -gt 0 ] && wait "${tts_pids[@]}" 2>/dev/null
 
-    # MARKETS: in parallel, fetch each ticker's chart + Grok analysis, then
-    # assemble the file photo.lua draws the stock cards from. All best-effort.
-    for (( i=0; i<n; i++ )); do
-        num="$(printf '%03d' "$((i+1))")"
-        if [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ]; then
-            gen_stock "$num" &
-        fi
-    done
-    wait
+    # Ensure the markets jobs finished, then a final assemble of the stock file.
+    [ "${#mkt_pids[@]}" -gt 0 ] && wait "${mkt_pids[@]}" 2>/dev/null
     assemble_stocks
 
     # Need at least the first clip to call it a success.
@@ -564,21 +606,19 @@ check() {
     if have_net; then echo "ok"; else echo "FAIL (no network, or key rejected)"; echo "──"; return; fi
     # Stock analysis is the one place we call the chat model (with live search).
     # Test it directly so a wrong model id or a no-search key is obvious here.
-    printf "  stock: analysis test (AAPL, model=%s, search=%s) ... " "$MODEL" "${GROK_STOCK_SEARCH:-1}"
-    local tmpa; tmpa="$(mktemp)"
-    if stock_analysis "AAPL" "Apple Inc" "230.00" "228.00" "0.9" "up" "$tmpa" && [ -s "$tmpa" ]; then
-        echo "ok"; echo "         “$(head -c 220 "$tmpa")…”"
+    printf "  stock: analysis test (AAPL, GROK_MODEL=%s, search=%s) ... " "$MODEL" "${GROK_STOCK_SEARCH:-1}"
+    RUN_DIR="$(mktemp -d)"
+    if stock_analysis "AAPL" "Apple Inc" "230.00" "228.00" "0.9" "up" "$RUN_DIR/a" && [ -s "$RUN_DIR/a" ]; then
+        echo "ok (using model: ${CHAT_MODEL:-$MODEL})"
+        echo "         “$(head -c 220 "$RUN_DIR/a")…”"
     else
         echo "FAIL"
-        local r; r="$(curl -s --max-time 30 -X POST "$API/chat/completions" \
-            -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-            -d "$(jq -n --arg m "$MODEL" '{model:$m,messages:[{role:"user",content:"ping"}]}')")"
-        echo "         api says: $(printf '%s' "$r" | jq -rc '.error.message // .error // "blank/none"' 2>/dev/null | head -c 200)"
+        [ -s "$RUN_DIR/stock_debug.log" ] && echo "         $(tail -1 "$RUN_DIR/stock_debug.log")"
         echo "         valid models on your key: $(curl -s --max-time 15 "$API/models" \
             -H "Authorization: Bearer $API_KEY" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null | head -c 200)"
-        echo "         → set GROK_MODEL in screensaver.conf to one of those."
+        echo "         → set GROK_MODEL in screensaver.conf to one of those (or check the key has chat access)."
     fi
-    rm -f "$tmpa"
+    rm -rf "$RUN_DIR"
     printf "  gen:   building today's briefing from feeds ... "
     if prep force; then
         local cnt; cnt="$(cat "$RUN_DIR/item.count" 2>/dev/null)"
@@ -592,8 +632,35 @@ check() {
     echo "────────────────────────────────────────────────────────"
 }
 
+# One-command stock diagnosis: prints the resolved model, the Yahoo card, and the
+# analysis (or the exact API error). Run `grok-briefing.sh --stocktest TSLA`.
+stocktest() {
+    local sym="${1:-AAPL}"
+    [ -n "$API_KEY" ] || { echo "no XAI_API_KEY in environment"; return; }
+    RUN_DIR="$(mktemp -d)"
+    echo "── stock test: $sym ────────────────────────────────────"
+    echo "  GROK_MODEL (configured): $MODEL    search: ${GROK_STOCK_SEARCH:-1}"
+    printf "  resolving a working chat model ... "
+    if resolve_chat_model; then echo "$CHAT_MODEL"; else echo "NONE"; fi
+    echo "  models on your key: $(curl -s --max-time 15 "$API/models" \
+        -H "Authorization: Bearer $API_KEY" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null)"
+    echo "  ── Yahoo card (config/stock-card.sh) ──"
+    bash "$CFG_DIR/stock-card.sh" "$sym" "$RUN_DIR/c"
+    if [ -s "$RUN_DIR/c" ]; then sed 's/^/    /' "$RUN_DIR/c"; else echo "    (empty — Yahoo blocked/rate-limited from this machine)"; fi
+    local name; name="$(awk -F'\t' '$1=="NAME"{print $2; exit}' "$RUN_DIR/c" 2>/dev/null)"; [ -n "$name" ] || name="$sym"
+    echo "  ── Grok analysis ──"
+    if stock_analysis "$sym" "$name" "100.00" "99.00" "1.0" "up" "$RUN_DIR/a"; then
+        sed 's/^/    /' "$RUN_DIR/a"; echo
+    else
+        echo "    FAILED. raw error(s):"; sed 's/^/      /' "$RUN_DIR/stock_debug.log" 2>/dev/null
+    fi
+    rm -rf "$RUN_DIR"
+    echo "────────────────────────────────────────────────────────"
+}
+
 case "$MODE" in
-    --check) check ;;
+    --check)     check ;;
+    --stocktest) stocktest "${2:-}" ;;          # diagnose stock card + analysis for one ticker
     --prep)  gate_ok || exit 0; prep ;;
     --play)  gate_ok || exit 0; play ;;        # replay the newest run (build only if none)
     --fresh) gate_ok || exit 0; play force ;;  # REFRESH: always build a new run, keep old ones
