@@ -97,14 +97,14 @@ Output EXACTLY in this format and nothing else — no preamble, no extra heading
 @@LINE@@
 <one-liner sentence here>
 @@DETAIL@@
-<four to six sentences of real insight here>
+<eight to ten sentences of real insight here>
 @@ITEM@@
 @@CAT@@
 <category label>
 @@LINE@@
 <one-liner sentence here>
 @@DETAIL@@
-<four to six sentences of real insight here>
+<eight to ten sentences of real insight here>
 
 Cover these, in this exact order:
 - WEATHER: today's weather for $loc (1 item).
