@@ -2746,6 +2746,33 @@ function briefing_fade()
     end
 end
 
+-- A small chapter/section label, top-left, on EVERY briefing screen — so the
+-- current part (WEATHER, TOP NEWS, TECH & FINANCE, MARKETS, STOCKS TO WATCH,
+-- CLOSING) is always named. (Global — the main chunk is at Lua's 200-local cap.)
+CHAP = { ov = mp.create_osd_overlay("ass-events"), shown = false }
+CHAP.ov.z = 1901
+function draw_chapter(cat)
+    if cat == CHAP.shown then return end
+    CHAP.shown = cat
+    if not cat or cat == "" then CHAP.ov:remove(); CHAP.ov.data = ""; return end
+    local title = (cat == "WATCHLIST") and "STOCKS TO WATCH" or cat
+    local w, h = refresh_display_size()
+    if w <= 0 then return end
+    local fs = math.floor(h * 0.026)
+    local x, y = math.floor(h * 0.045), math.floor(h * 0.135)
+    local bh = math.floor(fs * 0.55)
+    local parts = {}
+    parts[#parts + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFB464&\\p1}"
+        .. string.format("m %d %d l %d %d %d %d %d %d", x, y - bh,
+            x + math.floor(fs * 0.16), y - bh, x + math.floor(fs * 0.16), y + bh, x, y + bh) .. "{\\p0}"
+    parts[#parts + 1] = string.format(
+        "{\\an4\\pos(%d,%d)\\fnMontserrat ExtraBold\\fs%d\\fsp%d\\bord0\\shad0\\1c&HFFFFFF&%s\\alpha&H10&}%s",
+        x + math.floor(fs * 0.55), y, fs, math.floor(fs * 0.12 + 0.5), glow(fs), title:upper())
+    CHAP.ov.res_x = w; CHAP.ov.res_y = h
+    CHAP.ov.data = table.concat(parts, "\n")
+    CHAP.ov:update()
+end
+
 local function draw_briefing()
     -- Only ever paint captions while a briefing is genuinely LIVE. Without this,
     -- a stale /tmp/ss_briefing.txt (left by a crashed briefing, or otherwise) is
@@ -2760,6 +2787,7 @@ local function draw_briefing()
             if WX then WX.card = nil end     -- next briefing refetches the weather
             briefing_detail_clear()
             briefing_ov:remove()
+            if draw_chapter then draw_chapter(nil) end
         end
         return
     end
@@ -2775,6 +2803,7 @@ local function draw_briefing()
         BC.group = nil
         briefing_boxes = nil  -- no captions on screen
         briefing_detail_clear()
+        if draw_chapter then draw_chapter(nil) end
         briefing_ov:remove(); return
     end
 
@@ -2804,6 +2833,9 @@ local function draw_briefing()
     local cur
     local xf = io.open("/tmp/ss_briefing.idx", "r")
     if xf then cur = tonumber((xf:read("*l") or "")); xf:close() end
+
+    -- Chapter label on every screen (named after the active item's category).
+    if draw_chapter then draw_chapter((cur and mani[cur] and mani[cur].cat) or nil) end
 
     -- MARKETS / WATCHLIST get a stock card on the LEFT and Grok's analysis on
     -- the RIGHT — no text captions.

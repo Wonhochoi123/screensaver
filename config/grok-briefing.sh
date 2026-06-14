@@ -239,28 +239,6 @@ assemble_stocks() {
     mv -f "$tmp" "$out"
 }
 
-# WATCHLIST: ask Grok for a couple of stocks worth watching now (NOT already in
-# the user's tickers), each with a one-sentence reason. Plain chat — these are
-# Grok's picks from its knowledge (xAI live search is deprecated). Echoes a JSON
-# array [{sym,line}] or nothing.
-grok_watchlist() {
-    resolve_chat_model || return 1
-    local nwl="${GROK_WATCHLIST_N:-2}" sys usr body resp content
-    sys="You are a market analyst writing a morning brief. Suggest exactly ${nwl} US-listed, liquid stocks worth watching right now that are NOT in this list: [${TICKERS:-none}]. Respond with ONLY a JSON array of ${nwl} objects, each {\"sym\": the ticker symbol, \"line\": one natural spoken sentence naming the company and why it is worth watching now}. No markdown, no preamble, no other text."
-    usr="Give me ${nwl} stocks worth watching now."
-    body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sys" --arg u "$usr" \
-        '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
-    resp="$(curl -s --max-time 60 -X POST "$API/chat/completions" \
-        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$body")"
-    content="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
-    [ -n "$content" ] || { printf '[watchlist] %s\n' \
-        "$(printf '%s' "$resp" | jq -rc '.error.message // .error // "blank"' 2>/dev/null | head -c 160)" \
-        >> "$RUN_DIR/stock_debug.log" 2>/dev/null; return 1; }
-    content="$(printf '%s' "$content" | sed -e 's/^```json//' -e 's/^```//' -e 's/```$//')"
-    printf '%s' "$content" | jq -e 'type=="array" and length>0' >/dev/null 2>&1 || return 1
-    printf '%s' "$content"
-}
-
 # --- build the whole briefing INTO $RUN_DIR (caller sets + mkdir's it) --------
 # Pass 1 writes ALL item_NNN.cat/.line/.url and item.count up front (so playback
 # knows the full list as soon as anything lands); pass 2 TTS each one-liner into
@@ -277,25 +255,15 @@ gen_into_run() {
     # Build the WHOLE briefing from curated balanced RSS feeds + live ticker
     # prices — no AI call. Same {cat,line,url} JSON the old parser produced, so
     # everything below (TTS, manifest, playback, photo.lua) is unchanged.
+    # WATCHLIST: the day's biggest large-cap movers (Nasdaq data — real, no AI
+    # pick), added by news-build.py as extra stock-card items before the sign-off.
+    local wln=0; [ "${GROK_WATCHLIST:-1}" = "1" ] && wln="${GROK_WATCHLIST_N:-2}"
     local items
     items="$(WX_FILE="$wxf" LOCATION="${LOCATION:-}" TICKERS="${TICKERS:-}" \
-             DAY_NAME="$(date '+%A')" \
+             DAY_NAME="$(date '+%A')" WATCHLIST_N="$wln" \
              NEWS_FEEDS="${GROK_NEWS_FEEDS:-}" TECH_FEEDS="${GROK_TECH_FEEDS:-}" \
              NEWS_N="${GROK_NEWS_N:-5}" TECH_N="${GROK_TECH_N:-4}" \
              python3 "$CFG_DIR/news-build.py" 2>/dev/null)"
-    # WATCHLIST: a couple of Grok-picked "stocks worth watching" inserted right
-    # before the closing sign-off. Each becomes a full stock-card item (live
-    # quote + chart + analysis), just like the user's own tickers.
-    if [ "${GROK_WATCHLIST:-0}" = "1" ]; then
-        local wl; wl="$(grok_watchlist 2>/dev/null)"
-        if [ -n "$wl" ]; then
-            items="$(printf '%s' "$items" | jq -c --argjson wl "$wl" '
-                ($wl | map({cat:"WATCHLIST", line:.line, say:.line, url:"",
-                            sym:(.sym|ascii_upcase)})) as $w |
-                (map(.cat=="CLOSING") | index(true)) as $ci |
-                if $ci==null then . + $w else .[0:$ci] + $w + .[$ci:] end' 2>/dev/null || printf '%s' "$items")"
-        fi
-    fi
     printf '%s' "$items" > "$RUN_DIR/briefing.resp" 2>/dev/null   # keep for diagnosis
 
     local n; n="$(printf '%s' "$items" | jq 'length' 2>/dev/null)"

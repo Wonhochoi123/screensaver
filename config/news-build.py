@@ -54,13 +54,59 @@ DEFAULT_TECH = [
 ]
 
 
-def get(url, timeout=12):
+def get(url, timeout=12, accept="*/*"):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
     except Exception:
         return ""
+
+
+def clean_company(n):
+    n = re.sub(r'\s+(Common Stock|Capital Stock|Common Shares|Ordinary Shares|American Depositary Shares).*$', '', n or '')
+    n = re.sub(r'\s+Class\s+[A-Z]\b.*$', '', n)
+    n = re.sub(r',?\s+(Inc|Corp|Corporation|Ltd|Co|plc|Holdings|Group|N\.V|S\.A)\.?$', '', n).strip()
+    return n.rstrip(',').strip()
+
+
+def watchlist_items(n, exclude):
+    """The day's biggest Nasdaq-100 movers (recognizable large-caps), ranked by
+    size of move, excluding the user's own tickers. Real data — no AI pick."""
+    if n <= 0:
+        return []
+    try:
+        rows = json.loads(get("https://api.nasdaq.com/api/marketmovers",
+                              accept="application/json"))["data"]["STOCKS"]["Nasdaq100Movers"]["table"]["rows"]
+    except Exception:
+        return []
+    ex = set(s.strip().upper() for s in exclude if s.strip())
+    cand = []
+    for r in rows:
+        sym = (r.get("symbol") or "").strip().upper()
+        ch = (r.get("change") or "").strip()           # e.g. "+4.73%"
+        if not sym or sym in ex:
+            continue
+        try:
+            pctv = abs(float(ch.replace("%", "").replace("+", "")))
+        except ValueError:
+            pctv = 0.0
+        cand.append((pctv, sym, r))
+    cand.sort(key=lambda t: t[0], reverse=True)
+    out, seen = [], set()
+    for pctv, sym, r in cand:
+        if sym in seen:
+            continue
+        seen.add(sym)
+        name = clean_company(r.get("name") or sym)
+        ch = (r.get("change") or "").strip()
+        dirn = "down" if ch.startswith("-") else "up"
+        p = ch.replace("%", "").replace("+", "").replace("-", "")
+        line = f"{name} is one of the market's biggest movers, {dirn} {p} percent."
+        out.append({"cat": "WATCHLIST", "line": line, "say": line, "url": "", "sym": sym})
+        if len(out) >= n:
+            break
+    return out
 
 
 def clean_title(t):
@@ -285,12 +331,18 @@ def main():
     # One MARKETS item per ticker — ALWAYS (even if the price lookup fails), so
     # the stock card + Grok analysis still run. Yahoo is often rate-limited (429);
     # when it is, grok-briefing.sh fills the price/stats in from Grok instead.
-    for sym in (os.environ.get("TICKERS", "").split(",")):
-        s = sym.strip().upper()
-        if not s:
-            continue
+    tickers = [s.strip().upper() for s in os.environ.get("TICKERS", "").split(",") if s.strip()]
+    for s in tickers:
         ml = market_line(s) or f"Here's a look at {s} today."
         add(items, "MARKETS", ml, "", sym=s)
+
+    # WATCHLIST: the day's biggest large-cap movers (excluding your own tickers).
+    try:
+        wl_n = int(os.environ.get("WATCHLIST_N", "0"))
+    except ValueError:
+        wl_n = 0
+    for it in watchlist_items(wl_n, tickers):
+        items.append(it)
 
     add(items, "CLOSING", closing_line(), "")
     print(json.dumps(items))
