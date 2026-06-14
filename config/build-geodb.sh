@@ -111,9 +111,20 @@ langs = [x for x in localize.replace(" ", ",").split(",") if x]
 loc_cc = {LANG_CC[l] for l in langs if l in LANG_CC}      # countries we localize
 want_lang = set(langs)
 
-# loc_name[geonameid] = best localized display name (preferred, non-historic).
-# Score: preferred (4) + short (1); we keep the highest-scoring, breaking ties by
-# the shorter string so "서울" wins over "서울특별시".
+# Per-language SCRIPT test: many Korean names in GeoNames are stored with a BLANK
+# isolanguage tag rather than "ko", so a tag-only match finds just ~59% of KR
+# places. Also accepting any name written in the language's own script lifts that
+# to ~89% — and a Hangul-script name is unambiguously Korean, so it's safe.
+def _is_hangul(s):
+    return any(0xAC00 <= ord(c) <= 0xD7A3 or 0x1100 <= ord(c) <= 0x11FF
+               or 0x3130 <= ord(c) <= 0x318F for c in s)
+SCRIPT = {"ko": _is_hangul}
+
+# loc_name[geonameid] = best localized display name (preferred, non-historic). A
+# name qualifies if it's TAGGED as a wanted language OR written in its script.
+# Score: exact-tag (2) + preferred (4) + short (1); ties break to the shorter
+# string, so the canonical "서울" wins over "서울특별시". The country gate at insert
+# time keeps these from ever being applied to a place in another country.
 loc_name, loc_score = {}, {}
 if altfile and os.path.exists(altfile) and want_lang:
     for ln in open(altfile, encoding="utf-8", errors="ignore"):
@@ -121,14 +132,18 @@ if altfile and os.path.exists(altfile) and want_lang:
         if len(c) < 4:
             continue
         gid, lang, name = c[1], c[2], c[3]
-        if lang not in want_lang or not name:
+        if not name:
             continue
-        is_pref = len(c) > 4 and c[4] == "1"
-        is_short = len(c) > 5 and c[5] == "1"
         is_hist = len(c) > 7 and c[7] == "1"
         if is_hist:                       # skip historical names (한양/경성 for Seoul)
             continue
-        score = (4 if is_pref else 0) + (1 if is_short else 0)
+        tag_ok = lang in want_lang
+        script_ok = any(l in SCRIPT and SCRIPT[l](name) for l in want_lang)
+        if not (tag_ok or script_ok):
+            continue
+        is_pref = len(c) > 4 and c[4] == "1"
+        is_short = len(c) > 5 and c[5] == "1"
+        score = (2 if tag_ok else 0) + (4 if is_pref else 0) + (1 if is_short else 0)
         prev = loc_score.get(gid)
         if prev is None or score > prev or (score == prev and len(name) < len(loc_name[gid])):
             loc_name[gid] = name
