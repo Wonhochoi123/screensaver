@@ -24,6 +24,19 @@ fetch_cached() {   # $1 = remote filename, $2 = local cache path
     curl -fsSL -o "$2.part" "$BASE/$1" && mv -f "$2.part" "$2"
 }
 
+# Stream a zip member through a FIFO instead of extracting it to disk: the
+# whole-planet allCountries.txt (~1.6GB) and alternateNamesV2.txt (~2GB) would
+# otherwise need ~3.6GB of temp space and fill a small disk. The reader (python)
+# consumes each sequentially, so a pipe is all that's needed.
+#   stream_member <zip> <member> <dest-var>   -> sets <dest-var> to a fifo path
+_FIFO_N=0
+stream_member() {
+    _FIFO_N=$((_FIFO_N + 1)); local f="$TMP/stream_${_FIFO_N}.fifo"
+    rm -f "$f"; mkfifo "$f" 2>/dev/null || return 1
+    unzip -p "$1" "$2" > "$f" 2>/dev/null &
+    printf -v "$3" '%s' "$f"
+}
+
 echo "▶ Fetching GeoNames support tables..."
 fetch_cached "admin1CodesASCII.txt" "$CACHE/admin1.txt"  || { echo "download failed (admin1)"; exit 1; }
 fetch_cached "countryInfo.txt"      "$CACHE/country.txt" || { echo "download failed (countryInfo)"; exit 1; }
@@ -36,10 +49,11 @@ ALTFILE=""
 if [ -n "$LOCALIZE" ]; then
     echo "▶ Localized place names enabled ($LOCALIZE) — fetching alternateNamesV2 (one-time ~200MB)..."
     if fetch_cached "alternateNamesV2.zip" "$CACHE/alternateNamesV2.zip" \
-        && (cd "$TMP" && unzip -oq "$CACHE/alternateNamesV2.zip" alternateNamesV2.txt); then
-        ALTFILE="$TMP/alternateNamesV2.txt"
+        && stream_member "$CACHE/alternateNamesV2.zip" alternateNamesV2.txt ALTFILE; then
+        :
     else
-        echo "⚠ could not fetch/unzip alternateNamesV2 — names will stay romanized."
+        ALTFILE=""
+        echo "⚠ could not fetch/stream alternateNamesV2 — names will stay romanized."
     fi
 fi
 
@@ -122,10 +136,10 @@ DUMPS=()
 if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
     for cc in $GEONAMES_COUNTRIES; do
         if fetch_cached "$cc.zip" "$CACHE/$cc.zip"; then
-            if (cd "$TMP" && unzip -oq "$CACHE/$cc.zip" "$cc.txt"); then
-                DUMPS+=("$TMP/$cc.txt")
+            if stream_member "$CACHE/$cc.zip" "$cc.txt" _DUMP; then
+                DUMPS+=("$_DUMP")
             else
-                echo "⚠ could not unzip $cc.zip"
+                echo "⚠ could not stream $cc.zip"
             fi
         else
             echo "⚠ could not fetch $cc.zip"
@@ -134,8 +148,8 @@ if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
 else
     echo "▶ Whole-planet dump (allCountries.zip, ~390MB; cached after first time)..."
     if fetch_cached "allCountries.zip" "$CACHE/allCountries.zip" \
-        && (cd "$TMP" && unzip -oq "$CACHE/allCountries.zip" allCountries.txt); then
-        DUMPS+=("$TMP/allCountries.txt")
+        && stream_member "$CACHE/allCountries.zip" allCountries.txt _DUMP; then
+        DUMPS+=("$_DUMP")
     fi
 fi
 [ "${#DUMPS[@]}" -gt 0 ] || { echo "build-geodb: no dumps available — aborting."; exit 1; }

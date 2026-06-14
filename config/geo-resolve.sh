@@ -85,7 +85,9 @@ def overpass_pois(lat, lon):
     # Live OSM landmarks near a point -> [(name, plat, plon), ...]; None on network
     # failure (so the caller can fall back offline), [] if simply nothing nearby.
     # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
-    key = "%.3f_%.3f" % (lat, lon)
+    # The "q3" prefix is the query version — bump it whenever the filters/format
+    # change so stale cached results are re-fetched instead of reused.
+    key = "q3_%.3f_%.3f" % (lat, lon)
     cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
     if cf and os.path.exists(cf):
         try:
@@ -95,9 +97,14 @@ def overpass_pois(lat, lon):
     if _op_fail[0] >= 3:        # 3 strikes -> assume offline for the rest of this run
         return None
     R = 2500
+    # Tight category filters: the raw OSM firehose has a minor plaque / public
+    # artwork / boundary stone on every corner, and by pure proximity those would
+    # crowd the real sights out of the top 10. So tourism keeps only real draws
+    # (no 'artwork'), and historic is restricted to notable subtypes (not the
+    # generic historic=yes or markers). Not a popularity score — OSM's own tags.
     q = ("[out:json][timeout:25];("
-         'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|artwork|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
-         'nwr(around:%d,%f,%f)[historic][name];'
+         'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
+         'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|city_gate|citywalls|city_walls|monastery|palace|manor|tower|battlefield|aqueduct)$"][name];'
          'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring)$"][name];'
          'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk)$"][name];'
          'nwr(around:%d,%f,%f)[leisure~"^(park|garden)$"][name];'
