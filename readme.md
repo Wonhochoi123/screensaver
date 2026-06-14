@@ -316,19 +316,22 @@ once by `config/build-geodb.sh`. No API key, no runtime network.
   polygons. Empty = nearest-point only.
 - `GEO_POI_SOURCE` — where **landmarks** come from (GeoNames' own list is thin and
   skewed — no Lotte World Tower, full of minor temples):
-  - `'overpass'` (default) — query **OpenStreetMap live** at enrichment time, once
-    per photo, cached on disk forever. Covers the **whole world** with **no
-    download** and gives the richest POIs (Lotte World Tower, Eiffel Tower, Machu
-    Picchu…). Needs internet only while photos are first processed — *not* at
-    display time — and sends those photos' GPS to the Overpass server; falls back
-    to offline GeoNames features if unreachable. Only real attraction/natural
-    categories with a name are kept; places of worship aren't queried, so minor
-    temples don't dominate. No popularity score — purely OSM's own tags.
-  - `'offline'` — use a pre-downloaded regional extract instead (set
-    `GEO_POI_REGIONS` to [Geofabrik](https://download.geofabrik.de) slugs like
-    `'asia/south-korea'`); fully offline, nothing leaves the device, but only
-    covers downloaded regions (a few hundred MB each).
+  - `'hybrid'` (default) — **offline** OpenStreetMap for your `GEO_POI_REGIONS`
+    (reliable, no network, accurate — e.g. Korea) and **live Overpass only for
+    photos outside** those regions. Best of both: your usual area is offline +
+    instant + dependable, travel still gets worldwide POIs. Falls back to GeoNames
+    features if neither has anything.
+  - `'overpass'` — always query **OpenStreetMap live** (Overpass), whole world, no
+    download — but depends on the public Overpass servers and sends each photo's
+    GPS to them.
+  - `'offline'` — ONLY the downloaded regions; never goes online.
   - `'none'` — GeoNames features only.
+  - Both OSM paths keep only real attraction/natural categories with a name; the
+    place-of-worship layer is excluded so minor temples don't dominate. No
+    popularity score — purely OSM's own tags.
+- `GEO_POI_REGIONS` — [Geofabrik](https://download.geofabrik.de) slugs to download
+  for offline POIs (default `'asia/south-korea'`; e.g. add `'asia/japan'`). Used by
+  `hybrid` and `offline`.
 - Rebuild any time with `~/Screensaver-App/config/build-geodb.sh`, or bump
   `GEODB_VERSION` to force a one-time rebuild on the next launch.
 
@@ -467,9 +470,9 @@ file, so a value set here applies everywhere.
 | `GEONAMES_COUNTRIES` | `''` | ISO country codes to index; empty = whole planet |
 | `GEO_LOCALIZE` | `'ko'` | Languages whose places show in their own script (ko→Korean); empty = romanized |
 | `GEO_BOUNDARIES` | `'*'` | Point-in-polygon city resolution; `'*'` = whole planet, or ISO-2 list; empty = nearest-point |
-| `GEO_POI_SOURCE` | `'overpass'` | Landmarks: `overpass` (live OSM, worldwide, no download), `offline` (regional extract), `none` |
-| `GEO_POI_REGIONS` | `''` | Geofabrik slugs to download when `GEO_POI_SOURCE='offline'` |
-| `GEODB_VERSION` | `'13'` | Bump to force a one-time DB rebuild |
+| `GEO_POI_SOURCE` | `'hybrid'` | Landmarks: `hybrid` (offline regions + Overpass elsewhere), `overpass`, `offline`, `none` |
+| `GEO_POI_REGIONS` | `'asia/south-korea'` | Geofabrik slugs to download for offline POIs (`hybrid`/`offline`) |
+| `GEODB_VERSION` | `'14'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

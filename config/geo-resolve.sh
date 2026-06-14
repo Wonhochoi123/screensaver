@@ -170,26 +170,26 @@ def _pip(lat, lon, polys):
     return False
 
 def boundary_lookup(lat, lon):
-    # -> (adm1_name, adm1_metro, adm2_name, adm2_parent, adm2_pmetro, country, adm2_polys)
+    # -> (adm1_name, adm1_metro, adm2_name, adm2_parent, adm2_pmetro, country, cc, adm2_polys)
     if not HAVE_BND:
-        return None, 0, None, None, 0, None, None
+        return None, 0, None, None, 0, None, None, None
     rows = cur.execute(
-        "SELECT b.level,b.name,b.metro,b.parent,b.pmetro,b.country,b.rings FROM boundary_rtree r "
+        "SELECT b.level,b.name,b.metro,b.parent,b.pmetro,b.country,b.cc,b.rings FROM boundary_rtree r "
         "JOIN boundary b ON b.id=r.id "
         "WHERE r.minlat<=? AND r.maxlat>=? AND r.minlon<=? AND r.maxlon>=?",
         (lat, lat, lon, lon)).fetchall()
-    b1 = b2 = b2par = b2polys = None; metro = pmetro = 0; ctry1 = ctry2 = None
-    for level, name, mtr, parent, pmtr, country, rings in rows:
+    b1 = b2 = b2par = b2polys = None; metro = pmetro = 0; ctry1 = ctry2 = cc1 = cc2 = None
+    for level, name, mtr, parent, pmtr, country, cc, rings in rows:
         if b1 is not None and b2 is not None:
             break
         polys = json.loads(rings)
         if not _pip(lat, lon, polys):
             continue
         if level == 1 and b1 is None:
-            b1 = name; metro = mtr; ctry1 = country
+            b1 = name; metro = mtr; ctry1 = country; cc1 = cc
         elif level == 2 and b2 is None:
-            b2 = name; b2par = parent; pmetro = pmtr; ctry2 = country; b2polys = polys
-    return b1, metro, b2, b2par, pmetro, (ctry2 or ctry1), b2polys
+            b2 = name; b2par = parent; pmetro = pmtr; ctry2 = country; cc2 = cc; b2polys = polys
+    return b1, metro, b2, b2par, pmetro, (ctry2 or ctry1), (cc2 or cc1), b2polys
 
 def resolve(lat, lon):
     def win(r):
@@ -197,10 +197,16 @@ def resolve(lat, lon):
         dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
         return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-    # --- landmark: nearest named features, closest first, up to 5, "|"-joined for
-    #     the HUD to cycle. Source per GEO_POI_SOURCE: live OSM/Overpass (richest,
-    #     worldwide, cached), a downloaded OSM extract, or the GeoNames feature
-    #     table. Each path falls back to GeoNames when it has nothing. ---
+    # --- landmark: nearest named features, closest first, up to 10, "|"-joined for
+    #     the HUD to cycle, with the nearest neighbourhood appended as a finer-than-
+    #     city fallback. Source per GEO_POI_SOURCE:
+    #       hybrid  -> OFFLINE OSM extract where the point is covered (reliable, no
+    #                  network), else live Overpass (out of region), else GeoNames.
+    #       overpass-> always live Overpass; offline -> only the extract; none/else
+    #                  -> GeoNames features. ---
+    HOOD_FCLASS = {"suburb", "neighbourhood", "quarter", "city_block", "borough",
+                   "hamlet", "village", "town", "locality"}
+
     def _rank(cands, limit=10):
         cands.sort(key=lambda x: x[0])
         names, seen = [], set()
@@ -212,6 +218,13 @@ def resolve(lat, lon):
                 break
         return names
 
+    def _assemble(pois, hoods):
+        names = _rank(pois)                     # up to 10 real POIs, nearest first
+        for nm in _rank(hoods, 1):              # + nearest neighbourhood fallback
+            if nm.lower() not in {x.lower() for x in names}:
+                names.append(nm)
+        return names
+
     def _geonames_landmarks():
         la0, la1, lo0, lo1 = win(100)
         c = [(hav(lat, lon, flat, flon), name) for name, flat, flon in cur.execute(
@@ -219,24 +232,29 @@ def resolve(lat, lon):
                 "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1))]
         return _rank(c)
 
-    names = None
-    if POI_SOURCE == "overpass":
-        items = overpass_pois(lat, lon)         # None on net failure, [] if none nearby
-        if items:
-            pois = [(hav(lat, lon, p[1], p[2]), p[0]) for p in items if (p[3] if len(p) > 3 else "poi") == "poi"]
-            hoods = [(hav(lat, lon, p[1], p[2]), p[0]) for p in items if len(p) > 3 and p[3] == "hood"]
-            names = _rank(pois)
-            # append the nearest neighbourhood as a finer-than-city fallback
-            for nm in _rank(hoods, 1):
-                if nm.lower() not in {x.lower() for x in names}:
-                    names.append(nm)
-    elif POI_SOURCE != "none" and HAVE_POI:     # pre-downloaded OSM extract
+    def _offline_osm():                         # downloaded extract; [] if no coverage
         la0, la1, lo0, lo1 = win(40)
-        c = [(hav(lat, lon, flat, flon), name) for name, flat, flon in cur.execute(
-                "SELECT p.name,p.lat,p.lon FROM osm_poi_rtree r JOIN osm_poi p ON p.id=r.id "
-                "WHERE r.minlat BETWEEN ? AND ? AND r.minlon BETWEEN ? AND ?", (la0, la1, lo0, lo1))]
-        names = _rank(c)
-    if not names:                                # fall back to GeoNames features
+        pois, hoods = [], []
+        for name, flat, flon, fc in cur.execute(
+                "SELECT p.name,p.lat,p.lon,p.fclass FROM osm_poi_rtree r JOIN osm_poi p ON p.id=r.id "
+                "WHERE r.minlat BETWEEN ? AND ? AND r.minlon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+            (hoods if fc in HOOD_FCLASS else pois).append((hav(lat, lon, flat, flon), name))
+        return _assemble(pois, hoods)
+
+    def _overpass_landmarks():                  # live OSM; None on net fail, [] if none
+        items = overpass_pois(lat, lon)
+        if items is None:
+            return None
+        pois = [(hav(lat, lon, p[1], p[2]), p[0]) for p in items if (p[3] if len(p) > 3 else "poi") == "poi"]
+        hoods = [(hav(lat, lon, p[1], p[2]), p[0]) for p in items if len(p) > 3 and p[3] == "hood"]
+        return _assemble(pois, hoods)
+
+    names = None
+    if POI_SOURCE in ("hybrid", "offline") and HAVE_POI:
+        names = _offline_osm()                  # reliable offline where downloaded
+    if not names and POI_SOURCE in ("hybrid", "overpass"):
+        names = _overpass_landmarks()           # out of region (or pure overpass)
+    if not names:                               # last resort
         names = _geonames_landmarks()
     landmark = "|".join(names)
 
@@ -258,23 +276,23 @@ def resolve(lat, lon):
     state   = bc[2] if bc else ""
     country = bc[3] if bc else ""
 
-    # Boundary override (hybrid). The polygon decides WHICH unit you're in; the
-    # name comes from the nearest CITY/TOWN inside that polygon — so a county (US
-    # ADM2 'Santa Clara') shows the town you're in ('San Jose'/'Cupertino'), and a
-    # megacity can't claim a neighbour (Seoul's point is outside Hanam's polygon).
-    # Only true town/city codes count (PPL*/PPLC) — neighbourhood sections (PPLX,
-    # e.g. a 동, an arrondissement, Times Square) are skipped. Where places are
-    # sparse, fall back to the admin name (KR 하남시). A 특별시/광역시 (metro) IS
-    # the city at ADM1; provinces (도) become the state.
+    # The administrative level that means "the city" differs by country. In Korea
+    # (and the rest of East Asia) ADM2 IS the city (하남시; Seoul = ADM1 metro), so
+    # the boundary name is used DIRECTLY — GeoNames is not consulted at all. In
+    # North America ADM2 is a COUNTY and in Europe it's a department/province, so
+    # the actual city is named from the nearest town/place inside the polygon
+    # ('Santa Clara' county -> San Jose; 'Yvelines' -> Versailles). Extend
+    # ADM2_IS_CITY with any other country whose ADM2 is the municipality.
+    ADM2_IS_CITY = {"KR", "JP", "TW", "HK", "MO", "KP"}
     def _city_level(fc):
         return fc == "PPL" or fc == "PPLC" or fc == "PPLG" or fc.startswith("PPLA")
     # Tie-break by administrative rank so a capital/seat beats a sub-unit when both
     # are about equally close — picks 'Paris' over 'Paris 04', but distance still
     # dominates so a suburb (Cupertino) isn't overridden by the county seat.
     _RANK = {"PPLC": 0, "PPLA": 1, "PPLA2": 2, "PPLA3": 3, "PPLA4": 4, "PPLA5": 5}
-    b1, b1_metro, b2, b2_parent, b2_pmetro, b_country, b2polys = boundary_lookup(lat, lon)
-    # The region label (province + country) comes from the SAME boundary polygons
-    # as the city — just coarser levels — not a second nearest-point guess.
+    b1, b1_metro, b2, b2_parent, b2_pmetro, b_country, b_cc, b2polys = boundary_lookup(lat, lon)
+    # Region label (province + country) comes from the SAME boundary polygons as the
+    # city — just coarser levels — not a second nearest-point guess.
     if b_country:
         country = b_country
     # Province comes from the ADM2's own parent (consistent with the city), not a
@@ -285,13 +303,17 @@ def resolve(lat, lon):
         # a 특별시/광역시 IS the city and has NO province (Seoul -> 서울특별시, blank).
         city = prov or b1 or city; state = ""
     elif b2:
-        inside = [p for p in places if _pip(p[3], p[4], b2polys)]
-        towns = [p for p in inside if _city_level(p[7])] or inside
-        if towns:
-            towns.sort(key=lambda p: p[0] + _RANK.get(p[7], 6) * 0.5)
-            city = towns[0][2]; country = towns[0][6] or country
+        if b_cc in ADM2_IS_CITY:
+            city = b2                           # ADM2 already IS the city (하남시)
         else:
-            city = b2                           # sparse data -> the admin name
+            # county/department -> name the actual town inside the polygon
+            inside = [p for p in places if _pip(p[3], p[4], b2polys)]
+            towns = [p for p in inside if _city_level(p[7])] or inside
+            if towns:
+                towns.sort(key=lambda p: p[0] + _RANK.get(p[7], 6) * 0.5)
+                city = towns[0][2]
+            else:
+                city = b2                       # sparse data -> the admin name
         state = prov or state
     elif b1:
         state = b1

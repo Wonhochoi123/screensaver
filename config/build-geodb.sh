@@ -123,10 +123,11 @@ for region in $POI_RAW; do
         curl -fsSL -o "$zip.part" "https://download.geofabrik.de/${region}-latest-free.shp.zip" \
             && mv -f "$zip.part" "$zip" && mkdir -p "$dir" \
             && unzip -oq "$zip" 'gis_osm_pois_free_1.*' 'gis_osm_pois_a_free_1.*' \
-                               'gis_osm_natural_free_1.*' 'gis_osm_natural_a_free_1.*' -d "$dir" \
+                               'gis_osm_natural_free_1.*' 'gis_osm_natural_a_free_1.*' \
+                               'gis_osm_places_free_1.*' -d "$dir" \
             || { echo "⚠ POIs: download/unzip failed for $region"; rm -f "$zip.part"; continue; }
     fi
-    for lyr in gis_osm_pois_free_1 gis_osm_pois_a_free_1 gis_osm_natural_free_1 gis_osm_natural_a_free_1; do
+    for lyr in gis_osm_pois_free_1 gis_osm_pois_a_free_1 gis_osm_natural_free_1 gis_osm_natural_a_free_1 gis_osm_places_free_1; do
         [ -s "$dir/$lyr.shp" ] && [ -s "$dir/$lyr.dbf" ] \
             && printf 'poi\t0\t%s\t%s\n' "$dir/$lyr.shp" "$dir/$lyr.dbf" >> "$BND_MANIFEST"
     done
@@ -283,7 +284,7 @@ cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, ele
 # simplifies the ADM1 and ADM2 layers independently and their edges don't match.
 # An R-tree indexes the bounding boxes so a point lookup is O(log n) over ~53k.
 cur.execute("CREATE TABLE boundary(id INTEGER PRIMARY KEY, level INT, name TEXT, "
-            "metro INT, parent TEXT, pmetro INT, country TEXT, rings TEXT)")
+            "metro INT, parent TEXT, pmetro INT, country TEXT, cc TEXT, rings TEXT)")
 cur.execute("CREATE VIRTUAL TABLE boundary_rtree USING rtree(id, minlat, maxlat, minlon, maxlon)")
 # osm_poi: named OpenStreetMap landmarks for the configured regions (preferred
 # over the GeoNames feature table where present). Its own R-tree for fast lookup.
@@ -391,12 +392,16 @@ def _dbf_rows(path):
 # features. NOT a popularity score: just OSM's own fclass tags. The separate
 # place-of-worship layer is never loaded, so minor temples don't dominate.
 POI_KEEP = {
-    "attraction", "viewpoint", "tower", "monument", "memorial", "museum", "artwork",
+    "attraction", "viewpoint", "tower", "monument", "memorial", "museum",
     "castle", "ruins", "archaeological", "fort", "theme_park", "zoo", "aquarium",
     "lighthouse", "windmill", "battlefield", "fountain", "observation_tower",
     "gallery", "arts_centre", "park", "garden",
     "peak", "volcano", "waterfall", "cave_entrance", "spring", "beach", "cliff", "glacier",
 }
+# Settlement / neighbourhood level — a finer-than-city fallback (kept distinct via
+# fclass so the resolver can append the nearest one after the real POIs).
+HOOD_KEEP = {"suburb", "neighbourhood", "quarter", "city_block", "borough",
+             "hamlet", "village", "town", "locality"}
 
 def _shp_anypoint(path):
     # yields a representative (lon, lat) per record — the point itself for point
@@ -500,8 +505,8 @@ def add_boundary(level, cc, shape_name, polys):
     # second nearest-point guess.
     ctry = localize_name(country_gid.get(cc, ""), cc, country.get(cc, ""))
     bid[0] += 1; rid = bid[0]
-    cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?,?,?,?)",
-                (rid, level, name, metro, parent, pmetro, ctry,
+    cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?,?,?,?,?)",
+                (rid, level, name, metro, parent, pmetro, ctry, cc,
                  json.dumps(_round_polys(polys), separators=(",", ":"))))
     cur.execute("INSERT INTO boundary_rtree VALUES(?,?,?,?,?)",
                 (rid, minlat, maxlat, minlon, maxlon))
@@ -529,9 +534,9 @@ if bnd_manifest and os.path.exists(bnd_manifest):
                 rec = next(rows, None)
                 if pt is None or rec is None:
                     continue
-                nm = rec.get("name", "")
-                if nm and rec.get("fclass", "") in POI_KEEP:
-                    add_poi(nm, pt[0], pt[1], rec.get("fclass", ""))
+                nm = rec.get("name", ""); fc = rec.get("fclass", "")
+                if nm and (fc in POI_KEEP or fc in HOOD_KEEP):
+                    add_poi(nm, pt[0], pt[1], fc)
         elif kind == "shp":                                # whole-planet CGAZ shapefile
             if not (os.path.exists(a1arg) and os.path.exists(a2arg)):
                 continue
