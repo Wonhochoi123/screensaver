@@ -32,11 +32,13 @@ run_pass() {
     STALE="$(mktemp)"; JSON="$(mktemp)"; PASS_OK=0
 
     # Detect resolver changes by CONTENT (hash), not mtime: every reinstall
-    # rewrites geo-resolve.sh even when nothing changed, and an mtime test would
+    # rewrites the scripts even when nothing changed, and an mtime test would
     # re-resolve the entire library on every update. Only a real logic change
-    # invalidates the sidecars now. The sig is recorded only after a clean pass.
+    # invalidates the sidecars now. Hash BOTH the geocoder and this police script,
+    # so a fix in either (e.g. the landmark-timeout budget here) re-resolves the
+    # library. The sig is recorded only after a clean pass.
     SIG_FILE="$APP_DIR/.resolver_sig"
-    RES_SIG="$(md5sum "$GEO_RESOLVE" 2>/dev/null | cut -d' ' -f1)"
+    RES_SIG="$(cat "$GEO_RESOLVE" "${POLICE:-$0}" 2>/dev/null | md5sum | cut -d' ' -f1)"
     RES_CHANGED=0
     [ -n "$RES_SIG" ] && [ "$RES_SIG" != "$(cat "$SIG_FILE" 2>/dev/null)" ] && RES_CHANGED=1
 
@@ -72,6 +74,10 @@ import sys, json, os, re, subprocess
 from xml.sax.saxutils import escape
 
 GEO_RESOLVE = os.environ.get("GEO_RESOLVE", "")
+# Live OSM (Overpass) landmark lookups are rate-limited (>=1.2 s/query) and hit the
+# network, so they need a much bigger time budget than the instant offline path —
+# otherwise the batch times out and the landmarks get dropped.
+OVERPASS = os.environ.get("GEO_POI_SOURCE", "overpass").strip().lower() == "overpass"
 
 def resolve_geo(lat, lon):
     """Offline GeoNames lookup -> (landmark, city, state, country); blanks on miss.
@@ -80,7 +86,7 @@ def resolve_geo(lat, lon):
         return "", None, None, None
     try:
         r = subprocess.run([GEO_RESOLVE, "%.6f" % lat, "%.6f" % lon],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=45 if OVERPASS else 15)
         if r.returncode == 0 and r.stdout.strip():
             p = (r.stdout.rstrip("\n").split("\t") + ["", "", "", ""])[:4]
             return p[0], (p[1] or None), (p[2] or None), (p[3] or None)
@@ -99,7 +105,7 @@ def batch_resolve(pairs):
     try:
         r = subprocess.run([GEO_RESOLVE, "--batch"], input=inp,
                            capture_output=True, text=True,
-                           timeout=60 + 2 * len(keys))
+                           timeout=120 + (8 if OVERPASS else 2) * len(keys))
         if r.returncode != 0:
             return {}
         memo = {}
