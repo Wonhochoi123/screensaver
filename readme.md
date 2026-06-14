@@ -452,7 +452,7 @@ file, so a value set here applies everywhere.
 | `GEONAMES_COUNTRIES` | `''` | ISO country codes to index; empty = whole planet |
 | `GEO_LOCALIZE` | `'ko'` | Languages whose places show in their own script (ko→Korean); empty = romanized |
 | `GEO_BOUNDARIES` | `'*'` | Point-in-polygon city resolution; `'*'` = whole planet, or ISO-2 list; empty = nearest-point |
-| `GEODB_VERSION` | `'10'` | Bump to force a one-time DB rebuild |
+| `GEODB_VERSION` | `'11'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

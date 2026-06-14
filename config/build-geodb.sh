@@ -240,10 +240,13 @@ cur.execute("CREATE TABLE place(name TEXT, lat REAL, lon REAL, pop INTEGER, stat
 cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, elev REAL, weight INTEGER, maxkm REAL)")
 # boundary: one row per admin polygon. level 1=province/state, 2=city/county/
 # district. rings is JSON [[outer, hole...], ...]. metro=1 for 특별시/광역시 (where
-# the ADM1 itself is the city, e.g. Seoul). An R-tree indexes the bounding boxes
-# so a point lookup is O(log n) even with ~53k worldwide polygons.
+# the ADM1 itself is the city, e.g. Seoul). parent/pmetro (level-2 rows) carry the
+# containing ADM1's name + metro flag, computed at build from the ADM2's interior
+# point — so a Seoul district KNOWS it's in Seoul (no province) even though CGAZ
+# simplifies the ADM1 and ADM2 layers independently and their edges don't match.
+# An R-tree indexes the bounding boxes so a point lookup is O(log n) over ~53k.
 cur.execute("CREATE TABLE boundary(id INTEGER PRIMARY KEY, level INT, name TEXT, "
-            "metro INT, rings TEXT)")
+            "metro INT, parent TEXT, pmetro INT, rings TEXT)")
 cur.execute("CREATE VIRTUAL TABLE boundary_rtree USING rtree(id, minlat, maxlat, minlon, maxlon)")
 
 # adm_pts[level] = [(lat, lon, localized_name), ...] for localized countries, used
@@ -369,6 +372,28 @@ def _shp_polys(path):
 def _round_polys(polys, nd=5):                             # shrink stored coords (~1m)
     return [[[[round(x, nd), round(y, nd)] for x, y in ring] for ring in poly] for poly in polys]
 
+def _rep_point(polys):
+    # area-weighted centroid of the largest outer ring -> an interior (lon,lat)
+    best = None; barea = -1.0
+    for poly in polys:
+        r = poly[0]; a = cx = cy = 0.0
+        for i in range(len(r) - 1):
+            f = r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]
+            a += f; cx += (r[i][0] + r[i + 1][0]) * f; cy += (r[i][1] + r[i + 1][1]) * f
+        if a != 0 and abs(a) > barea:
+            barea = abs(a); best = (cx / (3 * a), cy / (3 * a))
+    return best
+
+def _parent_adm1(lon, lat):
+    # which already-inserted level-1 polygon contains this point -> (name, metro)
+    for nm, mt, rings in cur.execute(
+            "SELECT b.name,b.metro,b.rings FROM boundary_rtree r JOIN boundary b ON b.id=r.id "
+            "WHERE b.level=1 AND r.minlat<=? AND r.maxlat>=? AND r.minlon<=? AND r.maxlon>=?",
+            (lat, lat, lon, lon)).fetchall():
+        if _pip(lat, lon, json.loads(rings)):
+            return nm, mt
+    return "", 0
+
 bid = [0]; nb = 0
 def add_boundary(level, cc, shape_name, polys):
     global nb
@@ -388,9 +413,15 @@ def add_boundary(level, cc, shape_name, polys):
                 name = pname
                 break
     metro = 1 if (level == 1 and (name.endswith(_METRO_SUFFIX) or name in _METRO_ROMAN)) else 0
+    parent = ""; pmetro = 0
+    if level == 2:                                  # tie each city to its province
+        rp = _rep_point(polys)
+        if rp:
+            parent, pmetro = _parent_adm1(rp[0], rp[1])
     bid[0] += 1; rid = bid[0]
-    cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?)",
-                (rid, level, name, metro, json.dumps(_round_polys(polys), separators=(",", ":"))))
+    cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?,?,?)",
+                (rid, level, name, metro, parent, pmetro,
+                 json.dumps(_round_polys(polys), separators=(",", ":"))))
     cur.execute("INSERT INTO boundary_rtree VALUES(?,?,?,?,?)",
                 (rid, minlat, maxlat, minlon, maxlon))
     nb += 1

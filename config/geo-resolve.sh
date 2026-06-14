@@ -81,15 +81,16 @@ def _pip(lat, lon, polys):
     return False
 
 def boundary_lookup(lat, lon):
-    # -> (adm1_name, adm1_is_metro, adm2_name, adm2_polys); pieces may be None.
+    # -> (adm1_name, adm1_metro, adm2_name, adm2_parent, adm2_pmetro, adm2_polys)
     if not HAVE_BND:
-        return None, 0, None, None
+        return None, 0, None, None, 0, None
     rows = cur.execute(
-        "SELECT b.level,b.name,b.metro,b.rings FROM boundary_rtree r JOIN boundary b "
-        "ON b.id=r.id WHERE r.minlat<=? AND r.maxlat>=? AND r.minlon<=? AND r.maxlon>=?",
+        "SELECT b.level,b.name,b.metro,b.parent,b.pmetro,b.rings FROM boundary_rtree r "
+        "JOIN boundary b ON b.id=r.id "
+        "WHERE r.minlat<=? AND r.maxlat>=? AND r.minlon<=? AND r.maxlon>=?",
         (lat, lat, lon, lon)).fetchall()
-    b1 = b2 = b2polys = None; metro = 0
-    for level, name, mtr, rings in rows:
+    b1 = b2 = b2par = b2polys = None; metro = pmetro = 0
+    for level, name, mtr, parent, pmtr, rings in rows:
         if b1 is not None and b2 is not None:
             break
         polys = json.loads(rings)
@@ -98,8 +99,8 @@ def boundary_lookup(lat, lon):
         if level == 1 and b1 is None:
             b1 = name; metro = mtr
         elif level == 2 and b2 is None:
-            b2 = name; b2polys = polys
-    return b1, metro, b2, b2polys
+            b2 = name; b2par = parent; pmetro = pmtr; b2polys = polys
+    return b1, metro, b2, b2par, pmetro, b2polys
 
 def resolve(lat, lon):
     def win(r):
@@ -157,9 +158,14 @@ def resolve(lat, lon):
     # are about equally close — picks 'Paris' over 'Paris 04', but distance still
     # dominates so a suburb (Cupertino) isn't overridden by the county seat.
     _RANK = {"PPLC": 0, "PPLA": 1, "PPLA2": 2, "PPLA3": 3, "PPLA4": 4, "PPLA5": 5}
-    b1, b1_metro, b2, b2polys = boundary_lookup(lat, lon)
-    if b1 and b1_metro:
-        city = b1; state = ""
+    b1, b1_metro, b2, b2_parent, b2_pmetro, b2polys = boundary_lookup(lat, lon)
+    # Province comes from the ADM2's own parent (consistent with the city), not a
+    # separate ADM1 lookup that can disagree at simplified borders.
+    prov = b2_parent if b2 else b1
+    prov_metro = b2_pmetro if b2 else b1_metro
+    if prov_metro:
+        # a 특별시/광역시 IS the city and has NO province (Seoul -> 서울특별시, blank).
+        city = prov or b1 or city; state = ""
     elif b2:
         inside = [p for p in places if _pip(p[3], p[4], b2polys)]
         towns = [p for p in inside if _city_level(p[7])] or inside
@@ -168,8 +174,7 @@ def resolve(lat, lon):
             city = towns[0][2]; country = towns[0][6] or country
         else:
             city = b2                           # sparse data -> the admin name
-        if b1:
-            state = b1
+        state = prov or state
     elif b1:
         state = b1
 
