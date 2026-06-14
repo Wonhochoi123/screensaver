@@ -208,8 +208,14 @@ gen_stock() {                 # NNN
     assemble_stocks; set_stocks
 }
 
-# Assemble all MARKETS items into one file photo.lua reads: records separated by
-# a lone "@@", each holding the card's TAB lines plus IDX, SYM and a one-line
+# A stock-card item is either the user's MARKETS ticker or a WATCHLIST pick.
+is_stock_item() {            # NNN
+    local c; c="$(cat "$RUN_DIR/item_$1.cat" 2>/dev/null)"
+    [ "$c" = "MARKETS" ] || [ "$c" = "WATCHLIST" ]
+}
+
+# Assemble all stock-card items into one file photo.lua reads: records separated
+# by a lone "@@", each holding the card's TAB lines plus IDX, SYM and a one-line
 # ANALYSIS (newlines flattened so the record format stays line-based).
 # Atomic (temp+mv) so a parallel gen_stock calling this can't read a half-written
 # file, and a concurrent rewrite never corrupts it (last complete write wins).
@@ -219,7 +225,7 @@ assemble_stocks() {
     tmp="$(mktemp "${out}.XXXXXX")" || return 0
     for (( i=1; i<=total; i++ )); do
         num="$(printf '%03d' "$i")"
-        [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] || continue
+        is_stock_item "$num" || continue
         [ "$first" = 1 ] || printf '@@\n' >> "$tmp"; first=0
         printf 'IDX\t%s\n' "$i" >> "$tmp"
         printf 'SYM\t%s\n' "$(cat "$RUN_DIR/item_${num}.sym" 2>/dev/null)" >> "$tmp"
@@ -231,6 +237,28 @@ assemble_stocks() {
         fi
     done
     mv -f "$tmp" "$out"
+}
+
+# WATCHLIST: ask Grok for a couple of stocks worth watching now (NOT already in
+# the user's tickers), each with a one-sentence reason. Plain chat — these are
+# Grok's picks from its knowledge (xAI live search is deprecated). Echoes a JSON
+# array [{sym,line}] or nothing.
+grok_watchlist() {
+    resolve_chat_model || return 1
+    local nwl="${GROK_WATCHLIST_N:-2}" sys usr body resp content
+    sys="You are a market analyst writing a morning brief. Suggest exactly ${nwl} US-listed, liquid stocks worth watching right now that are NOT in this list: [${TICKERS:-none}]. Respond with ONLY a JSON array of ${nwl} objects, each {\"sym\": the ticker symbol, \"line\": one natural spoken sentence naming the company and why it is worth watching now}. No markdown, no preamble, no other text."
+    usr="Give me ${nwl} stocks worth watching now."
+    body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sys" --arg u "$usr" \
+        '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
+    resp="$(curl -s --max-time 60 -X POST "$API/chat/completions" \
+        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$body")"
+    content="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
+    [ -n "$content" ] || { printf '[watchlist] %s\n' \
+        "$(printf '%s' "$resp" | jq -rc '.error.message // .error // "blank"' 2>/dev/null | head -c 160)" \
+        >> "$RUN_DIR/stock_debug.log" 2>/dev/null; return 1; }
+    content="$(printf '%s' "$content" | sed -e 's/^```json//' -e 's/^```//' -e 's/```$//')"
+    printf '%s' "$content" | jq -e 'type=="array" and length>0' >/dev/null 2>&1 || return 1
+    printf '%s' "$content"
 }
 
 # --- build the whole briefing INTO $RUN_DIR (caller sets + mkdir's it) --------
@@ -255,6 +283,19 @@ gen_into_run() {
              NEWS_FEEDS="${GROK_NEWS_FEEDS:-}" TECH_FEEDS="${GROK_TECH_FEEDS:-}" \
              NEWS_N="${GROK_NEWS_N:-5}" TECH_N="${GROK_TECH_N:-4}" \
              python3 "$CFG_DIR/news-build.py" 2>/dev/null)"
+    # WATCHLIST: a couple of Grok-picked "stocks worth watching" inserted right
+    # before the closing sign-off. Each becomes a full stock-card item (live
+    # quote + chart + analysis), just like the user's own tickers.
+    if [ "${GROK_WATCHLIST:-1}" = "1" ]; then
+        local wl; wl="$(grok_watchlist 2>/dev/null)"
+        if [ -n "$wl" ]; then
+            items="$(printf '%s' "$items" | jq -c --argjson wl "$wl" '
+                ($wl | map({cat:"WATCHLIST", line:.line, say:.line, url:"",
+                            sym:(.sym|ascii_upcase)})) as $w |
+                (map(.cat=="CLOSING") | index(true)) as $ci |
+                if $ci==null then . + $w else .[0:$ci] + $w + .[$ci:] end' 2>/dev/null || printf '%s' "$items")"
+        fi
+    fi
     printf '%s' "$items" > "$RUN_DIR/briefing.resp" 2>/dev/null   # keep for diagnosis
 
     local n; n="$(printf '%s' "$items" | jq 'length' 2>/dev/null)"
@@ -283,13 +324,13 @@ gen_into_run() {
     done
     printf '%s' "$n" > "$RUN_DIR/item.count"
 
-    # Kick off MARKETS FIRST — the chart + live-search analysis are the slowest
-    # part, so start them now (concurrent with TTS) to be ready by the time the
-    # markets items play. gen_stock also publishes each card as it lands.
+    # Kick off the stock cards FIRST (MARKETS + WATCHLIST) — the chart + analysis
+    # are the slowest part, so start them now (concurrent with TTS) to be ready by
+    # the time those items play. gen_stock also publishes each card as it lands.
     local mkt_pids=() tts_pids=()
     for (( i=0; i<n; i++ )); do
         num="$(printf '%03d' "$((i+1))")"
-        [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] && { gen_stock "$num" & mkt_pids+=($!); }
+        is_stock_item "$num" && { gen_stock "$num" & mkt_pids+=($!); }
     done
 
     # Pass 2: TTS each spoken line, 4 at a time — wait ONLY on the TTS jobs so the
@@ -527,7 +568,7 @@ play() {
 
         # Publish the source URL + current index FIRST, then the one-liner caption.
         set_url "$RUN_DIR/item_${num}.url"
-        [ "$(cat "$RUN_DIR/item_${num}.cat" 2>/dev/null)" = "MARKETS" ] && set_stocks
+        is_stock_item "$num" && set_stocks
         set_idx "$idx"
         [ -s "$RUN_DIR/item_${num}.line" ] && sub_show "$(cat "$RUN_DIR/item_${num}.line")" || sub_hide
         ffplay -nodisp -autoexit -loglevel quiet -af "volume=${VOICE_GAIN}" "$mp3" >/dev/null 2>&1 &

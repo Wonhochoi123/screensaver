@@ -2805,9 +2805,9 @@ local function draw_briefing()
     local xf = io.open("/tmp/ss_briefing.idx", "r")
     if xf then cur = tonumber((xf:read("*l") or "")); xf:close() end
 
-    -- MARKETS gets its own treatment: a vector stock card + ticker list on the
-    -- LEFT (active in blue) and Grok's analysis on the RIGHT — no text captions.
-    if cur and mani[cur] and mani[cur].cat == "MARKETS" and sk_show then
+    -- MARKETS / WATCHLIST get a stock card on the LEFT and Grok's analysis on
+    -- the RIGHT — no text captions.
+    if cur and mani[cur] and (mani[cur].cat == "MARKETS" or mani[cur].cat == "WATCHLIST") and sk_show then
         briefing_boxes = nil
         BC.gen = BC.gen + 1; BC.group = nil
         briefing_ov:remove(); briefing_ov.data = ""
