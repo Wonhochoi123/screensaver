@@ -287,6 +287,14 @@ once by `config/build-geodb.sh`. No API key, no runtime network.
 - `GEONAMES_COUNTRIES` — space-separated ISO country codes to index (small, fast,
   e.g. `"US CA GB"`). **Leave it empty to index the whole planet** (~390 MB
   download, larger DB).
+- `GEO_LOCALIZE` — show place names in their **own script** for these languages
+  instead of romanized. Default `'ko'` makes Korean places display in Korean
+  (서울, 경복궁, 대한민국) in a proper Hangul font; the city, province, country and
+  landmark all localize. It pulls the correct name from GeoNames'
+  `alternateNamesV2` table (preferred, non-historic — so Seoul → 서울, not the
+  old name 한양), adding a one-time ~200 MB download at build time. Empty =
+  romanized everywhere (the original behaviour). Codes map to their country
+  (`ko`→KR, `ja`→JP, `ru`→RU…); other places stay romanized.
 - Rebuild any time with `~/Screensaver-App/config/build-geodb.sh`, or bump
   `GEODB_VERSION` to force a one-time rebuild on the next launch.
 
@@ -423,7 +431,8 @@ file, so a value set here applies everywhere.
 | Key | Default | Meaning |
 |---|---|---|
 | `GEONAMES_COUNTRIES` | `''` | ISO country codes to index; empty = whole planet |
-| `GEODB_VERSION` | `'6'` | Bump to force a one-time DB rebuild |
+| `GEO_LOCALIZE` | `'ko'` | Languages whose places show in their own script (ko→Korean); empty = romanized |
+| `GEODB_VERSION` | `'7'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

@@ -28,6 +28,21 @@ echo "▶ Fetching GeoNames support tables..."
 fetch_cached "admin1CodesASCII.txt" "$CACHE/admin1.txt"  || { echo "download failed (admin1)"; exit 1; }
 fetch_cached "countryInfo.txt"      "$CACHE/country.txt" || { echo "download failed (countryInfo)"; exit 1; }
 
+# Localized names (e.g. Korean for KR places): pull GeoNames' alternateNamesV2,
+# which is language-tagged with preferred/historic flags. Normalize the config
+# list ("ko" / "ko,ja" / "ko ja") to a comma list; empty = romanized everywhere.
+LOCALIZE="$(printf '%s' "${GEO_LOCALIZE:-}" | tr ' ' ',' | tr -s ',' | sed 's/^,//;s/,$//')"
+ALTFILE=""
+if [ -n "$LOCALIZE" ]; then
+    echo "▶ Localized place names enabled ($LOCALIZE) — fetching alternateNamesV2 (one-time ~200MB)..."
+    if fetch_cached "alternateNamesV2.zip" "$CACHE/alternateNamesV2.zip" \
+        && (cd "$TMP" && unzip -oq "$CACHE/alternateNamesV2.zip" alternateNamesV2.txt); then
+        ALTFILE="$TMP/alternateNamesV2.txt"
+    else
+        echo "⚠ could not fetch/unzip alternateNamesV2 — names will stay romanized."
+    fi
+fi
+
 DUMPS=()
 if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
     for cc in $GEONAMES_COUNTRIES; do
@@ -51,7 +66,7 @@ fi
 [ "${#DUMPS[@]}" -gt 0 ] || { echo "build-geodb: no dumps available — aborting."; exit 1; }
 
 echo "▶ Building offline place database -> $GEODB ..."
-python3 - "$GEODB" "$CACHE/country.txt" "$CACHE/admin1.txt" "${DUMPS[@]}" <<'PY'
+python3 - "$GEODB" "$CACHE/country.txt" "$CACHE/admin1.txt" "$ALTFILE" "$LOCALIZE" "${DUMPS[@]}" <<'PY'
 import sys, sqlite3, os
 # GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
 # max_km = how far away the feature can still be the photo's "landmark".
@@ -83,21 +98,69 @@ import re as _re
 _CALLSIGN = _re.compile(r'^[KWC][A-Z]{2,3}(-(FM|AM|TV|LP|LD|CD|CA|DT))?$')
 def _is_broadcast(nm):
     return bool(_CALLSIGN.match(nm)) or '-FM' in nm or '-AM' in nm or '-TV' in nm
-db, cinfo, admin1, dumps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+db, cinfo, admin1 = sys.argv[1], sys.argv[2], sys.argv[3]
+altfile, localize = sys.argv[4], sys.argv[5]
+dumps = sys.argv[6:]
 
-country = {}
+# Language → country code: localize a place into a script only for its own
+# country (so "ko" gives Korean for KR places, not for every place with a Korean
+# alternate name like Tokyo). Extend this map to add more languages.
+LANG_CC = {"ko": "KR", "ja": "JP", "zh": "CN", "ru": "RU", "th": "TH", "ar": "SA",
+           "el": "GR", "he": "IL", "hi": "IN", "uk": "UA"}
+langs = [x for x in localize.replace(" ", ",").split(",") if x]
+loc_cc = {LANG_CC[l] for l in langs if l in LANG_CC}      # countries we localize
+want_lang = set(langs)
+
+# loc_name[geonameid] = best localized display name (preferred, non-historic).
+# Score: preferred (4) + short (1); we keep the highest-scoring, breaking ties by
+# the shorter string so "서울" wins over "서울특별시".
+loc_name, loc_score = {}, {}
+if altfile and os.path.exists(altfile) and want_lang:
+    for ln in open(altfile, encoding="utf-8", errors="ignore"):
+        c = ln.rstrip("\n").split("\t")
+        if len(c) < 4:
+            continue
+        gid, lang, name = c[1], c[2], c[3]
+        if lang not in want_lang or not name:
+            continue
+        is_pref = len(c) > 4 and c[4] == "1"
+        is_short = len(c) > 5 and c[5] == "1"
+        is_hist = len(c) > 7 and c[7] == "1"
+        if is_hist:                       # skip historical names (한양/경성 for Seoul)
+            continue
+        score = (4 if is_pref else 0) + (1 if is_short else 0)
+        prev = loc_score.get(gid)
+        if prev is None or score > prev or (score == prev and len(name) < len(loc_name[gid])):
+            loc_name[gid] = name
+            loc_score[gid] = score
+
+
+def localize_name(geoid, cc, fallback):
+    if cc in loc_cc and geoid in loc_name:
+        return loc_name[geoid]
+    return fallback
+
+
+country = {}       # cc -> english name
+country_gid = {}   # cc -> the country's own geonameid (to localize the name)
 for ln in open(cinfo, encoding="utf-8", errors="ignore"):
     if ln.startswith("#"):
         continue
     c = ln.rstrip("\n").split("\t")
     if len(c) > 4 and c[0]:
         country[c[0]] = c[4]
+        if len(c) > 16:
+            country_gid[c[0]] = c[16]
 
-a1 = {}
+# admin1: keep both the romanized name and the province's geonameid so KR
+# provinces can be localized too (admin1CodesASCII cols: code, name, ascii, gid).
+a1, a1_gid = {}, {}
 for ln in open(admin1, encoding="utf-8", errors="ignore"):
     c = ln.rstrip("\n").split("\t")
     if len(c) >= 2 and c[0]:
         a1[c[0]] = c[1]
+        if len(c) >= 4:
+            a1_gid[c[0]] = c[3]
 
 os.makedirs(os.path.dirname(db), exist_ok=True)
 if os.path.exists(db):
@@ -112,7 +175,7 @@ for dump in dumps:
         c = ln.rstrip("\n").split("\t")
         if len(c) < 19:
             continue
-        name, lat, lon, fclass, fcode, cc, adm1 = c[1], c[4], c[5], c[6], c[7], c[8], c[10]
+        geoid, name, lat, lon, fclass, fcode, cc, adm1 = c[0], c[1], c[4], c[5], c[6], c[7], c[8], c[10]
         if not name:
             continue
         try:
@@ -129,9 +192,15 @@ for dump in dumps:
                 elev = float(col); break
             except (ValueError, IndexError):
                 pass
+        # For places in a localized country, show the local-script name (서울)
+        # instead of the romanized one (Seoul); everywhere else stays romanized.
+        name = localize_name(geoid, cc, name)
         if fclass == "P" and fcode.startswith("PPL") and pop > 0:
+            akey = cc + "." + adm1
+            state = localize_name(a1_gid.get(akey, ""), cc, a1.get(akey, ""))
+            ctry = localize_name(country_gid.get(cc, ""), cc, country.get(cc, ""))
             cur.execute("INSERT INTO place VALUES(?,?,?,?,?,?)",
-                        (name, lat, lon, pop, a1.get(cc + "." + adm1, ""), country.get(cc, "")))
+                        (name, lat, lon, pop, state, ctry))
             np += 1
         elif fcode in LANDMARK:
             if _is_broadcast(name):       # skip radio/TV stations (e.g. WLVV-FM)

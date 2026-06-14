@@ -24,9 +24,22 @@ python3 - "$GEODB" "$BATCH" "$LAT" "$LON" "$COORDS" <<'PY'
 import sys, sqlite3, math, unicodedata
 DB = sys.argv[1]; BATCH = sys.argv[2] == "1"
 
+def _has_hangul(s):
+    # Match photo.lua's is_hangul ranges (it renders these in the Korean font).
+    for ch in s:
+        o = ord(ch)
+        if (0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F or 0xA960 <= o <= 0xA97F
+                or 0xAC00 <= o <= 0xD7A3 or 0xD7B0 <= o <= 0xD7FF):
+            return True
+    return False
+
 def ascii_(s):
-    # Fold accents to plain ASCII and drop apostrophes (regular English alphabet).
+    # Korean (Hangul) names are kept as-is — the HUD renders them in a Hangul
+    # font. Everything else is folded to plain ASCII (accents stripped, apostrophes
+    # dropped); a non-Latin script that would render as tofu blanks out, as before.
     if not s: return s
+    if _has_hangul(s):
+        return s.strip()
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     for ch in ("'", "’", "‘", "`", "´"):
