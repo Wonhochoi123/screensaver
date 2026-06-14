@@ -101,7 +101,10 @@ def overpass_pois(lat, lon):
          'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring)$"][name];'
          'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk)$"][name];'
          'nwr(around:%d,%f,%f)[leisure~"^(park|garden)$"][name];'
-         ");out center 40;") % ((R, lat, lon) * 5)
+         # neighbourhood/suburb level — a finer-than-city fallback for when the
+         # exact POI you were at isn't mapped (e.g. 잠실동).
+         'node(around:%d,%f,%f)[place~"^(suburb|neighbourhood|quarter|city_block|borough|hamlet|village)$"][name];'
+         ");out center 50;") % ((R, lat, lon) * 6)
     body = urllib.parse.urlencode({"data": q}).encode()
     j = None
     for attempt in (0, 1):                         # one retry — Overpass load is spiky
@@ -133,7 +136,8 @@ def overpass_pois(lat, lon):
             c = el.get("center", {}); plat, plon = c.get("lat"), c.get("lon")
         if plat is None:
             continue
-        out.append([nm, plat, plon])
+        kind = "hood" if tags.get("place") else "poi"
+        out.append([nm, plat, plon, kind])
     if cf:
         try:
             tmp = cf + ".tmp"; json.dump(out, open(tmp, "w", encoding="utf-8")); os.replace(tmp, cf)
@@ -159,26 +163,26 @@ def _pip(lat, lon, polys):
     return False
 
 def boundary_lookup(lat, lon):
-    # -> (adm1_name, adm1_metro, adm2_name, adm2_parent, adm2_pmetro, adm2_polys)
+    # -> (adm1_name, adm1_metro, adm2_name, adm2_parent, adm2_pmetro, country, adm2_polys)
     if not HAVE_BND:
-        return None, 0, None, None, 0, None
+        return None, 0, None, None, 0, None, None
     rows = cur.execute(
-        "SELECT b.level,b.name,b.metro,b.parent,b.pmetro,b.rings FROM boundary_rtree r "
+        "SELECT b.level,b.name,b.metro,b.parent,b.pmetro,b.country,b.rings FROM boundary_rtree r "
         "JOIN boundary b ON b.id=r.id "
         "WHERE r.minlat<=? AND r.maxlat>=? AND r.minlon<=? AND r.maxlon>=?",
         (lat, lat, lon, lon)).fetchall()
-    b1 = b2 = b2par = b2polys = None; metro = pmetro = 0
-    for level, name, mtr, parent, pmtr, rings in rows:
+    b1 = b2 = b2par = b2polys = None; metro = pmetro = 0; ctry1 = ctry2 = None
+    for level, name, mtr, parent, pmtr, country, rings in rows:
         if b1 is not None and b2 is not None:
             break
         polys = json.loads(rings)
         if not _pip(lat, lon, polys):
             continue
         if level == 1 and b1 is None:
-            b1 = name; metro = mtr
+            b1 = name; metro = mtr; ctry1 = country
         elif level == 2 and b2 is None:
-            b2 = name; b2par = parent; pmetro = pmtr; b2polys = polys
-    return b1, metro, b2, b2par, pmetro, b2polys
+            b2 = name; b2par = parent; pmetro = pmtr; ctry2 = country; b2polys = polys
+    return b1, metro, b2, b2par, pmetro, (ctry2 or ctry1), b2polys
 
 def resolve(lat, lon):
     def win(r):
@@ -190,14 +194,14 @@ def resolve(lat, lon):
     #     the HUD to cycle. Source per GEO_POI_SOURCE: live OSM/Overpass (richest,
     #     worldwide, cached), a downloaded OSM extract, or the GeoNames feature
     #     table. Each path falls back to GeoNames when it has nothing. ---
-    def _rank(cands):
+    def _rank(cands, limit=10):
         cands.sort(key=lambda x: x[0])
         names, seen = [], set()
         for d, name in cands:
             n = ascii_(name)
             if n and n.lower() not in seen:
                 seen.add(n.lower()); names.append(n)
-            if len(names) >= 5:
+            if len(names) >= limit:
                 break
         return names
 
@@ -210,9 +214,15 @@ def resolve(lat, lon):
 
     names = None
     if POI_SOURCE == "overpass":
-        pois = overpass_pois(lat, lon)          # None on net failure, [] if none nearby
-        if pois:
-            names = _rank([(hav(lat, lon, p[1], p[2]), p[0]) for p in pois])
+        items = overpass_pois(lat, lon)         # None on net failure, [] if none nearby
+        if items:
+            pois = [(hav(lat, lon, p[1], p[2]), p[0]) for p in items if (p[3] if len(p) > 3 else "poi") == "poi"]
+            hoods = [(hav(lat, lon, p[1], p[2]), p[0]) for p in items if len(p) > 3 and p[3] == "hood"]
+            names = _rank(pois)
+            # append the nearest neighbourhood as a finer-than-city fallback
+            for nm in _rank(hoods, 1):
+                if nm.lower() not in {x.lower() for x in names}:
+                    names.append(nm)
     elif POI_SOURCE != "none" and HAVE_POI:     # pre-downloaded OSM extract
         la0, la1, lo0, lo1 = win(40)
         c = [(hav(lat, lon, flat, flon), name) for name, flat, flon in cur.execute(
@@ -255,7 +265,11 @@ def resolve(lat, lon):
     # are about equally close — picks 'Paris' over 'Paris 04', but distance still
     # dominates so a suburb (Cupertino) isn't overridden by the county seat.
     _RANK = {"PPLC": 0, "PPLA": 1, "PPLA2": 2, "PPLA3": 3, "PPLA4": 4, "PPLA5": 5}
-    b1, b1_metro, b2, b2_parent, b2_pmetro, b2polys = boundary_lookup(lat, lon)
+    b1, b1_metro, b2, b2_parent, b2_pmetro, b_country, b2polys = boundary_lookup(lat, lon)
+    # The region label (province + country) comes from the SAME boundary polygons
+    # as the city — just coarser levels — not a second nearest-point guess.
+    if b_country:
+        country = b_country
     # Province comes from the ADM2's own parent (consistent with the city), not a
     # separate ADM1 lookup that can disagree at simplified borders.
     prov = b2_parent if b2 else b1

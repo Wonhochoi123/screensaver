@@ -269,7 +269,7 @@ cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, ele
 # simplifies the ADM1 and ADM2 layers independently and their edges don't match.
 # An R-tree indexes the bounding boxes so a point lookup is O(log n) over ~53k.
 cur.execute("CREATE TABLE boundary(id INTEGER PRIMARY KEY, level INT, name TEXT, "
-            "metro INT, parent TEXT, pmetro INT, rings TEXT)")
+            "metro INT, parent TEXT, pmetro INT, country TEXT, rings TEXT)")
 cur.execute("CREATE VIRTUAL TABLE boundary_rtree USING rtree(id, minlat, maxlat, minlon, maxlon)")
 # osm_poi: named OpenStreetMap landmarks for the configured regions (preferred
 # over the GeoNames feature table where present). Its own R-tree for fast lookup.
@@ -481,9 +481,13 @@ def add_boundary(level, cc, shape_name, polys):
         rp = _rep_point(polys)
         if rp:
             parent, pmetro = _parent_adm1(rp[0], rp[1])
+    # the region's country, localized like everything else (대한민국, not "South
+    # Korea") — so the HUD's region label uses the SAME data as the city, not a
+    # second nearest-point guess.
+    ctry = localize_name(country_gid.get(cc, ""), cc, country.get(cc, ""))
     bid[0] += 1; rid = bid[0]
-    cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?,?,?)",
-                (rid, level, name, metro, parent, pmetro,
+    cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?,?,?,?)",
+                (rid, level, name, metro, parent, pmetro, ctry,
                  json.dumps(_round_polys(polys), separators=(",", ":"))))
     cur.execute("INSERT INTO boundary_rtree VALUES(?,?,?,?,?)",
                 (rid, minlat, maxlat, minlon, maxlon))

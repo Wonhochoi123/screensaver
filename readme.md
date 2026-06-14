@@ -469,7 +469,7 @@ file, so a value set here applies everywhere.
 | `GEO_BOUNDARIES` | `'*'` | Point-in-polygon city resolution; `'*'` = whole planet, or ISO-2 list; empty = nearest-point |
 | `GEO_POI_SOURCE` | `'overpass'` | Landmarks: `overpass` (live OSM, worldwide, no download), `offline` (regional extract), `none` |
 | `GEO_POI_REGIONS` | `''` | Geofabrik slugs to download when `GEO_POI_SOURCE='offline'` |
-| `GEODB_VERSION` | `'12'` | Bump to force a one-time DB rebuild |
+| `GEODB_VERSION` | `'13'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the
