@@ -1182,6 +1182,39 @@ local function utf8_split(s)
     return t
 end
 
+-- Korean place names render in Black Han Sans (a heavy, geometric DISPLAY Hangul
+-- font that matches Montserrat ExtraBold's weight), while Latin stays Montserrat.
+-- These are GLOBALS on purpose: photo.lua sits at Lua's 200-local cap, so new
+-- helpers/state must not add file-scope locals. utf8_cp decodes one UTF-8 glyph
+-- (as produced by utf8_split) to a codepoint; is_hangul covers Jamo, Compatibility
+-- Jamo, the Syllables block, and the extended Jamo blocks.
+KFONT = "Black Han Sans"
+function utf8_cp(g)
+    local b = g:byte(1); if not b then return 0 end
+    if b < 0x80 then return b end
+    if b >= 0xF0 then return (b - 0xF0) * 0x40000 + (g:byte(2) - 0x80) * 0x1000
+                            + (g:byte(3) - 0x80) * 0x40 + (g:byte(4) - 0x80) end
+    if b >= 0xE0 then return (b - 0xE0) * 0x1000 + (g:byte(2) - 0x80) * 0x40 + (g:byte(3) - 0x80) end
+    if b >= 0xC0 then return (b - 0xC0) * 0x40 + (g:byte(2) - 0x80) end
+    return b
+end
+function is_hangul(g)
+    local c = utf8_cp(g)
+    return (c >= 0x1100 and c <= 0x11FF) or (c >= 0x3130 and c <= 0x318F)
+        or (c >= 0xA960 and c <= 0xA97F) or (c >= 0xAC00 and c <= 0xD7A3)
+        or (c >= 0xD7B0 and c <= 0xD7FF)
+end
+function glyph_font(g) if is_hangul(g) then return KFONT end return "Montserrat ExtraBold" end
+-- Wrap a whole string with per-glyph \fn overrides so Korean runs use KFONT and
+-- Latin runs stay Montserrat (used by the static, non-animated headline path).
+function han_wrap(str)
+    local out = {}
+    for _, g in ipairs(utf8_split(str)) do
+        out[#out + 1] = string.format("{\\fn%s}%s", glyph_font(g), g)
+    end
+    return table.concat(out)
+end
+
 -- Animated landmark reveal, mirroring the title cards: each glyph fades in at a
 -- random moment and settles at ~0.75 opacity (alpha &H40&). Driven by timers so
 -- it animates reliably on the live OSD overlay (which has no event clock).
@@ -1244,7 +1277,8 @@ local function lm_render()
         if el <= st then alpha = 0xFF
         elseif el >= st + a.fade then alpha = LM_FINAL_ALPHA
         else alpha = math.floor(0xFF + (LM_FINAL_ALPHA - 0xFF) * ((el - st) / a.fade) + 0.5) end
-        parts[#parts + 1] = string.format("{\\alpha&H%02X&}%s", alpha, a.glyphs[i])
+        parts[#parts + 1] = string.format("{\\fn%s\\alpha&H%02X&}%s",
+            (a.fonts and a.fonts[i]) or "Montserrat ExtraBold", alpha, a.glyphs[i])
     end
     landmark_ov.res_x = a.W; landmark_ov.res_y = a.H
     landmark_ov.data = table.concat(parts)
@@ -1257,9 +1291,9 @@ local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h, top)
     local gen = lm_gen
     -- Optional landmark line (smaller) revealed above the city line.
     local lm_glyphs = (top and top ~= "") and utf8_split(top) or {}
-    local glyphs = {}
-    for _, g in ipairs(lm_glyphs) do glyphs[#glyphs + 1] = g end
-    for _, g in ipairs(utf8_split(text)) do glyphs[#glyphs + 1] = g end
+    local glyphs, fonts = {}, {}
+    for _, g in ipairs(lm_glyphs) do glyphs[#glyphs + 1] = g; fonts[#fonts + 1] = glyph_font(g) end
+    for _, g in ipairs(utf8_split(text)) do glyphs[#glyphs + 1] = g; fonts[#fonts + 1] = glyph_font(g) end
     local lm_fs  = math.floor(fs * 0.6)
     local lm_fsp = math.floor(lm_fs * 0.3636 + 0.5)
     -- Header carries everything except \fs/\fsp (set per line in lm_render).
@@ -1272,7 +1306,7 @@ local function animate_landmark(text, cx, by, fs, fsp, win_w, win_h, top)
         start_t[i] = st
         if st > last then last = st end
     end
-    lm_anim = { glyphs = glyphs, start_t = start_t, t0 = mp.get_time(), header = header,
+    lm_anim = { glyphs = glyphs, fonts = fonts, start_t = start_t, t0 = mp.get_time(), header = header,
                 total = last + FADE, gen = gen, W = win_w, H = win_h, fade = FADE,
                 lm_n = #lm_glyphs, fs = fs, fsp = fsp, lm_fs = lm_fs, lm_fsp = lm_fsp }
     lm_render()
@@ -1455,9 +1489,9 @@ mp.register_event("file-loaded", function()
                     "{\\an2\\pos(%d,%d)\\fnMontserrat ExtraBold\\1c&HFFFFFF&%s\\alpha&H40&}", cx, by, glow(fs))
                 if top then
                     local lf = math.floor(fs * 0.6)
-                    s = s .. string.format("{\\fs%d\\fsp%d}%s\\N", lf, math.floor(lf * 0.3636 + 0.5), top)
+                    s = s .. string.format("{\\fs%d\\fsp%d}%s\\N", lf, math.floor(lf * 0.3636 + 0.5), han_wrap(top))
                 end
-                landmark_ov.data = s .. string.format("{\\fs%d\\fsp%d}%s", fs, fsp, city)
+                landmark_ov.data = s .. string.format("{\\fs%d\\fsp%d}%s", fs, fsp, han_wrap(city))
                 landmark_ov:update()
             end
         end

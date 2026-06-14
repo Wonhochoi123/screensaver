@@ -196,6 +196,21 @@ for w in ExtraBold SemiBold; do
 done
 find "$FONT_DIR" -name 'Montserrat-*.ttf' -size 0 -delete 2>/dev/null || true
 
+# Black Han Sans (OFL) — a heavy, geometric DISPLAY Hangul font that matches
+# Montserrat ExtraBold's weight. The center place-name headline renders Korean
+# glyphs in this; Latin stays Montserrat (photo.lua picks per glyph).
+BHS_URL="https://github.com/google/fonts/raw/main/ofl/blackhansans/BlackHanSans-Regular.ttf"
+if [ ! -s "$FONT_DIR/BlackHanSans-Regular.ttf" ]; then
+    if curl -fsSL --create-dirs -o "$FONT_DIR/BlackHanSans-Regular.ttf" "$BHS_URL"; then
+        got_font=1
+    else
+        echo "⚠ Could not fetch Black Han Sans (Korean place names fall back to a system font)."
+    fi
+else
+    got_font=1
+fi
+find "$FONT_DIR" -name 'BlackHanSans-*.ttf' -size 0 -delete 2>/dev/null || true
+
 # Media/Fonts is NOT on fontconfig's default search path, so register it. This
 # is the only per-machine bit written outside the app dir — re-run the installer
 # on a new computer to recreate it. (The mpv/ffmpeg calls also point at FONT_DIR
@@ -211,7 +226,7 @@ if [ "$got_font" = 1 ]; then
 </fontconfig>
 FCEOF
     fc-cache -f "$FONT_DIR" >/dev/null 2>&1 || true
-    echo "▶ Montserrat fonts installed to $FONT_DIR and registered."
+    echo "▶ Montserrat + Black Han Sans (Korean) fonts installed to $FONT_DIR and registered."
 fi
 
 # =============================================================================
