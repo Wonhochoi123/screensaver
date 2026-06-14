@@ -20,8 +20,15 @@ else
 fi
 [ -s "${GEODB:-}" ] || exit 0          # DB not built yet -> no enrichment
 command -v python3 >/dev/null 2>&1 || exit 0
+# Persistent cache for live POI (Overpass) lookups, so a coordinate is queried at
+# most once ever; survives reinstalls (lives under Data/, not /tmp).
+if [ -n "${RES_DIR:-}" ]; then
+    export GEO_POI_CACHE="$RES_DIR/geo/overpass_cache"
+    mkdir -p "$GEO_POI_CACHE" 2>/dev/null || true
+fi
+export GEO_POI_SOURCE GEO_OVERPASS_URL
 python3 - "$GEODB" "$BATCH" "$LAT" "$LON" "$COORDS" <<'PY'
-import sys, sqlite3, math, unicodedata, json
+import sys, sqlite3, math, unicodedata, json, os, time, urllib.request, urllib.parse
 DB = sys.argv[1]; BATCH = sys.argv[2] == "1"
 
 def _has_hangul(s):
@@ -67,6 +74,72 @@ try:
     cur.execute("SELECT count(*) FROM osm_poi_rtree WHERE id<0")
 except sqlite3.OperationalError:
     HAVE_POI = False
+
+POI_SOURCE = os.environ.get("GEO_POI_SOURCE", "overpass").strip().lower()
+OVERPASS_URL = os.environ.get("GEO_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+POI_CACHE = os.environ.get("GEO_POI_CACHE", "")
+_op_last = [0.0]    # rate-limit clock; _op_fail = consecutive failures (circuit breaker)
+_op_fail = [0]
+
+def overpass_pois(lat, lon):
+    # Live OSM landmarks near a point -> [(name, plat, plon), ...]; None on network
+    # failure (so the caller can fall back offline), [] if simply nothing nearby.
+    # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
+    key = "%.3f_%.3f" % (lat, lon)
+    cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
+    if cf and os.path.exists(cf):
+        try:
+            return json.load(open(cf, encoding="utf-8"))
+        except Exception:
+            pass
+    if _op_fail[0] >= 3:        # 3 strikes -> assume offline for the rest of this run
+        return None
+    R = 2500
+    q = ("[out:json][timeout:25];("
+         'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|artwork|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
+         'nwr(around:%d,%f,%f)[historic][name];'
+         'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring)$"][name];'
+         'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk)$"][name];'
+         'nwr(around:%d,%f,%f)[leisure~"^(park|garden)$"][name];'
+         ");out center 40;") % ((R, lat, lon) * 5)
+    body = urllib.parse.urlencode({"data": q}).encode()
+    j = None
+    for attempt in (0, 1):                         # one retry — Overpass load is spiky
+        wait = 1.2 - (time.time() - _op_last[0])   # be polite: >=1.2 s between calls
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            req = urllib.request.Request(OVERPASS_URL, data=body,
+                                         headers={"User-Agent": "mpv-screensaver-geo/1"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                j = json.loads(r.read().decode("utf-8"))
+            _op_last[0] = time.time(); _op_fail[0] = 0
+            break
+        except Exception:
+            _op_last[0] = time.time()
+            if attempt == 0 and _op_fail[0] == 0:  # retry once, but not when already failing
+                time.sleep(3)                      # brief backoff, then retry once
+                continue
+            _op_fail[0] += 1
+            return None
+    out = []
+    for el in j.get("elements", []):
+        tags = el.get("tags", {}); nm = tags.get("name")
+        if not nm:
+            continue
+        if el.get("type") == "node":
+            plat, plon = el.get("lat"), el.get("lon")
+        else:
+            c = el.get("center", {}); plat, plon = c.get("lat"), c.get("lon")
+        if plat is None:
+            continue
+        out.append([nm, plat, plon])
+    if cf:
+        try:
+            tmp = cf + ".tmp"; json.dump(out, open(tmp, "w", encoding="utf-8")); os.replace(tmp, cf)
+        except Exception:
+            pass
+    return out
 
 def _ring(lat, lon, ring):
     inside = False; n = len(ring); j = n - 1
@@ -114,29 +187,40 @@ def resolve(lat, lon):
         return lat - dla, lat + dla, lon - dlo, lon + dlo
 
     # --- landmark: nearest named features, closest first, up to 5, "|"-joined for
-    #     the HUD to cycle. Prefer OpenStreetMap POIs (richer, real attraction
-    #     categories) where loaded; otherwise the GeoNames feature table. ---
-    cands = []
-    if HAVE_POI:
-        la0, la1, lo0, lo1 = win(40)
-        for name, flat, flon in cur.execute(
-                "SELECT p.name,p.lat,p.lon FROM osm_poi_rtree r JOIN osm_poi p ON p.id=r.id "
-                "WHERE r.minlat BETWEEN ? AND ? AND r.minlon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
-            cands.append((hav(lat, lon, flat, flon), name))
-    if not cands:                       # no OSM coverage here -> GeoNames features
+    #     the HUD to cycle. Source per GEO_POI_SOURCE: live OSM/Overpass (richest,
+    #     worldwide, cached), a downloaded OSM extract, or the GeoNames feature
+    #     table. Each path falls back to GeoNames when it has nothing. ---
+    def _rank(cands):
+        cands.sort(key=lambda x: x[0])
+        names, seen = [], set()
+        for d, name in cands:
+            n = ascii_(name)
+            if n and n.lower() not in seen:
+                seen.add(n.lower()); names.append(n)
+            if len(names) >= 5:
+                break
+        return names
+
+    def _geonames_landmarks():
         la0, la1, lo0, lo1 = win(100)
-        for name, flat, flon in cur.execute(
+        c = [(hav(lat, lon, flat, flon), name) for name, flat, flon in cur.execute(
                 "SELECT name,lat,lon FROM feature "
-                "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
-            cands.append((hav(lat, lon, flat, flon), name))
-    cands.sort(key=lambda x: x[0])
-    names, seen = [], set()
-    for d, name in cands:
-        n = ascii_(name)
-        if n and n.lower() not in seen:
-            seen.add(n.lower()); names.append(n)
-        if len(names) >= 5:
-            break
+                "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1))]
+        return _rank(c)
+
+    names = None
+    if POI_SOURCE == "overpass":
+        pois = overpass_pois(lat, lon)          # None on net failure, [] if none nearby
+        if pois:
+            names = _rank([(hav(lat, lon, p[1], p[2]), p[0]) for p in pois])
+    elif POI_SOURCE != "none" and HAVE_POI:     # pre-downloaded OSM extract
+        la0, la1, lo0, lo1 = win(40)
+        c = [(hav(lat, lon, flat, flon), name) for name, flat, flon in cur.execute(
+                "SELECT p.name,p.lat,p.lon FROM osm_poi_rtree r JOIN osm_poi p ON p.id=r.id "
+                "WHERE r.minlat BETWEEN ? AND ? AND r.minlon BETWEEN ? AND ?", (la0, la1, lo0, lo1))]
+        names = _rank(c)
+    if not names:                                # fall back to GeoNames features
+        names = _geonames_landmarks()
     landmark = "|".join(names)
 
     # --- city: collect nearby populated places (kept for the boundary hybrid) ----
