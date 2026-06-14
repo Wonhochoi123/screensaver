@@ -62,6 +62,11 @@ try:
     cur.execute("SELECT count(*) FROM boundary_rtree WHERE id<0")
 except sqlite3.OperationalError:
     HAVE_BND = False
+HAVE_POI = True
+try:
+    cur.execute("SELECT count(*) FROM osm_poi_rtree WHERE id<0")
+except sqlite3.OperationalError:
+    HAVE_POI = False
 
 def _ring(lat, lon, ring):
     inside = False; n = len(ring); j = n - 1
@@ -108,14 +113,22 @@ def resolve(lat, lon):
         dlo = r / (111.0 * max(0.05, math.cos(math.radians(lat))))
         return lat - dla, lat + dla, lon - dlo, lon + dlo
 
-    # --- landmark: the nearest named features within a wide window — NO radius
-    #     filter at all. Closest first, up to 5, joined with "|" to cycle through. ---
-    la0, la1, lo0, lo1 = win(100)
+    # --- landmark: nearest named features, closest first, up to 5, "|"-joined for
+    #     the HUD to cycle. Prefer OpenStreetMap POIs (richer, real attraction
+    #     categories) where loaded; otherwise the GeoNames feature table. ---
     cands = []
-    for name, flat, flon, fcode, elev, w, mk in cur.execute(
-            "SELECT name,lat,lon,fcode,elev,weight,maxkm FROM feature "
-            "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
-        cands.append((hav(lat, lon, flat, flon), name))
+    if HAVE_POI:
+        la0, la1, lo0, lo1 = win(40)
+        for name, flat, flon in cur.execute(
+                "SELECT p.name,p.lat,p.lon FROM osm_poi_rtree r JOIN osm_poi p ON p.id=r.id "
+                "WHERE r.minlat BETWEEN ? AND ? AND r.minlon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+            cands.append((hav(lat, lon, flat, flon), name))
+    if not cands:                       # no OSM coverage here -> GeoNames features
+        la0, la1, lo0, lo1 = win(100)
+        for name, flat, flon in cur.execute(
+                "SELECT name,lat,lon FROM feature "
+                "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
+            cands.append((hav(lat, lon, flat, flon), name))
     cands.sort(key=lambda x: x[0])
     names, seen = [], set()
     for d, name in cands:

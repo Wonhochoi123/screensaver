@@ -314,6 +314,17 @@ once by `config/build-geodb.sh`. No API key, no runtime network.
   places are sparse it falls back to the admin name (KR 하남시). Polygon holes are
   honoured (경기도 excludes Seoul); an R-tree keeps lookups instant across ~53k
   polygons. Empty = nearest-point only.
+- `GEO_POI_REGIONS` — richer **landmarks** from OpenStreetMap for these regions,
+  in place of GeoNames' thin, skewed feature list (GeoNames lacks e.g. Lotte World
+  Tower and is full of minor temples). Space/comma-separated
+  [Geofabrik](https://download.geofabrik.de) region slugs (default
+  `'asia/south-korea'`; e.g. add `'asia/japan'`, `'europe/france'`); each pulls
+  that region's free shapefile extract (one-time, a few hundred MB). Only **named**
+  features in real attraction/natural categories are kept (attraction, tower,
+  museum, monument, viewpoint, castle, peak, waterfall…); the separate
+  place-of-worship layer is dropped so minor temples don't crowd out real sights.
+  No popularity score — purely OSM's own category tags. Where a region isn't
+  loaded, landmarks fall back to GeoNames. Empty = GeoNames only.
 - Rebuild any time with `~/Screensaver-App/config/build-geodb.sh`, or bump
   `GEODB_VERSION` to force a one-time rebuild on the next launch.
 
@@ -452,7 +463,8 @@ file, so a value set here applies everywhere.
 | `GEONAMES_COUNTRIES` | `''` | ISO country codes to index; empty = whole planet |
 | `GEO_LOCALIZE` | `'ko'` | Languages whose places show in their own script (ko→Korean); empty = romanized |
 | `GEO_BOUNDARIES` | `'*'` | Point-in-polygon city resolution; `'*'` = whole planet, or ISO-2 list; empty = nearest-point |
-| `GEODB_VERSION` | `'11'` | Bump to force a one-time DB rebuild |
+| `GEO_POI_REGIONS` | `'asia/south-korea'` | OSM landmark regions (Geofabrik slugs); empty = GeoNames features only |
+| `GEODB_VERSION` | `'12'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

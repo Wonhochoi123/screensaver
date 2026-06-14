@@ -51,10 +51,9 @@ fi
 # per level); otherwise a per-country list pulls gbOpen GeoJSON. Both feed a
 # manifest the Python below reads: "kind<TAB>level<TAB>arg1<TAB>arg2" where
 # kind=shp -> arg1=.shp arg2=.dbf ; kind=geojson -> arg1=path arg2=ISO2 cc.
-BND_MANIFEST=""
+BND_MANIFEST="$TMP/geo.manifest"; : > "$BND_MANIFEST"   # shared by boundaries + POIs
 BND_RAW="$(printf '%s' "${GEO_BOUNDARIES:-}" | tr ',' ' ')"
 if [ -n "$BND_RAW" ]; then
-    BND_MANIFEST="$TMP/boundaries.manifest"; : > "$BND_MANIFEST"
     if printf '%s' "$BND_RAW" | grep -q '[*]'; then
         # Whole planet: one CGAZ shapefile zip per level (non-LFS, reliable).
         CGAZ="https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/CGAZ"
@@ -94,6 +93,30 @@ if [ -n "$BND_RAW" ]; then
         done
     fi
 fi
+
+# OpenStreetMap points-of-interest (richer, better-categorised landmarks than the
+# thin GeoNames feature set). Per Geofabrik region, pull the free shapefile
+# extract and feed the POI/natural layers to the Python (kind=poi). The
+# place-of-worship layer (gis_osm_pofw_*) is deliberately NOT included.
+POI_RAW="$(printf '%s' "${GEO_POI_REGIONS:-}" | tr ',' ' ')"
+for region in $POI_RAW; do
+    slug="$(printf '%s' "$region" | tr '/' '_')"
+    zip="$CACHE/osm_${slug}.shp.zip"; dir="$CACHE/osm_${slug}"
+    if [ "${REFRESH:-0}" != 1 ] && [ -s "$dir/gis_osm_pois_free_1.shp" ]; then
+        echo "  ✓ using cached OSM POIs for $region"
+    else
+        echo "▶ Downloading OSM POIs for $region (one-time, a few hundred MB)..."
+        curl -fsSL -o "$zip.part" "https://download.geofabrik.de/${region}-latest-free.shp.zip" \
+            && mv -f "$zip.part" "$zip" && mkdir -p "$dir" \
+            && unzip -oq "$zip" 'gis_osm_pois_free_1.*' 'gis_osm_pois_a_free_1.*' \
+                               'gis_osm_natural_free_1.*' 'gis_osm_natural_a_free_1.*' -d "$dir" \
+            || { echo "⚠ POIs: download/unzip failed for $region"; rm -f "$zip.part"; continue; }
+    fi
+    for lyr in gis_osm_pois_free_1 gis_osm_pois_a_free_1 gis_osm_natural_free_1 gis_osm_natural_a_free_1; do
+        [ -s "$dir/$lyr.shp" ] && [ -s "$dir/$lyr.dbf" ] \
+            && printf 'poi\t0\t%s\t%s\n' "$dir/$lyr.shp" "$dir/$lyr.dbf" >> "$BND_MANIFEST"
+    done
+done
 
 DUMPS=()
 if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
@@ -248,6 +271,10 @@ cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, ele
 cur.execute("CREATE TABLE boundary(id INTEGER PRIMARY KEY, level INT, name TEXT, "
             "metro INT, parent TEXT, pmetro INT, rings TEXT)")
 cur.execute("CREATE VIRTUAL TABLE boundary_rtree USING rtree(id, minlat, maxlat, minlon, maxlon)")
+# osm_poi: named OpenStreetMap landmarks for the configured regions (preferred
+# over the GeoNames feature table where present). Its own R-tree for fast lookup.
+cur.execute("CREATE TABLE osm_poi(id INTEGER PRIMARY KEY, name TEXT, lat REAL, lon REAL, fclass TEXT)")
+cur.execute("CREATE VIRTUAL TABLE osm_poi_rtree USING rtree(id, minlat, maxlat, minlon, maxlon)")
 
 # adm_pts[level] = [(lat, lon, localized_name), ...] for localized countries, used
 # to name the (romanized) geoBoundaries polygons in the local language.
@@ -339,8 +366,44 @@ def _dbf_rows(path):
     for _ in range(nrec):
         rec = f.read(rlen); off = 1; row = {}
         for nm, ln in fields:
-            row[nm] = rec[off:off + ln].decode("cp1252", "replace").strip(); off += ln
+            b = rec[off:off + ln]; off += ln
+            try:                                 # OSM dbf is UTF-8; CGAZ is cp1252
+                row[nm] = b.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                row[nm] = b.decode("cp1252", "replace").strip()
         yield row
+
+# OSM POI categories worth showing as a landmark — real attractions + natural
+# features. NOT a popularity score: just OSM's own fclass tags. The separate
+# place-of-worship layer is never loaded, so minor temples don't dominate.
+POI_KEEP = {
+    "attraction", "viewpoint", "tower", "monument", "memorial", "museum", "artwork",
+    "castle", "ruins", "archaeological", "fort", "theme_park", "zoo", "aquarium",
+    "lighthouse", "windmill", "battlefield", "fountain", "observation_tower",
+    "gallery", "arts_centre", "park", "garden",
+    "peak", "volcano", "waterfall", "cave_entrance", "spring", "beach", "cliff", "glacier",
+}
+
+def _shp_anypoint(path):
+    # yields a representative (lon, lat) per record — the point itself for point
+    # shapes, the area-weighted centroid for polygons; None for null/empty.
+    f = open(path, "rb"); f.seek(100)
+    while True:
+        h = f.read(8)
+        if len(h) < 8:
+            break
+        clen = struct.unpack(">I", h[4:8])[0] * 2
+        c = f.read(clen); t = struct.unpack("<i", c[:4])[0]
+        if t == 1:
+            yield struct.unpack("<dd", c[4:20]); continue
+        if t != 5:
+            yield None; continue
+        nparts = struct.unpack("<i", c[36:40])[0]; npts = struct.unpack("<i", c[40:44])[0]
+        if npts < 3:
+            yield None; continue
+        po = 44 + 4 * nparts
+        pts = [struct.unpack("<dd", c[po + i * 16:po + i * 16 + 16]) for i in range(npts)]
+        yield _rep_point([[pts]])
 
 def _shp_polys(path):
     # yields [[outer, hole...], ...] per record ([] for null shapes), rings=[lon,lat]
@@ -426,13 +489,32 @@ def add_boundary(level, cc, shape_name, polys):
                 (rid, minlat, maxlat, minlon, maxlon))
     nb += 1
 
+pid = [0]; npoi = 0
+def add_poi(name, lon, lat, fclass):
+    global npoi
+    pid[0] += 1; rid = pid[0]
+    cur.execute("INSERT INTO osm_poi VALUES(?,?,?,?,?)", (rid, name, lat, lon, fclass))
+    cur.execute("INSERT INTO osm_poi_rtree VALUES(?,?,?,?,?)", (rid, lat, lat, lon, lon))
+    npoi += 1
+
 if bnd_manifest and os.path.exists(bnd_manifest):
     for ln in open(bnd_manifest, encoding="utf-8"):
         p = ln.rstrip("\n").split("\t")
         if len(p) < 4:
             continue
         kind, level, a1arg, a2arg = p[0], int(p[1]), p[2], p[3]
-        if kind == "shp":                                  # whole-planet CGAZ shapefile
+        if kind == "poi":                                  # OSM landmarks (shp + dbf)
+            if not (os.path.exists(a1arg) and os.path.exists(a2arg)):
+                continue
+            rows = _dbf_rows(a2arg)
+            for pt in _shp_anypoint(a1arg):
+                rec = next(rows, None)
+                if pt is None or rec is None:
+                    continue
+                nm = rec.get("name", "")
+                if nm and rec.get("fclass", "") in POI_KEEP:
+                    add_poi(nm, pt[0], pt[1], rec.get("fclass", ""))
+        elif kind == "shp":                                # whole-planet CGAZ shapefile
             if not (os.path.exists(a1arg) and os.path.exists(a2arg)):
                 continue
             rows = _dbf_rows(a2arg)
@@ -462,7 +544,8 @@ if bnd_manifest and os.path.exists(bnd_manifest):
                 add_boundary(level, a2arg, (feat.get("properties") or {}).get("shapeName", ""), polys)
 
 con.commit(); con.close()
-sys.stderr.write("geodb: %d places, %d landmark features, %d boundaries -> %s\n" % (np, nf, nb, db))
+sys.stderr.write("geodb: %d places, %d landmark features, %d boundaries, %d OSM POIs -> %s\n"
+                 % (np, nf, nb, npoi, db))
 PY
 # Stamp the version so launch.sh knows this DB matches the current schema.
 printf '%s' "${GEODB_VERSION:-1}" > "${GEODB}.version"
