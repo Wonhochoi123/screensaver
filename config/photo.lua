@@ -4538,7 +4538,7 @@ function sk_load()
     for block in (raw .. "\n@@\n"):gmatch("(.-)\n@@\n") do
         local r = { sym = "", name = "", price = "", chg = "", pct = "", dir = "flat",
                     prev = "", dlo = "", dhi = "", w52lo = "", w52hi = "", vol = "",
-                    series = {}, s1m = {}, s1y = {}, analysis = "", idx = nil }
+                    asof = "today", series = {}, s1m = {}, s1y = {}, analysis = "", idx = nil }
         local function nums(rest, into) for v in rest:gmatch("%S+") do into[#into + 1] = tonumber(v) end end
         for line in (block .. "\n"):gmatch("(.-)\n") do
             local tag, rest = line:match("^([%u%d]+)\t(.*)$")
@@ -4553,6 +4553,7 @@ function sk_load()
             elseif tag == "DAY" then local a, b = rest:match("^(.-)\t(.*)$"); r.dlo, r.dhi = a or "", b or ""
             elseif tag == "W52" then local a, b = rest:match("^(.-)\t(.*)$"); r.w52lo, r.w52hi = a or "", b or ""
             elseif tag == "VOL" then r.vol = rest
+            elseif tag == "ASOF" then if rest ~= "" then r.asof = rest end
             elseif tag == "SERIES" then nums(rest, r.series)
             elseif tag == "SR1M" then nums(rest, r.s1m)
             elseif tag == "SR1Y" then nums(rest, r.s1y)
@@ -4563,7 +4564,8 @@ function sk_load()
         -- the 1-month and 1-year history when available. The card cycles through
         -- whichever exist.
         r.ranges = {}
-        if #r.series >= 2 then r.ranges[#r.ranges + 1] = { label = "TODAY", short = "1D", s = r.series, base = true } end
+        local d1 = (r.asof ~= "today") and r.asof:upper() or "TODAY"   -- "FRI" on a weekend
+        if #r.series >= 2 then r.ranges[#r.ranges + 1] = { label = d1, short = "1D", s = r.series, base = true } end
         if #r.s1m >= 2 then r.ranges[#r.ranges + 1] = { label = "1 MONTH", short = "1M", s = r.s1m } end
         if #r.s1y >= 2 then r.ranges[#r.ranges + 1] = { label = "1 YEAR", short = "1Y", s = r.s1y } end
         if r.idx then SK.byIdx[r.idx] = r; SK.order[#SK.order + 1] = r end
@@ -4715,8 +4717,8 @@ function sk_draw(cur)
     elseif rec.pct ~= "" then chgstr = sign .. rec.pct .. "%"
     elseif rec.chg ~= "" then chgstr = sign .. rec.chg end
     if chgstr then
-        txt(chgstr .. "  today", left + math.floor(Lw * 0.34), y + math.floor(h * 0.012),
-            math.floor(h * 0.026), col, 4)
+        txt(chgstr .. "  " .. (rec.asof or "today"), left + math.floor(Lw * 0.34),
+            y + math.floor(h * 0.012), math.floor(h * 0.026), col, 4)
     end
     y = y + math.floor(h * 0.072)
 

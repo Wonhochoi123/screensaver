@@ -181,11 +181,35 @@ def weather_line():
     return s + "."
 
 
+# Crypto aliases → (CoinGecko id, display name) — must match stock-card.sh so the
+# spoken line and the card agree (CNBC's "BTC" is a Grayscale ETF, not Bitcoin).
+CRYPTO = {"BTC": ("bitcoin", "Bitcoin"), "BITCOIN": ("bitcoin", "Bitcoin"),
+          "ETH": ("ethereum", "Ethereum"), "ETHEREUM": ("ethereum", "Ethereum"),
+          "SOL": ("solana", "Solana"), "SOLANA": ("solana", "Solana"),
+          "DOGE": ("dogecoin", "Dogecoin"), "DOGECOIN": ("dogecoin", "Dogecoin"),
+          "XRP": ("ripple", "XRP"), "LTC": ("litecoin", "Litecoin"),
+          "ADA": ("cardano", "Cardano"), "BNB": ("binancecoin", "BNB")}
+
+
 def market_line(sym):
-    # Spoken price line from CNBC's public quote (Yahoo rate-limits/429s many IPs).
     sym = sym.strip().upper()
     if not sym:
         return None
+    if sym in CRYPTO:                       # crypto → CoinGecko (live, 24/7)
+        cg, disp = CRYPTO[sym]
+        txt = get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg}"
+                  "&vs_currencies=usd&include_24hr_change=true")
+        try:
+            d = json.loads(txt)[cg]
+            price = float(d["usd"])
+            ch = d.get("usd_24h_change")
+            if ch is not None:
+                up = "down" if ch < 0 else "up"
+                return f"{disp} is trading at ${price:,.2f}, {up} {abs(ch):.1f} percent over the last 24 hours."
+            return f"{disp} is trading at ${price:,.2f}."
+        except Exception:
+            return None
+    # Spoken price line from CNBC's public quote (Yahoo rate-limits/429s many IPs).
     enc = urllib.parse.quote(sym)
     txt = get("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
               f"?symbols={enc}&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json")
@@ -193,12 +217,25 @@ def market_line(sym):
         q = json.loads(txt)["FormattedQuoteResult"]["FormattedQuote"][0]
         price = float(str(q.get("last")).replace(",", ""))
         name = q.get("name") or sym
+        # If the last trade wasn't today (weekend/holiday), say so instead of "today".
+        when = "today"
+        verb = "is trading"
+        lt = q.get("last_time")
+        if lt:
+            try:
+                import datetime as _dt
+                d = _dt.date.fromisoformat(lt)
+                if d != _dt.date.today():
+                    when = f"as of {d.strftime('%A')}'s close"
+                    verb = "last traded"
+            except Exception:
+                pass
         pct = q.get("change_pct")          # e.g. "+1.82%"
         if pct:
             up = "down" if pct.strip().startswith("-") else "up"
             p = pct.replace("+", "").replace("-", "").replace("%", "").strip()
-            return f"{name} is trading at ${price:,.2f}, {up} {p} percent today."
-        return f"{name} is trading at ${price:,.2f}."
+            return f"{name} {verb} at ${price:,.2f}, {up} {p} percent {when}."
+        return f"{name} {verb} at ${price:,.2f}."
     except Exception:
         return None
     return None
