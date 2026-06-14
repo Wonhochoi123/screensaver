@@ -53,17 +53,15 @@ def hav(a, b, c, d):
 
 con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True); cur = con.cursor()
 
-# Administrative boundary polygons (point-in-polygon city resolution). Loaded once
-# into memory — the table is small (only the configured countries) and reused for
-# every coordinate in a batch. Empty / absent table => behave exactly as before.
-BND = {1: [], 2: []}    # level -> [(minlat,maxlat,minlon,maxlon, name, metro, parts)]
+# Administrative boundary polygons (point-in-polygon city resolution). Candidate
+# polygons for a point come from an R-tree on the bounding boxes, so this scales
+# to the whole planet (~53k polygons) and only the few that overlap the point are
+# ray-cast. Absent table => behave exactly as before (nearest-point only).
+HAVE_BND = True
 try:
-    for level, name, metro, minlat, maxlat, minlon, maxlon, rings in cur.execute(
-            "SELECT level,name,metro,minlat,maxlat,minlon,maxlon,rings FROM boundary").fetchall():
-        BND.setdefault(level, []).append(
-            (minlat, maxlat, minlon, maxlon, name, metro, json.loads(rings)))
+    cur.execute("SELECT count(*) FROM boundary_rtree WHERE id<0")
 except sqlite3.OperationalError:
-    pass                # older DB with no boundary table
+    HAVE_BND = False
 
 def _ring(lat, lon, ring):
     inside = False; n = len(ring); j = n - 1
@@ -83,17 +81,25 @@ def _pip(lat, lon, polys):
     return False
 
 def boundary_lookup(lat, lon):
-    # -> (adm1_name, adm1_is_metro, adm2_name); any may be None if no polygon hits.
-    b1 = b2 = None; metro = 0
-    for store, lvl in ((BND.get(1, []), 1), (BND.get(2, []), 2)):
-        for minlat, maxlat, minlon, maxlon, name, mtr, parts in store:
-            if minlat <= lat <= maxlat and minlon <= lon <= maxlon and _pip(lat, lon, parts):
-                if lvl == 1:
-                    b1 = name; metro = mtr
-                else:
-                    b2 = name
-                break
-    return b1, metro, b2
+    # -> (adm1_name, adm1_is_metro, adm2_name, adm2_polys); pieces may be None.
+    if not HAVE_BND:
+        return None, 0, None, None
+    rows = cur.execute(
+        "SELECT b.level,b.name,b.metro,b.rings FROM boundary_rtree r JOIN boundary b "
+        "ON b.id=r.id WHERE r.minlat<=? AND r.maxlat>=? AND r.minlon<=? AND r.maxlon>=?",
+        (lat, lat, lon, lon)).fetchall()
+    b1 = b2 = b2polys = None; metro = 0
+    for level, name, mtr, rings in rows:
+        if b1 is not None and b2 is not None:
+            break
+        polys = json.loads(rings)
+        if not _pip(lat, lon, polys):
+            continue
+        if level == 1 and b1 is None:
+            b1 = name; metro = mtr
+        elif level == 2 and b2 is None:
+            b2 = name; b2polys = polys
+    return b1, metro, b2, b2polys
 
 def resolve(lat, lon):
     def win(r):
@@ -119,31 +125,49 @@ def resolve(lat, lon):
             break
     landmark = "|".join(names)
 
-    # --- city: nearest sizable populated place (population-aware) ----------------
+    # --- city: collect nearby populated places (kept for the boundary hybrid) ----
     la0, la1, lo0, lo1 = win(30)
+    places = []     # (dist, score, name, plat, plon, state, country, fcode)
     bc = None
-    for name, plat, plon, pop, state, country in cur.execute(
-            "SELECT name,lat,lon,pop,state,country FROM place "
+    for name, plat, plon, pop, state, country, fcode in cur.execute(
+            "SELECT name,lat,lon,pop,state,country,fcode FROM place "
             "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1)):
         d = hav(lat, lon, plat, plon)
         if d > 30:
             continue
         s = math.log10(pop + 10) - d / 10.0
+        places.append((d, s, name, plat, plon, state, country, fcode or ""))
         if bc is None or s > bc[0]:
             bc = (s, name, state, country)
     city    = bc[1] if bc else ""
     state   = bc[2] if bc else ""
     country = bc[3] if bc else ""
 
-    # Boundary override: when a polygon actually CONTAINS the point, trust it over
-    # the nearest-point guess (this is what stops a megacity from claiming a
-    # neighbouring town). A 특별시/광역시 (metro) IS the city at ADM1, so its
-    # district is dropped; a province (도) becomes the state and the 시/군 the city.
-    b1, b1_metro, b2 = boundary_lookup(lat, lon)
+    # Boundary override (hybrid). The polygon decides WHICH unit you're in; the
+    # name comes from the nearest CITY/TOWN inside that polygon — so a county (US
+    # ADM2 'Santa Clara') shows the town you're in ('San Jose'/'Cupertino'), and a
+    # megacity can't claim a neighbour (Seoul's point is outside Hanam's polygon).
+    # Only true town/city codes count (PPL*/PPLC) — neighbourhood sections (PPLX,
+    # e.g. a 동, an arrondissement, Times Square) are skipped. Where places are
+    # sparse, fall back to the admin name (KR 하남시). A 특별시/광역시 (metro) IS
+    # the city at ADM1; provinces (도) become the state.
+    def _city_level(fc):
+        return fc == "PPL" or fc == "PPLC" or fc == "PPLG" or fc.startswith("PPLA")
+    # Tie-break by administrative rank so a capital/seat beats a sub-unit when both
+    # are about equally close — picks 'Paris' over 'Paris 04', but distance still
+    # dominates so a suburb (Cupertino) isn't overridden by the county seat.
+    _RANK = {"PPLC": 0, "PPLA": 1, "PPLA2": 2, "PPLA3": 3, "PPLA4": 4, "PPLA5": 5}
+    b1, b1_metro, b2, b2polys = boundary_lookup(lat, lon)
     if b1 and b1_metro:
         city = b1; state = ""
     elif b2:
-        city = b2
+        inside = [p for p in places if _pip(p[3], p[4], b2polys)]
+        towns = [p for p in inside if _city_level(p[7])] or inside
+        if towns:
+            towns.sort(key=lambda p: p[0] + _RANK.get(p[7], 6) * 0.5)
+            city = towns[0][2]; country = towns[0][6] or country
+        else:
+            city = b2                           # sparse data -> the admin name
         if b1:
             state = b1
     elif b1:
