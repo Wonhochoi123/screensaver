@@ -473,7 +473,7 @@ file, so a value set here applies everywhere.
 | `GEO_BOUNDARIES` | `'*'` | Point-in-polygon city resolution; `'*'` = whole planet, or ISO-2 list; empty = nearest-point |
 | `GEO_POI_SOURCE` | `'hybrid'` | Landmarks: `hybrid` (offline regions + Overpass elsewhere), `overpass`, `offline`, `none` |
 | `GEO_POI_REGIONS` | `'asia/south-korea'` | Geofabrik slugs to download for offline POIs (`hybrid`/`offline`) |
-| `GEODB_VERSION` | `'14'` | Bump to force a one-time DB rebuild |
+| `GEODB_VERSION` | `'15'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

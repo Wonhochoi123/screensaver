@@ -158,36 +158,6 @@ fi
 echo "▶ Building offline place database -> $GEODB ..."
 python3 - "$GEODB" "$CACHE/country.txt" "$CACHE/admin1.txt" "$ALTFILE" "$LOCALIZE" "$BND_MANIFEST" "${DUMPS[@]}" <<'PY'
 import sys, sqlite3, os, json, struct
-# GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
-# max_km = how far away the feature can still be the photo's "landmark".
-LANDMARK = {
-    # --- iconic cultural / historic: small radius so PROXIMITY decides. ---
-    "PAL":(11,3),"CSTL":(11,3),                    # palace (Gyeongbokgung), castle
-    "PYR":(11,5),"PYRS":(11,5),                    # pyramid(s)
-    "ANS":(10,3),"HSTS":(10,3),"RUIN":(10,3),      # ancient/historic site, ruins
-    "MNMT":(10,2.5),"MNMTS":(10,2.5),              # monument(s)
-    "TMPL":(9,2),"SHRN":(8,2),"PGDA":(9,2),        # temple, shrine, pagoda
-    "MSTY":(9,3),"CTHL":(9,3),"MSQE":(7,2),        # monastery, cathedral, mosque
-    "FT":(9,3),"GATE":(8,1.5),"WALLA":(8,3),       # fort, gate, ancient wall
-    "AMTH":(9,3),"TOWR":(8,3),                     # amphitheatre, tower (callsigns filtered)
-    # --- attractions / civic (tight: you're there) ---
-    "MUS":(7,2),"OPRA":(8,2),"OBS":(7,3),          # museum, opera, observatory
-    "STDM":(7,2.5),"ZOO":(7,2.5),"GDN":(6,2),      # stadium, zoo, garden
-    "AMUS":(8,3),"LTHSE":(7,4),"BTL":(8,4),        # amusement park, lighthouse, battlefield
-    # --- parks / protected areas (span a wide area) ---
-    "PRK":(7,12),"RESN":(5,12),"RESW":(5,12),
-    # --- prominent natural features (can be "at" them from farther off) ---
-    "VLC":(11,30),"MT":(8,15),"PK":(9,18),"PKS":(9,18),
-    "FLLS":(9,8),"GLCR":(8,15),"GYSR":(8,8),
-    "CNYN":(9,18),"CRTR":(8,15),"VAL":(6,12),"DUNE":(6,10),"DSRT":(7,30),
-    "LK":(8,12),"LKS":(8,12),"BAY":(6,12),
-    "CLF":(6,8),"CAPE":(6,10),"ISL":(7,20),"ISLS":(7,20),
-    "BCH":(7,6),"SPNG":(5,5),
-}
-import re as _re
-_CALLSIGN = _re.compile(r'^[KWC][A-Z]{2,3}(-(FM|AM|TV|LP|LD|CD|CA|DT))?$')
-def _is_broadcast(nm):
-    return bool(_CALLSIGN.match(nm)) or '-FM' in nm or '-AM' in nm or '-TV' in nm
 db, cinfo, admin1 = sys.argv[1], sys.argv[2], sys.argv[3]
 altfile, localize, bnd_manifest = sys.argv[4], sys.argv[5], sys.argv[6]
 dumps = sys.argv[7:]
@@ -275,7 +245,6 @@ if os.path.exists(db):
     os.remove(db)
 con = sqlite3.connect(db); cur = con.cursor()
 cur.execute("CREATE TABLE place(name TEXT, lat REAL, lon REAL, pop INTEGER, state TEXT, country TEXT, fcode TEXT)")
-cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, elev REAL, weight INTEGER, maxkm REAL)")
 # boundary: one row per admin polygon. level 1=province/state, 2=city/county/
 # district. rings is JSON [[outer, hole...], ...]. metro=1 for 특별시/광역시 (where
 # the ADM1 itself is the city, e.g. Seoul). parent/pmetro (level-2 rows) carry the
@@ -295,7 +264,7 @@ cur.execute("CREATE VIRTUAL TABLE osm_poi_rtree USING rtree(id, minlat, maxlat, 
 # to name the (romanized) geoBoundaries polygons in the local language.
 adm_pts = {1: [], 2: []}
 
-np = nf = 0
+np = 0
 for dump in dumps:
     for ln in open(dump, encoding="utf-8", errors="ignore"):
         c = ln.rstrip("\n").split("\t")
@@ -312,12 +281,6 @@ for dump in dumps:
             pop = int(c[14] or 0)
         except ValueError:
             pop = 0
-        elev = 0.0
-        for col in (c[15], c[16]):
-            try:
-                elev = float(col); break
-            except (ValueError, IndexError):
-                pass
         # For places in a localized country, show the local-script name (서울)
         # instead of the romanized one (Seoul); everywhere else stays romanized.
         name = localize_name(geoid, cc, name)
@@ -326,6 +289,8 @@ for dump in dumps:
         # polygon -> 하남시). Other countries just keep the polygon's own name.
         if cc in loc_cc and fcode in ("ADM1", "ADM2"):
             adm_pts[1 if fcode == "ADM1" else 2].append((lat, lon, name))
+        # Populated places only — they name the CITY where the boundary's ADM2 isn't
+        # the city (US county / EU department). Landmarks come from OSM, not here.
         if fclass == "P" and fcode.startswith("PPL") and pop > 0:
             akey = cc + "." + adm1
             state = localize_name(a1_gid.get(akey, ""), cc, a1.get(akey, ""))
@@ -333,16 +298,8 @@ for dump in dumps:
             cur.execute("INSERT INTO place VALUES(?,?,?,?,?,?,?)",
                         (name, lat, lon, pop, state, ctry, fcode))
             np += 1
-        elif fcode in LANDMARK:
-            if _is_broadcast(name):       # skip radio/TV stations (e.g. WLVV-FM)
-                continue
-            w, mk = LANDMARK[fcode]
-            cur.execute("INSERT INTO feature VALUES(?,?,?,?,?,?,?)",
-                        (name, lat, lon, fcode, elev, w, mk))
-            nf += 1
 
 cur.execute("CREATE INDEX ix_place_lat ON place(lat)")
-cur.execute("CREATE INDEX ix_feat_lat  ON feature(lat)")
 
 # --- administrative boundary polygons ---------------------------------------
 def _ring(lat, lon, ring):
@@ -567,8 +524,8 @@ if bnd_manifest and os.path.exists(bnd_manifest):
                 add_boundary(level, a2arg, (feat.get("properties") or {}).get("shapeName", ""), polys)
 
 con.commit(); con.close()
-sys.stderr.write("geodb: %d places, %d landmark features, %d boundaries, %d OSM POIs -> %s\n"
-                 % (np, nf, nb, npoi, db))
+sys.stderr.write("geodb: %d places, %d boundaries, %d OSM POIs -> %s\n"
+                 % (np, nb, npoi, db))
 PY
 # Stamp the version so launch.sh knows this DB matches the current schema.
 printf '%s' "${GEODB_VERSION:-1}" > "${GEODB}.version"

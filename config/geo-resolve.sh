@@ -225,13 +225,6 @@ def resolve(lat, lon):
                 names.append(nm)
         return names
 
-    def _geonames_landmarks():
-        la0, la1, lo0, lo1 = win(100)
-        c = [(hav(lat, lon, flat, flon), name) for name, flat, flon in cur.execute(
-                "SELECT name,lat,lon FROM feature "
-                "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (la0, la1, lo0, lo1))]
-        return _rank(c)
-
     def _offline_osm():                         # downloaded extract; [] if no coverage
         la0, la1, lo0, lo1 = win(40)
         pois, hoods = [], []
@@ -254,9 +247,9 @@ def resolve(lat, lon):
         names = _offline_osm()                  # reliable offline where downloaded
     if not names and POI_SOURCE in ("hybrid", "overpass"):
         names = _overpass_landmarks()           # out of region (or pure overpass)
-    if not names:                               # last resort
-        names = _geonames_landmarks()
-    landmark = "|".join(names)
+    # No GeoNames landmark fallback any more — if OSM has nothing, the landmark is
+    # simply blank (the city/neighbourhood still show), never the old temple junk.
+    landmark = "|".join(names or [])
 
     # --- city: collect nearby populated places (kept for the boundary hybrid) ----
     la0, la1, lo0, lo1 = win(30)
