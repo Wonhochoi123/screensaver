@@ -298,6 +298,16 @@ once by `config/build-geodb.sh`. No API key, no runtime network.
   and nearly all sizable cities — resolve to Korean; the rest fall back to
   romanized where GeoNames simply has no local name. Empty = romanized everywhere
   (the original behaviour). Codes map to their country (`ko`→KR, `ja`→JP…).
+- `GEO_BOUNDARIES` — resolve the **city** by which administrative boundary
+  actually *contains* the photo's coordinates (point-in-polygon), instead of
+  snapping to the nearest populated point. Without it, a megacity's huge
+  population lets it claim neighbouring towns (a photo in Misa/Hanam came out as
+  "Seoul"); with it, the city is whichever 시/군/구 polygon the point sits inside.
+  Space/comma-separated ISO-2 codes (default `'KR'`); each pulls that country's
+  ADM1+ADM2 polygons from [geoBoundaries](https://www.geoboundaries.org) gbOpen
+  (CC-BY). Metro cities (특별시/광역시) resolve to the city itself, provinces (도)
+  to province + 시/군. Holes are honoured, so 경기도 correctly excludes Seoul.
+  Empty = nearest-point only.
 - Rebuild any time with `~/Screensaver-App/config/build-geodb.sh`, or bump
   `GEODB_VERSION` to force a one-time rebuild on the next launch.
 
@@ -435,7 +445,8 @@ file, so a value set here applies everywhere.
 |---|---|---|
 | `GEONAMES_COUNTRIES` | `''` | ISO country codes to index; empty = whole planet |
 | `GEO_LOCALIZE` | `'ko'` | Languages whose places show in their own script (ko→Korean); empty = romanized |
-| `GEODB_VERSION` | `'8'` | Bump to force a one-time DB rebuild |
+| `GEO_BOUNDARIES` | `'KR'` | Countries that get point-in-polygon city resolution (시/군/구); empty = nearest-point |
+| `GEODB_VERSION` | `'9'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

@@ -43,6 +43,37 @@ if [ -n "$LOCALIZE" ]; then
     fi
 fi
 
+# Administrative boundary polygons (point-in-polygon city resolution). Without
+# them the resolver picks the nearest populated POINT, so a megacity's huge
+# population lets it claim neighbouring towns (Misa/Hanam reported as "Seoul").
+# With them, the city is whichever 시/군/구 polygon actually CONTAINS the point.
+# Source: geoBoundaries gbOpen (CC-BY) ADM1+ADM2 GeoJSON, per configured country.
+BND_MANIFEST=""
+BND_COUNTRIES="$(printf '%s' "${GEO_BOUNDARIES:-}" | tr ',' ' ')"
+if [ -n "$BND_COUNTRIES" ]; then
+    BND_MANIFEST="$TMP/boundaries.manifest"; : > "$BND_MANIFEST"
+    # Use the github.com/raw/<ref> form, not raw.githubusercontent.com: these
+    # GeoJSON files are git-LFS, and only this host resolves the LFS object (the
+    # raw.githubusercontent path returns a 131-byte pointer).
+    GB_BASE="https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/gbOpen"
+    for cc in $BND_COUNTRIES; do
+        iso3="$(awk -F'\t' -v c="$cc" '$1==c && $1!~/^#/{print $2; exit}' "$CACHE/country.txt")"
+        [ -n "$iso3" ] || { echo "⚠ boundaries: no ISO3 for '$cc' — skipping."; continue; }
+        for lvl in ADM1 ADM2; do
+            out="$CACHE/bnd_${cc}_${lvl}.geojson"
+            url="$GB_BASE/$iso3/$lvl/geoBoundaries-$iso3-$lvl.geojson"
+            if [ "${REFRESH:-0}" != 1 ] && [ -s "$out" ]; then
+                echo "  ✓ using cached $(basename "$out")"
+            else
+                echo "▶ Downloading boundaries $cc/$lvl ..."
+                curl -fsSL -o "$out.part" "$url" && mv -f "$out.part" "$out" \
+                    || { echo "⚠ boundaries: download failed for $cc/$lvl ($iso3)"; rm -f "$out.part"; continue; }
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$cc" "${lvl#ADM}" "$out" "$iso3" >> "$BND_MANIFEST"
+        done
+    done
+fi
+
 DUMPS=()
 if [ -n "${GEONAMES_COUNTRIES:-}" ]; then
     for cc in $GEONAMES_COUNTRIES; do
@@ -66,8 +97,8 @@ fi
 [ "${#DUMPS[@]}" -gt 0 ] || { echo "build-geodb: no dumps available — aborting."; exit 1; }
 
 echo "▶ Building offline place database -> $GEODB ..."
-python3 - "$GEODB" "$CACHE/country.txt" "$CACHE/admin1.txt" "$ALTFILE" "$LOCALIZE" "${DUMPS[@]}" <<'PY'
-import sys, sqlite3, os
+python3 - "$GEODB" "$CACHE/country.txt" "$CACHE/admin1.txt" "$ALTFILE" "$LOCALIZE" "$BND_MANIFEST" "${DUMPS[@]}" <<'PY'
+import sys, sqlite3, os, json
 # GeoNames feature CODE -> (weight, max_km). Higher weight = more prominent;
 # max_km = how far away the feature can still be the photo's "landmark".
 LANDMARK = {
@@ -99,8 +130,16 @@ _CALLSIGN = _re.compile(r'^[KWC][A-Z]{2,3}(-(FM|AM|TV|LP|LD|CD|CA|DT))?$')
 def _is_broadcast(nm):
     return bool(_CALLSIGN.match(nm)) or '-FM' in nm or '-AM' in nm or '-TV' in nm
 db, cinfo, admin1 = sys.argv[1], sys.argv[2], sys.argv[3]
-altfile, localize = sys.argv[4], sys.argv[5]
-dumps = sys.argv[6:]
+altfile, localize, bnd_manifest = sys.argv[4], sys.argv[5], sys.argv[6]
+dumps = sys.argv[7:]
+# Countries that get boundary polygons -> their admin points are collected so the
+# polygons can be named in the local language (the polygon files are romanized).
+bnd_cc = set()
+if bnd_manifest and os.path.exists(bnd_manifest):
+    for ln in open(bnd_manifest, encoding="utf-8"):
+        p = ln.rstrip("\n").split("\t")
+        if p and p[0]:
+            bnd_cc.add(p[0])
 
 # Language → country code: localize a place into a script only for its own
 # country (so "ko" gives Korean for KR places, not for every place with a Korean
@@ -183,6 +222,15 @@ if os.path.exists(db):
 con = sqlite3.connect(db); cur = con.cursor()
 cur.execute("CREATE TABLE place(name TEXT, lat REAL, lon REAL, pop INTEGER, state TEXT, country TEXT)")
 cur.execute("CREATE TABLE feature(name TEXT, lat REAL, lon REAL, fcode TEXT, elev REAL, weight INTEGER, maxkm REAL)")
+# boundary: one row per admin polygon. level 1=province/metro, 2=city/district.
+# rings is JSON [[[lon,lat],...], ...] (outer ring per polygon part). metro=1 for
+# 특별시/광역시 (where the ADM1 itself is the city, e.g. Seoul). Queried by bbox.
+cur.execute("CREATE TABLE boundary(level INT, name TEXT, metro INT, "
+            "minlat REAL, maxlat REAL, minlon REAL, maxlon REAL, rings TEXT)")
+
+# adm_pts[level] = [(lat, lon, localized_name), ...] for boundary countries, used
+# to name the (romanized) geoBoundaries polygons in the local language.
+adm_pts = {1: [], 2: []}
 
 np = nf = 0
 for dump in dumps:
@@ -210,6 +258,10 @@ for dump in dumps:
         # For places in a localized country, show the local-script name (서울)
         # instead of the romanized one (Seoul); everywhere else stays romanized.
         name = localize_name(geoid, cc, name)
+        # Stash admin centres (ADM1/ADM2) for boundary countries so we can give the
+        # polygons their local-language name (Hanam-si polygon -> 하남시).
+        if cc in bnd_cc and fcode in ("ADM1", "ADM2"):
+            adm_pts[1 if fcode == "ADM1" else 2].append((lat, lon, name))
         if fclass == "P" and fcode.startswith("PPL") and pop > 0:
             akey = cc + "." + adm1
             state = localize_name(a1_gid.get(akey, ""), cc, a1.get(akey, ""))
@@ -227,8 +279,77 @@ for dump in dumps:
 
 cur.execute("CREATE INDEX ix_place_lat ON place(lat)")
 cur.execute("CREATE INDEX ix_feat_lat  ON feature(lat)")
+
+# --- administrative boundary polygons ---------------------------------------
+def _ring(lat, lon, ring):
+    # ray cast; ring pts are [lon, lat]
+    inside = False; n = len(ring); j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]; xj, yj = ring[j][0], ring[j][1]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+def _pip(lat, lon, polys):
+    # polys = [[outer, hole1, ...], ...]. Inside the outer ring AND outside every
+    # hole — essential because a province like 경기도 has Seoul cut out as a hole.
+    for poly in polys:
+        if _ring(lat, lon, poly[0]) and not any(_ring(lat, lon, h) for h in poly[1:]):
+            return True
+    return False
+
+# A 특별시/광역시/특별자치시 (Seoul, Busan…) IS the city at ADM1; provinces (도) are
+# not. Detect by the local-name suffix, or a romanized fallback set.
+_METRO_SUFFIX = ("특별시", "광역시", "특별자치시")
+_METRO_ROMAN = {"Seoul", "Busan", "Daegu", "Incheon", "Gwangju", "Daejeon",
+                "Ulsan", "Sejong", "Sejong-si"}
+nb = 0
+if bnd_manifest and os.path.exists(bnd_manifest):
+    for ln in open(bnd_manifest, encoding="utf-8"):
+        p = ln.rstrip("\n").split("\t")
+        if len(p) < 3:
+            continue
+        cc, level, path = p[0], int(p[1]), p[2]
+        if not os.path.exists(path):
+            continue
+        try:
+            gj = json.load(open(path, encoding="utf-8"))
+        except (ValueError, OSError):
+            sys.stderr.write("geodb: could not read boundary file %s\n" % path)
+            continue
+        pts = adm_pts.get(level, [])
+        for feat in gj.get("features", []):
+            geom = feat.get("geometry") or {}
+            gtype = geom.get("type"); coords = geom.get("coordinates")
+            if gtype == "Polygon":
+                polys = [coords]                          # one polygon: [outer, holes...]
+            elif gtype == "MultiPolygon":
+                polys = coords                            # [[outer, holes...], ...]
+            else:
+                continue
+            # bbox over the outer rings only (poly[0])
+            xs = [pt[0] for poly in polys for pt in poly[0]]
+            ys = [pt[1] for poly in polys for pt in poly[0]]
+            if not xs:
+                continue
+            minlon, maxlon, minlat, maxlat = min(xs), max(xs), min(ys), max(ys)
+            # name the polygon from the GeoNames admin centre that falls inside it;
+            # fall back to the romanized geoBoundaries shapeName.
+            name = (feat.get("properties") or {}).get("shapeName", "") or ""
+            for plat, plon, pname in pts:
+                if minlat <= plat <= maxlat and minlon <= plon <= maxlon and _pip(plat, plon, polys):
+                    name = pname
+                    break
+            metro = 1 if (level == 1 and (name.endswith(_METRO_SUFFIX) or name in _METRO_ROMAN)) else 0
+            cur.execute("INSERT INTO boundary VALUES(?,?,?,?,?,?,?,?)",
+                        (level, name, metro, minlat, maxlat, minlon, maxlon,
+                         json.dumps(polys, separators=(",", ":"))))
+            nb += 1
+    cur.execute("CREATE INDEX ix_bnd ON boundary(minlat, maxlat)")
+
 con.commit(); con.close()
-sys.stderr.write("geodb: %d places, %d landmark features -> %s\n" % (np, nf, db))
+sys.stderr.write("geodb: %d places, %d landmark features, %d boundaries -> %s\n" % (np, nf, nb, db))
 PY
 # Stamp the version so launch.sh knows this DB matches the current schema.
 printf '%s' "${GEODB_VERSION:-1}" > "${GEODB}.version"

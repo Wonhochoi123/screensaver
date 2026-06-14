@@ -21,7 +21,7 @@ fi
 [ -s "${GEODB:-}" ] || exit 0          # DB not built yet -> no enrichment
 command -v python3 >/dev/null 2>&1 || exit 0
 python3 - "$GEODB" "$BATCH" "$LAT" "$LON" "$COORDS" <<'PY'
-import sys, sqlite3, math, unicodedata
+import sys, sqlite3, math, unicodedata, json
 DB = sys.argv[1]; BATCH = sys.argv[2] == "1"
 
 def _has_hangul(s):
@@ -52,6 +52,48 @@ def hav(a, b, c, d):
     return 2 * 6371.0 * math.asin(math.sqrt(x))
 
 con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True); cur = con.cursor()
+
+# Administrative boundary polygons (point-in-polygon city resolution). Loaded once
+# into memory — the table is small (only the configured countries) and reused for
+# every coordinate in a batch. Empty / absent table => behave exactly as before.
+BND = {1: [], 2: []}    # level -> [(minlat,maxlat,minlon,maxlon, name, metro, parts)]
+try:
+    for level, name, metro, minlat, maxlat, minlon, maxlon, rings in cur.execute(
+            "SELECT level,name,metro,minlat,maxlat,minlon,maxlon,rings FROM boundary").fetchall():
+        BND.setdefault(level, []).append(
+            (minlat, maxlat, minlon, maxlon, name, metro, json.loads(rings)))
+except sqlite3.OperationalError:
+    pass                # older DB with no boundary table
+
+def _ring(lat, lon, ring):
+    inside = False; n = len(ring); j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]; xj, yj = ring[j][0], ring[j][1]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+def _pip(lat, lon, polys):
+    # polys = [[outer, hole1, ...], ...]: inside outer AND outside every hole
+    # (a province like 경기도 has Seoul cut out as a hole).
+    for poly in polys:
+        if _ring(lat, lon, poly[0]) and not any(_ring(lat, lon, h) for h in poly[1:]):
+            return True
+    return False
+
+def boundary_lookup(lat, lon):
+    # -> (adm1_name, adm1_is_metro, adm2_name); any may be None if no polygon hits.
+    b1 = b2 = None; metro = 0
+    for store, lvl in ((BND.get(1, []), 1), (BND.get(2, []), 2)):
+        for minlat, maxlat, minlon, maxlon, name, mtr, parts in store:
+            if minlat <= lat <= maxlat and minlon <= lon <= maxlon and _pip(lat, lon, parts):
+                if lvl == 1:
+                    b1 = name; metro = mtr
+                else:
+                    b2 = name
+                break
+    return b1, metro, b2
 
 def resolve(lat, lon):
     def win(r):
@@ -92,6 +134,20 @@ def resolve(lat, lon):
     city    = bc[1] if bc else ""
     state   = bc[2] if bc else ""
     country = bc[3] if bc else ""
+
+    # Boundary override: when a polygon actually CONTAINS the point, trust it over
+    # the nearest-point guess (this is what stops a megacity from claiming a
+    # neighbouring town). A 특별시/광역시 (metro) IS the city at ADM1, so its
+    # district is dropped; a province (도) becomes the state and the 시/군 the city.
+    b1, b1_metro, b2 = boundary_lookup(lat, lon)
+    if b1 and b1_metro:
+        city = b1; state = ""
+    elif b2:
+        city = b2
+        if b1:
+            state = b1
+    elif b1:
+        state = b1
 
     return "\t".join([landmark, ascii_(city), ascii_(state), ascii_(country)])
 
