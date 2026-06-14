@@ -132,7 +132,8 @@ Notes:
   from the rotation (the file is moved to the trash, so it won't come back).
 - **Hover the month bar** (bottom) to see a month label; **left-click** it to jump
   to the photo at that point; **right-click** it to jump to that month's start.
-- **Right-click elsewhere** quits the screensaver.
+- Quit with **`Esc`** or **`q`** (right-click no longer quits — too easy to do by
+  accident).
 
 ### Morning Briefing (only while a briefing plays)
 

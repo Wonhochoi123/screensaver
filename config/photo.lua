@@ -2389,11 +2389,12 @@ end
 mp.register_script_message("month-next", function() if bo_wake() then return end; if not briefing_active() then jump_month(1) end end)
 mp.register_script_message("month-prev", function() if bo_wake() then return end; if not briefing_active() then jump_month(-1) end end)
 
--- Right-click the month bar → jump to that month's START; right-click anywhere
--- else still quits the screensaver.
+-- Right-click the month bar → jump to that month's START. Right-click elsewhere
+-- does NOTHING (it used to quit — too easy to close the app by accident; quit is
+-- Esc / q). It still wakes from blackout and closes the reading pane.
 mp.register_script_message("handle-right-click", function()
     if bo_wake() then return end
-    if RD and RD.on and not RD.auto then rd_close(); return end   -- close the reading pane, don't quit
+    if RD and RD.on and not RD.auto then rd_close(); return end   -- close the reading pane
     local mouse = mp.get_property_native("mouse-pos")
     if mouse and gp_section_at and not (briefing_active and briefing_active()) then
         local hv = gp_section_at(mouse.x, mouse.y)
@@ -2402,7 +2403,7 @@ mp.register_script_message("handle-right-click", function()
             return
         end
     end
-    mp.command("quit")
+    -- right-click on empty area: intentionally a no-op (no quit)
 end)
 
 -- 'l' toggles whether THIS media shows its landmark (e.g. "Eiffel Tower") instead
@@ -3612,7 +3613,7 @@ function help_show()
         "=\\h/\\h−\\h\\hvolume\\h\\h\\h•\\h\\h\\hESC / Q\\h\\hquit",
         "",
         "CLICK\\h\\halbum art: play / pause\\h\\h\\h•\\h\\h\\hsong title: chooser (× removes a track)",
-        "CLICK\\h\\hmonth bar: jump there\\h\\h\\h•\\h\\h\\hRIGHT-CLICK\\h\\hquit",
+        "CLICK\\h\\hmonth bar: jump there\\h\\h\\h•\\h\\h\\hRIGHT-CLICK month bar: jump to its start",
         "",
         "{\\fnMontserrat ExtraBold}MORNING BRIEFING{\\fnMontserrat SemiBold}\\h\\h(while playing)",
         ".\\h\\hskip\\h\\h\\h,\\h\\hback\\h\\h\\hB\\h\\hpause\\h\\h\\hC\\h\\hcaptions\\h\\h\\hX\\h\\hstop",

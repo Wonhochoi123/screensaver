@@ -1,5 +1,9 @@
 #!/bin/bash
-pgrep -f "Screensaver-App/config" >/dev/null 2>&1 && exit 0
+# Single-instance guard: bail only if the SLIDESHOW itself is already up. Match the
+# mpv window by its unique x11-name, NOT the broad "Screensaver-App/config" — that
+# also matched the background build-geodb.sh (config/build-geodb.sh), so while the
+# place DB was rebuilding (e.g. after a version bump) the app refused to relaunch.
+pgrep -f "x11-name=StartScreensaver" >/dev/null 2>&1 && exit 0
 
 # --- Load central config (single source of truth; required) ------------------
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
