@@ -286,7 +286,7 @@ gen_into_run() {
     # WATCHLIST: a couple of Grok-picked "stocks worth watching" inserted right
     # before the closing sign-off. Each becomes a full stock-card item (live
     # quote + chart + analysis), just like the user's own tickers.
-    if [ "${GROK_WATCHLIST:-1}" = "1" ]; then
+    if [ "${GROK_WATCHLIST:-0}" = "1" ]; then
         local wl; wl="$(grok_watchlist 2>/dev/null)"
         if [ -n "$wl" ]; then
             items="$(printf '%s' "$items" | jq -c --argjson wl "$wl" '

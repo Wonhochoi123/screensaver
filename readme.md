@@ -178,10 +178,11 @@ line), and a day/52-week range + volume row — while the right half
 shows a **one-paragraph Grok analysis** of that ticker — what moved it, the
 context, and a **clear, opinionated recommendation** (Buy / Accumulate / Hold /
 Trim / Sell with the levels it's watching, reasoned over the real live numbers).
-It's the only place AI touches content. After your own tickers, a short
-**WATCHLIST** of a couple of Grok-picked "stocks worth watching" follows — each
-its own live card + analysis (set `GROK_WATCHLIST=0` to skip, `GROK_WATCHLIST_N`
-for how many). The chat model is auto-resolved — if
+It's the only place AI touches content. There's also an optional **WATCHLIST**
+(`GROK_WATCHLIST=1`, off by default) where Grok picks a couple of "stocks worth
+watching," each its own live card + analysis — off because, without live search,
+the picks come from Grok's training rather than today's market. The chat model is
+auto-resolved — if
 `GROK_MODEL` is wrong it falls back to the first working grok model on your key.
 If the analysis ever comes up blank, run
 `~/Screensaver-App/config/grok-briefing.sh --stocktest TSLA` for a one-shot
