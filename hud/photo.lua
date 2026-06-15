@@ -3128,11 +3128,13 @@ local function draw_controls()
 end
 
 -- Newest generated run's date + HHMMSS, or nil. Each generation lives in its own
--- folder Data/Briefing/<YYYY-MM-DD>/<HHMMSS>/ (grok-briefing.sh), with an
--- item_001.mp3 once it has audio — so replay/refresh keeps every earlier run and
--- we can tell the user when the last one was made.
+-- folder Data/Generated/Briefing/<YYYY-MM-DD>/<HHMMSS>/ (grok-briefing.sh), with
+-- an item_001.mp3 once it has audio — so replay/refresh keeps every earlier run
+-- and we can tell the user when the last one was made. MUST match grok-briefing.sh's
+-- CACHE_DIR ($DATA_DIR/Generated/Briefing) or the HUD shows "Generate" for a run
+-- that already exists.
 function briefing_last_run()
-    local base = DATA_DIR .. "/Briefing"
+    local base = DATA_DIR .. "/Generated/Briefing"
     local days = utils.readdir(base, "dirs")
     if not days then return nil end
     table.sort(days)
