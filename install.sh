@@ -234,7 +234,10 @@ fi
 # =============================================================================
 echo "▶ Installing config and app files..."
 
-# config/  → $CFG
+# Install runtime files into $CFG / $APP_DIR. The repo groups sources by
+# subsystem (config/ hud/ briefing/ geo/ media/ daemons/ assets/), but they all
+# install into the SAME flat layout the running app expects — so this reorg does
+# not change anything at runtime, only where the files live in the repo.
 # screensaver.conf: on a FRESH install, lay it down. On an EXISTING install,
 # keep every value the user has edited and only APPEND keys they don't have yet
 # — so updates never clobber tunables (sleep hours, HUD sizes, …).
@@ -258,34 +261,35 @@ else
 fi
 copy_file config/input.conf       "$CFG/input.conf"       0644
 sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket path
-copy_file config/photo.lua        "$CFG/photo.lua"        0644
-# photo.lua require()s helper modules from config/photo_modules/ — install them
-# alongside it (same pattern as welcome/ below).
+copy_file hud/photo.lua           "$CFG/photo.lua"        0644
+# photo.lua require()s helper modules — the repo keeps them in hud/modules/, but
+# they install into $CFG/photo_modules/ (the path photo.lua's loader looks up).
+# Same copy-the-whole-folder pattern as welcome/ below.
 install -d -m 0755 "$CFG/photo_modules"
-for m in "$SRC"/config/photo_modules/*.lua; do [ -e "$m" ] && install -m 0644 "$m" "$CFG/photo_modules/"; done
+for m in "$SRC"/hud/modules/*.lua; do [ -e "$m" ] && install -m 0644 "$m" "$CFG/photo_modules/"; done
 copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
-copy_file config/grok-briefing.sh "$CFG/grok-briefing.sh" 0755
+copy_file briefing/grok-briefing.sh "$CFG/grok-briefing.sh" 0755
 # Premade briefing greeting clips (play instantly while the first segment loads).
 install -d -m 0755 "$CFG/welcome"
-for w in "$SRC"/config/welcome/*; do [ -e "$w" ] && install -m 0644 "$w" "$CFG/welcome/"; done
-copy_file config/build-minimap.sh "$CFG/build-minimap.sh" 0755
-copy_file config/build-thumb.sh   "$CFG/build-thumb.sh"   0755
-copy_file config/trash-media.sh   "$CFG/trash-media.sh"   0755
-copy_file config/trash-music.sh   "$CFG/trash-music.sh"   0755
-copy_file config/fetch-article.sh "$CFG/fetch-article.sh" 0755
-copy_file config/weather-card.sh  "$CFG/weather-card.sh"  0755
-copy_file config/stock-card.sh    "$CFG/stock-card.sh"    0755
-copy_file config/make-demo.sh     "$CFG/make-demo.sh"     0755
-copy_file config/news-build.py    "$CFG/news-build.py"    0644
-copy_file config/build-title.sh   "$CFG/build-title.sh"   0755
-copy_file config/build-geodb.sh   "$CFG/build-geodb.sh"   0755
-copy_file config/geo-resolve.sh   "$CFG/geo-resolve.sh"   0755
+for w in "$SRC"/assets/welcome/*; do [ -e "$w" ] && install -m 0644 "$w" "$CFG/welcome/"; done
+copy_file media/build-minimap.sh  "$CFG/build-minimap.sh" 0755
+copy_file media/build-thumb.sh    "$CFG/build-thumb.sh"   0755
+copy_file media/trash-media.sh    "$CFG/trash-media.sh"   0755
+copy_file media/trash-music.sh    "$CFG/trash-music.sh"   0755
+copy_file briefing/fetch-article.sh "$CFG/fetch-article.sh" 0755
+copy_file briefing/weather-card.sh  "$CFG/weather-card.sh"  0755
+copy_file briefing/stock-card.sh    "$CFG/stock-card.sh"    0755
+copy_file media/make-demo.sh      "$CFG/make-demo.sh"     0755
+copy_file briefing/news-build.py  "$CFG/news-build.py"    0644
+copy_file media/build-title.sh    "$CFG/build-title.sh"   0755
+copy_file geo/build-geodb.sh      "$CFG/build-geodb.sh"   0755
+copy_file geo/geo-resolve.sh      "$CFG/geo-resolve.sh"   0755
 
-# app/  → $APP_DIR
-copy_file app/xmp-police.sh       "$APP_DIR/xmp-police.sh"   0755
-copy_file app/vid-daemon.sh       "$APP_DIR/vid-daemon.sh"   0755
-copy_file app/launch.sh           "$APP_DIR/launch.sh"       0755
-copy_file app/idle-watcher.sh     "$APP_DIR/idle-watcher.sh" 0755
+# daemons/  → $APP_DIR
+copy_file daemons/xmp-police.sh   "$APP_DIR/xmp-police.sh"   0755
+copy_file daemons/vid-daemon.sh   "$APP_DIR/vid-daemon.sh"   0755
+copy_file daemons/launch.sh       "$APP_DIR/launch.sh"       0755
+copy_file daemons/idle-watcher.sh "$APP_DIR/idle-watcher.sh" 0755
 
 # =============================================================================
 #  Autostart + manual launcher  (absolute paths baked from config)
