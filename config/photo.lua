@@ -922,6 +922,15 @@ local function set_pause_indicator(paused)
 end
 mp.observe_property("pause", "bool", function(_, v) set_pause_indicator(v or false) end)
 
+-- Saved image-display-duration while SPACE-paused. A bare `pause` halts VIDEO
+-- playback but NOT a still photo's auto-advance (that rides mpv's
+-- image-display-duration timer), so the slideshow would keep stepping while
+-- "paused". On pause we stash the duration and set it to "inf" to truly freeze
+-- the slideshow, restoring it on resume. A GLOBAL table (not a local) keeps
+-- photo.lua under its 200-local main-chunk cap. (Safe vs. the briefing/blackout
+-- idd handling: SPACE-pause returns early during a briefing and during sleep
+-- hours, so they never freeze the duration at the same time.)
+PS = PS or { idd = nil }
 mp.register_script_message("ss-toggle-pause", function()
     if bo_wake() then return end
     -- During a briefing, SPACE pauses/resumes the spoken voice (same as 'b').
@@ -931,6 +940,15 @@ mp.register_script_message("ss-toggle-pause", function()
     end
     if is_sleep_time and is_sleep_time() then return end
     local newp = not mp.get_property_bool("pause")
+    if newp then
+        -- Freeze the slideshow: stop stills from auto-advancing while paused.
+        if PS.idd == nil then PS.idd = mp.get_property("image-display-duration") or "" end
+        mp.set_property("image-display-duration", "inf")
+    elseif PS.idd ~= nil then
+        -- Resume: restore the original auto-advance duration.
+        if PS.idd ~= "" then mp.set_property("image-display-duration", PS.idd) end
+        PS.idd = nil
+    end
     mp.set_property_bool("pause", newp)
     local v = newp and "true" or "false"
     mp.commandv("run", "/bin/sh", "-c",
