@@ -21,6 +21,18 @@ local builder    = CFG_DIR .. "/build-minimap.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
 local BGM_SOCK   = "/tmp/ss_bgm.sock"   -- grok-briefing.sh's bgm mpv (matches that script)
 
+-- photo.lua is loaded as a single `script=` file (see mpv.conf), not as a script
+-- directory, so set up package.path to our sibling module folder before any
+-- require(). Resolve it through the mpv config dir (find_config_file), falling
+-- back to CFG_DIR if that lookup comes up empty. ssfmt holds the pure
+-- formatting/parsing helpers, moved out to free locals against the 200-local cap.
+do
+    local probe = mp.find_config_file("photo_modules/ssfmt.lua")
+    local dir = probe and probe:match("^(.*)[/\\][^/\\]*$") or (CFG_DIR .. "/photo_modules")
+    package.path = dir .. "/?.lua;" .. package.path
+end
+local ssfmt = require("ssfmt")
+
 -- ============================================================================
 --  CONFIG IS THE SINGLE SOURCE OF TRUTH  →  screensaver.conf
 --
@@ -265,8 +277,6 @@ local seq       = 0
 local prewarmed = {}
 local cur       = { seq = 0, path = nil, orig = nil, lat = nil, lon = nil, mdir = nil, zidx = DEFAULT_ZIDX, w = 552, h = 616, auto = true }
 
-local MONTHS = {jan=1,feb=2,mar=3,apr=4,may=5,jun=6,jul=7,aug=8,sep=9,oct=10,nov=11,dec=12}
-
 local DISPLAY_W, DISPLAY_H = nil, nil
 -- Seed from the last-known ACTUAL resolution (written to display.conf on every
 -- run) so even the first frame uses the real screen shape, never a guessed
@@ -408,74 +418,6 @@ local function file_exists(p)
     return fi and fi.size and fi.size > 0
 end
 
-local function normalize_date(s)
-    if not s then return nil end
-    s = s:gsub("^%s+", ""):gsub("%s+$", ""):gsub("(%a+),", "%1")
-    local function mk(y, mo, d)
-        y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
-        if not (y and mo and d) then return s end
-        if y < 100 then y = y + 2000 end
-        if mo < 1 or mo > 12 or d < 1 or d > 31 then return s end
-        local t = os.time{year = y, month = mo, day = d, hour = 12}
-        return t and os.date("%b %d, %Y", t) or s
-    end
-    local dpart = s:match("^(.-)%s+%d%d?:%d%d") or s
-    local y, mo, d = dpart:match("^(%d%d%d%d)[-/:.](%d%d?)[-/:.](%d%d?)")
-    if y then return mk(y, mo, d) end
-    y, mo, d = dpart:match("^(%d%d%d%d)(%d%d)(%d%d)$")
-    if y then return mk(y, mo, d) end
-    mo, d, y = dpart:match("^(%d%d?)[-/:.](%d%d?)[-/:.](%d%d%d%d)")
-    if y then return mk(y, mo, d) end
-    local mname, dd, yy = dpart:match("(%a+)%.?%s+(%d%d?)[a-z]*,?%s+(%d%d%d%d)")
-    if mname and MONTHS[mname:sub(1,3):lower()] then return mk(yy, MONTHS[mname:sub(1,3):lower()], dd) end
-    dd, mname, yy = dpart:match("^(%d%d?)[a-z]*%s+(%a+)%.?,?%s+(%d%d%d%d)")
-    if mname and MONTHS[mname:sub(1,3):lower()] then return mk(yy, MONTHS[mname:sub(1,3):lower()], dd) end
-    return s
-end
-
-local function parse_coord(s)
-    if not s then return nil end
-    s = tostring(s):gsub("%(.-%)", ""):upper()
-    local nums = {}
-    for n in s:gmatch("([%+%-]?%d+%.?%d*)") do table.insert(nums, tonumber(n)) end
-    local dir = s:match("([NSEW])")
-    local v = nil
-    if #nums == 1 then v = nums[1]
-    elseif #nums == 2 then v = nums[1] + (nums[2]/60)
-    elseif #nums >= 3 then v = nums[1] + (nums[2]/60) + (nums[3]/3600)
-    end
-    if v and dir and (dir == "S" or dir == "W") then v = -math.abs(v) end
-    return v
-end
-
-local function parse_gps(value)
-    if not value then return nil, nil end
-    value = value:gsub("%(.-%)", ""):upper()
-    local nums = {}
-    for n in value:gmatch("([%+%-]?%d+%.?%d*)") do table.insert(nums, tonumber(n)) end
-    local dirs = {}
-    for d in value:gmatch("([NSEW])") do table.insert(dirs, d) end
-    if #nums == 2 then
-        local lat, lon = nums[1], nums[2]
-        if dirs[1] == "S" then lat = -math.abs(lat) end
-        if dirs[2] == "W" or (dirs[1] == "W" and not dirs[2]) then lon = -math.abs(lon) end
-        return lat, lon
-    elseif #nums == 6 then
-        local lat = nums[1] + (nums[2] or 0)/60 + (nums[3] or 0)/3600
-        local lon = nums[4] + (nums[5] or 0)/60 + (nums[6] or 0)/3600
-        if dirs[1] == "S" then lat = -math.abs(lat) end
-        if dirs[2] == "W" or (dirs[1] == "W" and not dirs[2]) then lon = -math.abs(lon) end
-        return lat, lon
-    elseif #nums == 4 then
-        local lat = nums[1] + (nums[2] or 0)/60
-        local lon = nums[3] + (nums[4] or 0)/60
-        if dirs[1] == "S" then lat = -math.abs(lat) end
-        if dirs[2] == "W" or (dirs[1] == "W" and not dirs[2]) then lon = -math.abs(lon) end
-        return lat, lon
-    end
-    return nil, nil
-end
-
 local function find_sidecar(path)
     for _, c in ipairs({ (path:gsub("%.%w+$", "")) .. ".txt", path .. ".txt" }) do
         local fi = utils.file_info(c)
@@ -497,64 +439,25 @@ local function parse_sidecar(path)
             key = key:lower():gsub("%s+", "")
             val = val:gsub("^%s+", ""):gsub("%s+$", "")
             if key == "date" or key == "datetime" or key == "datetimeoriginal" or key == "createdate" then
-                o.date = normalize_date(val)
+                o.date = ssfmt.normalize_date(val)
             elseif key == "gps" or key == "coords" or key == "coordinates" or key == "latlon" or key == "latlng" then
-                local la, lo = parse_gps(val); if la and lo then o.lat, o.lon = la, lo end
+                local la, lo = ssfmt.parse_gps(val); if la and lo then o.lat, o.lon = la, lo end
             elseif key == "lat" or key == "latitude" then
-                o.lat = parse_coord(val)
+                o.lat = ssfmt.parse_coord(val)
             elseif key == "lon" or key == "lng" or key == "long" or key == "longitude" then
-                o.lon = parse_coord(val)
+                o.lon = ssfmt.parse_coord(val)
             elseif key == "location" or key == "place" or key == "city" then
-                local la, lo = parse_gps(val)
+                local la, lo = ssfmt.parse_gps(val)
                 if la and lo then o.lat, o.lon = la, lo else o.location = val end
             end
         else
-            local la, lo = parse_gps(line)
+            local la, lo = ssfmt.parse_gps(line)
             if la and lo and la >= -90 and la <= 90 and lo >= -180 and lo <= 180 then
                 o.lat, o.lon = la, lo
             end
         end
     end
     return o
-end
-
-local function compact_date(s)
-    if not s then return s end
-    return (s:gsub(" 0(%d),", " %1,"))
-end
-
-local COUNTRY_ABBR = {
-    ["united states"]="US",["united states of america"]="US",["usa"]="US",
-    ["canada"]="CA",["united kingdom"]="UK",["great britain"]="UK",
-    ["south korea"]="KR",["korea"]="KR",["republic of korea"]="KR",["north korea"]="KP",
-    ["japan"]="JP",["china"]="CN",["taiwan"]="TW",["france"]="FR",["germany"]="DE",
-    ["italy"]="IT",["spain"]="ES",["portugal"]="PT",["netherlands"]="NL",["belgium"]="BE",
-}
-local function abbr_country(name, code)
-    if code and code ~= "" then return code:upper() end
-    if name and name ~= "" then return COUNTRY_ABBR[name:lower()] or name end
-    return name
-end
-
-local function niagara_fix(landmark, city, state, country)
-    local function check(s) return s and s:lower():find("niagara falls", 1, true) end
-    if (check(city) or check(landmark)) and country == "US" then
-        return landmark, city, "ON", "CA"
-    end
-    return landmark, city, state, country
-end
-
-local function join_loc(landmark, city, state, country)
-    local p = {}
-    if landmark and landmark ~= "" then table.insert(p, landmark) end
-    if city and city ~= "" then
-        if not landmark or landmark:lower() ~= city:lower() then table.insert(p, city) end
-    end
-    if state and state ~= "" then
-        if not city or state:lower() ~= city:lower() then table.insert(p, state) end
-    end
-    if country and country ~= "" then table.insert(p, country) end
-    return table.concat(p, ", ")
 end
 
 local function hud_geom()
@@ -589,22 +492,6 @@ local function qr_path(mdir, lat, lon, w, h)
     return string.format("%s/hud_qr_%.5f_%.5f_%dx%d.bgra", mdir, lat, lon, w, h)
 end
 
-local function dms(v, pos, neg)
-    local sign = v >= 0 and pos or neg
-    v = math.abs(v)
-    local d = math.floor(v)
-    local m = math.floor((v - d) * 60)
-    local s = math.floor((v - d - m / 60) * 3600 + 0.5)
-    if s == 60 then s = 0; m = m + 1 end
-    if m == 60 then m = 0; d = d + 1 end
-    return string.format("%d°%d'%d\"%s", d, m, s, sign)
-end
-local function fmt_dms(lat, lon) return dms(lat, "N", "S") .. "   " .. dms(lon, "E", "W") end
-local function fmt_dd(lat, lon)
-    return string.format("%.5f°%s   %.5f°%s",
-        math.abs(lat), lat >= 0 and "N" or "S",
-        math.abs(lon), lon >= 0 and "E" or "W")
-end
 
 local function coord_tags(x, y, fs)
     return string.format(
@@ -616,8 +503,8 @@ local function draw_coord_labels(L, lat, lon)
     if briefing_active and briefing_active() then qr_coord_ov:remove(); map_coord_ov:remove(); return end
     qr_coord_ov.res_x  = L.win_w; qr_coord_ov.res_y  = L.win_h
     map_coord_ov.res_x = L.win_w; map_coord_ov.res_y = L.win_h
-    qr_coord_ov.data  = coord_tags(L.qr_cx,  L.text_cy, L.fs) .. fmt_dms(lat, lon)
-    map_coord_ov.data = coord_tags(L.map_cx, L.text_cy, L.fs) .. fmt_dd(lat, lon)
+    qr_coord_ov.data  = coord_tags(L.qr_cx,  L.text_cy, L.fs) .. ssfmt.fmt_dms(lat, lon)
+    map_coord_ov.data = coord_tags(L.map_cx, L.text_cy, L.fs) .. ssfmt.fmt_dd(lat, lon)
     qr_coord_ov:update()
     map_coord_ov:update()
 end
@@ -833,9 +720,9 @@ local function resolve_meta(orig_path, cb)
         lat, lon = x.lat, x.lon
         landmark = x.landmark or ""
         local _, c, region, country =
-            niagara_fix(nil, x.city, x.state, abbr_country(x.country, nil))   -- full state name
+            ssfmt.niagara_fix(nil, x.city, x.state, ssfmt.abbr_country(x.country, nil))   -- full state name
         city    = c or ""
-        general = join_loc(nil, nil, region, country)   -- state + country only
+        general = ssfmt.join_loc(nil, nil, region, country)   -- state + country only
     end
 
     -- 2) Date fallback: file mtime, if the sidecar carried no date.
@@ -1436,7 +1323,7 @@ mp.register_event("file-loaded", function()
             -- Top-right: date over the broader region (state / country). Each
             -- line carries its own \fs so HUD_DATE_FS and HUD_REGION_FS tune
             -- independently.
-            local d   = clean_text(compact_date(date))
+            local d   = clean_text(ssfmt.compact_date(date))
             local g   = clean_text(general)
             local fsd = math.floor(L.win_h * HUD_DATE_FS)
             local fsr = math.floor(L.win_h * HUD_REGION_FS)

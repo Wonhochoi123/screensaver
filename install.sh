@@ -259,6 +259,10 @@ fi
 copy_file config/input.conf       "$CFG/input.conf"       0644
 sed -i "s#@@AUDIO_SOCK@@#${AUDIO_SOCK}#g" "$CFG/input.conf"   # inject socket path
 copy_file config/photo.lua        "$CFG/photo.lua"        0644
+# photo.lua require()s helper modules from config/photo_modules/ — install them
+# alongside it (same pattern as welcome/ below).
+install -d -m 0755 "$CFG/photo_modules"
+for m in "$SRC"/config/photo_modules/*.lua; do [ -e "$m" ] && install -m 0644 "$m" "$CFG/photo_modules/"; done
 copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
 copy_file config/grok-briefing.sh "$CFG/grok-briefing.sh" 0755
 # Premade briefing greeting clips (play instantly while the first segment loads).
