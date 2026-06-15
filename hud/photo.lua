@@ -13,9 +13,9 @@ end
 local APP_DIR    = env("APP_DIR",   (os.getenv("HOME") or "~") .. "/Screensaver-App")
 local DATA_DIR   = env("DATA_DIR",   APP_DIR .. "/Data")
 local CFG_DIR    = env("CFG_DIR",    APP_DIR .. "/config")
-local MEDIA_DIR  = env("MEDIA_DIR",  DATA_DIR .. "/Media")
-local OPT_DIR    = env("OPT_DIR",    DATA_DIR .. "/Optimized_Vids")
-local RES_DIR    = env("RES_DIR",    DATA_DIR .. "/HudResources")
+local MEDIA_DIR  = env("MEDIA_DIR",  DATA_DIR .. "/Library/Media")
+local OPT_DIR    = env("OPT_DIR",    DATA_DIR .. "/Generated/Optimized_Vids")
+local RES_DIR    = env("RES_DIR",    DATA_DIR .. "/Generated/HudResources")
 
 local builder    = CFG_DIR .. "/build-minimap.sh"
 local AUDIO_SOCK = env("AUDIO_SOCK", "/tmp/ss_audio.sock")
