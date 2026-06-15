@@ -113,7 +113,7 @@ Notes:
 |---|---|
 | `→` / `←` | Next / previous item |
 | Mouse wheel | Step through the slideshow (or scroll the song chooser when open) |
-| `Space` / `p` / media keys | Pause / resume the **music** |
+| `Space` / `p` / media keys | Pause / resume the **screensaver** (freezes the slideshow + the music) |
 | `↑` / `↓` | Zoom the **minimap** in / out |
 | `Page Down` / `Page Up` | Jump to next / previous **month** |
 | `End` / `Home` | Jump to next / previous **year** |
@@ -497,7 +497,7 @@ config/                 core config            → ~/Screensaver-App/config/
   mpv.conf  input.conf    mpv options + key bindings
 hud/                    the mpv HUD            → ~/Screensaver-App/config/
   photo.lua               main HUD / slideshow script
-  modules/ssfmt.lua       pure formatting/parsing helpers (required by photo.lua)
+  photo_modules/ssfmt.lua pure formatting/parsing helpers (required by photo.lua)
 daemons/                long-running procs     → ~/Screensaver-App/
   launch.sh               starts the screensaver (orchestrates everything)
   idle-watcher.sh         auto-launches after idle (X11 / Wayland)
@@ -512,12 +512,13 @@ briefing/               AI morning briefing    → ~/Screensaver-App/config/
 geo/                    offline location       → ~/Screensaver-App/config/
   build-geodb.sh          builds the offline GeoNames place DB
   geo-resolve.sh          lat/lon → landmark + city/region
-media/                  asset builders         → ~/Screensaver-App/config/
+media/                  asset builders + media ops  → ~/Screensaver-App/config/
   build-title.sh          animated month/year title cards
   build-minimap.sh  build-thumb.sh   minimap/QR + album-art generators
   trash-media.sh  trash-music.sh     Delete-key handlers
-  make-demo.sh            demo-clip recorder
-tools/fix-flac.sh       one-off FLAC repair utility
+tools/                  standalone utilities you run by hand (not part of the loop)
+  fix-flac.sh             one-off FLAC repair
+  make-demo.sh            demo-clip recorder  (installed to config/ so you can run it)
 ```
 
 `~/Screensaver-App/Data/` splits in two: **`Library/`** holds *your* files —
