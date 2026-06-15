@@ -70,6 +70,30 @@ if [ -d "$HOME/TV-Screensaver" ] && [ ! -d "$APP_DIR" ]; then
     mv "$HOME/TV-Screensaver" "$APP_DIR"
 fi
 
+# --- Data layout migration: old FLAT Data/ -> Library/ (yours) + Generated/ ----
+# Older installs put everything directly under Data/ (Media, Music, and all the
+# caches mixed together). Move YOUR content into Library/ and the app-built files
+# into Generated/. Runs BEFORE any mkdir of the new dirs (otherwise the new empty
+# dir would already exist and the move would be skipped, stranding your data).
+# Idempotent: each move happens only when the old path exists and the new one
+# does not, so re-running install.sh is safe. .xmp/.txt sidecars travel WITH the
+# media (they live inside Media/), exactly as before.
+mkdir -p "$DATA_DIR/Library" "$DATA_DIR/Generated"
+_ss_relocate() {   # $1 = old absolute path, $2 = new absolute path
+    if [ -e "$1" ] && [ ! -e "$2" ]; then
+        mkdir -p "$(dirname "$2")"
+        mv "$1" "$2" && echo "  ↳ moved $(basename "$1") → ${2#$DATA_DIR/}"
+    fi
+}
+_ss_relocate "$DATA_DIR/Media"          "$MEDIA_DIR"
+_ss_relocate "$DATA_DIR/Music"          "$MUSIC_DIR"
+_ss_relocate "$DATA_DIR/HudResources"   "$RES_DIR"
+_ss_relocate "$DATA_DIR/Optimized_Vids" "$OPT_DIR"
+_ss_relocate "$DATA_DIR/TitleCards"     "$TITLE_DIR"
+_ss_relocate "$DATA_DIR/Playlist"       "$PLAYLIST_DIR"
+_ss_relocate "$DATA_DIR/Fonts"          "$FONT_DIR"
+_ss_relocate "$DATA_DIR/Briefing"       "$DATA_DIR/Generated/Briefing"
+
 # Migrate the old "Maps" cache dir to its clearer name (preserves the ~390MB
 # GeoNames DB, the minimap/QR caches, and the album-art thumbs — no re-download).
 if [ -d "$DATA_DIR/Maps" ] && [ ! -e "$RES_DIR" ]; then
@@ -336,8 +360,8 @@ echo "✅ Migration and Deployment finished!"
 echo "Your structure is:"
 echo "   App Code   : $APP_DIR"
 echo "   Config     : $CFG/screensaver.conf  (edit this to change any setting)"
-echo "   Media      : $MEDIA_DIR"
-echo "   Caches     : $RES_DIR & $OPT_DIR"
+echo "   Your files : $DATA_DIR/Library     (Media/ + Music/ — the only folder you manage)"
+echo "   App-built  : $DATA_DIR/Generated   (caches, title cards, fonts — safe to delete)"
 echo "   Place DB   : $GEODB  (offline; rebuild with $CFG/build-geodb.sh)"
 echo "                Place data © GeoNames, CC-BY 4.0 (https://www.geonames.org)"
 if [ "${#MISSING[@]}" -gt 0 ]; then

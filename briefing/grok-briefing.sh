@@ -69,7 +69,7 @@ GBGM_VOL="${GROK_BGM_VOLUME:-60}"        # briefing music volume (0-100)
 VOICE_VOL="${GROK_VOICE_VOLUME:-150}"    # spoken-voice gain in % (100 = as recorded)
 VOICE_GAIN="$(awk "BEGIN{print ${VOICE_VOL}/100}")"   # ffplay -af volume factor
 WELCOME_DIR="$CFG_DIR/welcome"           # premade greeting clips (play instantly)
-CACHE_DIR="$DATA_DIR/Briefing"
+CACHE_DIR="$DATA_DIR/Generated/Briefing"   # app-built briefing cache (under Generated/)
 TODAY="$(date '+%Y-%m-%d')"
 TODAY_DIR="$CACHE_DIR/$TODAY"            # the day's folder, holds one subdir per run
 RUN_DIR=""                              # the timestamped run we generate into / play from

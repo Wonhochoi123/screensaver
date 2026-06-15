@@ -74,9 +74,9 @@ Drop files into these folders (created by the installer):
 
 | Put this here | Folder |
 |---|---|
-| **Photos & videos** | `~/Screensaver-App/Data/Media/` |
-| **Slideshow music** | `~/Screensaver-App/Data/Music/ScreenSaver/` |
-| **Briefing background music** (optional) | `~/Screensaver-App/Data/Music/GrokMorning/` |
+| **Photos & videos** | `~/Screensaver-App/Data/Library/Media/` |
+| **Slideshow music** | `~/Screensaver-App/Data/Library/Music/ScreenSaver/` |
+| **Briefing background music** (optional) | `~/Screensaver-App/Data/Library/Music/GrokMorning/` |
 
 Notes:
 
@@ -271,8 +271,8 @@ screensaver is running.
    export GROK_TICKERS="TSLA, AMD, PLTR"     # stock segment; empty skips it
    ```
 
-3. Drop a few tracks into `~/Screensaver-App/Data/Music/GrokMorning/` for the
-   background bed.
+3. Drop a few tracks into `~/Screensaver-App/Data/Library/Music/GrokMorning/` for
+   the background bed.
 
 If `XAI_API_KEY` is missing or there's no network, the feature simply does
 nothing (no errors). Voice, model, volumes, fades, and timing are all tunable —
@@ -520,8 +520,11 @@ assets/welcome/         greeting clips played while the first briefing loads
 tools/fix-flac.sh       one-off FLAC repair utility
 ```
 
-User data lives under `~/Screensaver-App/Data/` (`Media/`, `Music/`, caches, the
-place DB, generated title cards, and the playlist).
+`~/Screensaver-App/Data/` splits in two: **`Library/`** holds *your* files —
+`Media/` (photos + videos, with their `.xmp`/`.txt` sidecars) and `Music/` — and
+is the only folder you ever manage. **`Generated/`** holds everything the app
+builds (transcoded videos, minimaps/QR, the place DB, title cards, fonts, the
+playlist, briefing cache); it's safe to delete and rebuilds itself.
 
 ---
 
