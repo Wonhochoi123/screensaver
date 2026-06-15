@@ -508,6 +508,7 @@ briefing/               AI morning briefing    → ~/Screensaver-App/config/
   news-build.py           assembles the briefing from RSS feeds (no AI)
   stock-card.sh  weather-card.sh   live market + weather cards
   fetch-article.sh        pulls the source article for the right pane
+  welcome/                greeting clips played while the first briefing loads
 geo/                    offline location       → ~/Screensaver-App/config/
   build-geodb.sh          builds the offline GeoNames place DB
   geo-resolve.sh          lat/lon → landmark + city/region
@@ -516,7 +517,6 @@ media/                  asset builders         → ~/Screensaver-App/config/
   build-minimap.sh  build-thumb.sh   minimap/QR + album-art generators
   trash-media.sh  trash-music.sh     Delete-key handlers
   make-demo.sh            demo-clip recorder
-assets/welcome/         greeting clips played while the first briefing loads
 tools/fix-flac.sh       one-off FLAC repair utility
 ```
 
