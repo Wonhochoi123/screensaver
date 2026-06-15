@@ -1,0 +1,60 @@
+name: CI
+
+# Lightweight syntax/parse gate for the shell + Lua + Python that make up the
+# screensaver. The deterministic checks (bash -n, luac -p, py_compile) are
+# blocking — they catch the kind of typo that would otherwise ship straight to
+# `main` and break a `curl | bash` install. ShellCheck runs as advisory (it does
+# not fail the build) so style and uncertain findings can be triaged over time
+# without blocking merges.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck lua5.4 python3
+
+      - name: Bash syntax check (bash -n) — blocking
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            echo "bash -n $f"
+            bash -n "$f" || fail=1
+          done < <(find . -name '*.sh' -type f)
+          exit $fail
+
+      - name: Lua parse check (luac -p) — blocking
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            echo "luac5.4 -p $f"
+            luac5.4 -p "$f" || fail=1
+          done < <(find . -name '*.lua' -type f)
+          exit $fail
+
+      - name: Python compile check (py_compile) — blocking
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            echo "py_compile $f"
+            python3 -m py_compile "$f" || fail=1
+          done < <(find . -name '*.py' -type f)
+          exit $fail
+
+      - name: ShellCheck — advisory (does not fail the build)
+        continue-on-error: true
+        run: |
+          shellcheck --version
+          # SC1091: ShellCheck can't follow the sourced screensaver.conf path —
+          # expected here, not a real issue.
+          find . -name '*.sh' -type f -print0 \
+            | xargs -0 shellcheck -e SC1091
