@@ -1,4 +1,16 @@
 #!/bin/bash
+set -u
+
+# Single instance: the watcher is autostarted, so a second login session (or a
+# re-login without a clean logout) would otherwise run a second copy and double-
+# launch the screensaver. If a recorded PID is still alive, this copy bows out.
+# (A PID file — not flock — because the watcher spawns launch.sh as a child, and
+# an inherited lock fd would keep the lock held after the watcher itself exits.)
+SS_WATCHER_PID="${TMPDIR:-/tmp}/ss_idle_watcher.$(id -u).pid"
+if [ -f "$SS_WATCHER_PID" ] && kill -0 "$(cat "$SS_WATCHER_PID" 2>/dev/null)" 2>/dev/null; then
+    exit 0
+fi
+echo "$$" > "$SS_WATCHER_PID" 2>/dev/null || true
 
 SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$SS_CONF" 2>/dev/null || { echo "idle-watcher: missing config $SS_CONF — run the installer." >&2; exit 1; }

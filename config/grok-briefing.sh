@@ -40,6 +40,24 @@ SS_CONF="${SS_CONF:-$HOME/Screensaver-App/config/screensaver.conf}"
 . "$HOME/.profile" 2>/dev/null || true
 API_KEY="${XAI_API_KEY:-}"
 
+# Keep the bearer token OUT of the process argv. Passing it as `-H "Authorization:
+# Bearer $API_KEY"` exposes the key to any local user via `ps`/`/proc/<pid>/cmdline`
+# while a request is in flight. Instead write the header to a private file (mktemp
+# creates it mode 0600) and pass it with `curl -H @file`, which reads the header
+# from the file. If the temp file can't be created we fall back to passing it
+# inline, so behaviour never regresses. AUTH_HDR_ARG is what every curl call uses.
+AUTH_HDR_FILE=""
+AUTH_HDR_ARG="Authorization: Bearer $API_KEY"    # inline fallback
+if [ -n "$API_KEY" ]; then
+    AUTH_HDR_FILE="$(mktemp 2>/dev/null || true)"
+    if [ -n "$AUTH_HDR_FILE" ] && printf 'Authorization: Bearer %s\n' "$API_KEY" > "$AUTH_HDR_FILE"; then
+        AUTH_HDR_ARG="@$AUTH_HDR_FILE"
+    fi
+fi
+# Remove the header file on exit. play() installs its own EXIT trap (end_play),
+# which also removes it; this covers every other mode (--watch/--check/etc.).
+trap '[ -n "$AUTH_HDR_FILE" ] && rm -f "$AUTH_HDR_FILE"' EXIT
+
 MODEL="${GROK_MODEL:-grok-4.3}"
 VOICE="${GROK_VOICE:-ara}"
 GROK_TIME="${GROK_TIME:-07:30}"
@@ -78,7 +96,7 @@ gate_ok() {
     return 0
 }
 
-have_net() { curl -s --max-time 8 -o /dev/null "$API/models" -H "Authorization: Bearer $API_KEY"; }
+have_net() { curl -s --max-time 8 -o /dev/null "$API/models" -H "$AUTH_HDR_ARG"; }
 
 # --- per-day cache key --------------------------------------------------------
 # The content now comes from RSS feeds + weather + live prices (no AI call), so
@@ -124,7 +142,7 @@ latest_run_today() {
 tts_line() {
     local text="$1" out="$2" tmp
     tmp="$(mktemp --suffix=.mp3)"
-    if curl -s --max-time 90 -X POST "$API/tts" -H "Authorization: Bearer $API_KEY" \
+    if curl -s --max-time 90 -X POST "$API/tts" -H "$AUTH_HDR_ARG" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg t "$text" --arg v "$VOICE" '{text:$t, voice_id:$v, language:"en"}')" \
             --output "$tmp" \
@@ -142,7 +160,7 @@ tts_line() {
 # A trivial completion works for this model? (validates the model id + key.)
 chat_ping() {
     local r; r="$(curl -s --max-time 25 -X POST "$API/chat/completions" \
-        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+        -H "$AUTH_HDR_ARG" -H "Content-Type: application/json" \
         -d "$(jq -n --arg m "$1" '{model:$m,messages:[{role:"user",content:"hi"}],max_tokens:8}')")"
     printf '%s' "$r" | jq -e '.choices[0].message.content' >/dev/null 2>&1
 }
@@ -153,7 +171,7 @@ resolve_chat_model() {
     [ -n "$CHAT_MODEL" ] && return 0
     if chat_ping "$MODEL"; then CHAT_MODEL="$MODEL"; return 0; fi
     local m
-    m="$(curl -s --max-time 15 "$API/models" -H "Authorization: Bearer $API_KEY" \
+    m="$(curl -s --max-time 15 "$API/models" -H "$AUTH_HDR_ARG" \
          | jq -r '.data[].id' 2>/dev/null | grep -iE '^grok' \
          | grep -viE 'image|vision|tts|embed|fast' | head -1)"
     [ -n "$m" ] && chat_ping "$m" && { CHAT_MODEL="$m"; return 0; }
@@ -174,7 +192,7 @@ stock_analysis() {            # sym name price prev pct dir outfile
     body="$(jq -n --arg m "$CHAT_MODEL" --arg s "$sysmsg" --arg u "$usrmsg" \
         '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
     resp="$(curl -s --max-time 70 -X POST "$API/chat/completions" \
-        -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d "$body")"
+        -H "$AUTH_HDR_ARG" -H "Content-Type: application/json" -d "$body")"
     txt="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
     if [ -n "$txt" ]; then printf '%s' "$txt" > "$out"; return 0; fi
     err="$(printf '%s' "$resp" | jq -rc '.error.message // .error // "blank response"' 2>/dev/null | head -c 300)"
@@ -418,6 +436,7 @@ end_play() {
         fade_vol "$AUDIO_SOCK" 0 "$SS_VOL" "$FADE_RESUME"
     fi
     rm -f "$PID_FILE" "$FFPLAY_PID_FILE" "$BGM_TXT" "$BGM_PATH_FILE" "$BGM_SOCK"
+    [ -n "$AUTH_HDR_FILE" ] && rm -f "$AUTH_HDR_FILE"
     exit 0
 }
 
@@ -614,7 +633,7 @@ check() {
         echo "FAIL"
         [ -s "$RUN_DIR/stock_debug.log" ] && echo "         $(tail -1 "$RUN_DIR/stock_debug.log")"
         echo "         valid models on your key: $(curl -s --max-time 15 "$API/models" \
-            -H "Authorization: Bearer $API_KEY" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null | head -c 200)"
+            -H "$AUTH_HDR_ARG" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null | head -c 200)"
         echo "         → set GROK_MODEL in screensaver.conf to one of those (or check the key has chat access)."
     fi
     rm -rf "$RUN_DIR"
@@ -642,7 +661,7 @@ stocktest() {
     printf "  resolving a working chat model ... "
     if resolve_chat_model; then echo "$CHAT_MODEL"; else echo "NONE"; fi
     echo "  models on your key: $(curl -s --max-time 15 "$API/models" \
-        -H "Authorization: Bearer $API_KEY" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null)"
+        -H "$AUTH_HDR_ARG" | jq -rc '[.data[].id]|join(", ")' 2>/dev/null)"
     echo "  ── Yahoo card (config/stock-card.sh) ──"
     bash "$CFG_DIR/stock-card.sh" "$sym" "$RUN_DIR/c"
     if [ -s "$RUN_DIR/c" ]; then sed 's/^/    /' "$RUN_DIR/c"; else echo "    (empty — Yahoo blocked/rate-limited from this machine)"; fi
