@@ -283,7 +283,7 @@ see the `GROK_*` keys below.
 ## Offline place database (GeoNames)
 
 The location HUD resolves names entirely offline from a local SQLite DB built
-once by `config/build-geodb.sh`. No API key, no runtime network.
+once by `geo/build-geodb.sh`. No API key, no runtime network.
 
 - `GEONAMES_COUNTRIES` — space-separated ISO country codes to index (small, fast,
   e.g. `"US CA GB"`). **Leave it empty to index the whole planet** (~390 MB
@@ -483,26 +483,41 @@ config stays portable across machines.)
 
 ## Repository layout
 
-These are the real files, installed as-is (there is no generated bundle):
+These are the real files, installed as-is (there is no generated bundle). The
+repo groups sources by subsystem, but the installer flattens them into the
+layout the running app expects — `daemons/` → `~/Screensaver-App/`, everything
+else → `~/Screensaver-App/config/` — so the repo grouping is purely for humans
+and changes nothing at runtime.
 
 ```
-install.sh            deps, folders, fonts, autostart, DB build; copies config/ + app/
-config/   → ~/Screensaver-App/config/
-  screensaver.conf      single source of truth for ALL settings
-  photo.lua             the mpv HUD / slideshow script
-  input.conf  mpv.conf  key bindings and mpv options
-  grok-briefing.sh      the AI morning-briefing engine
-  geo-resolve.sh        offline lat/lon → landmark + city/region (GeoNames)
-  build-geodb.sh        builds the offline place database
-  build-title.sh        animated month/year title cards
-  build-minimap.sh build-thumb.sh   minimap/QR and album-art generators
-  trash-media.sh        Delete-key handler
-  welcome/              greeting clips played while the first briefing loads
-app/      → ~/Screensaver-App/
-  launch.sh             starts the screensaver (orchestrates everything)
-  idle-watcher.sh       auto-launches after idle (X11 / Wayland)
-  vid-daemon.sh         background video transcoder
-  xmp-police.sh         writes per-photo location metadata (.xmp) from GPS
+install.sh              deps, folders, fonts, autostart, DB build
+
+config/                 core config            → ~/Screensaver-App/config/
+  screensaver.conf        single source of truth for ALL settings
+  mpv.conf  input.conf    mpv options + key bindings
+hud/                    the mpv HUD            → ~/Screensaver-App/config/
+  photo.lua               main HUD / slideshow script
+  modules/ssfmt.lua       pure formatting/parsing helpers (required by photo.lua)
+daemons/                long-running procs     → ~/Screensaver-App/
+  launch.sh               starts the screensaver (orchestrates everything)
+  idle-watcher.sh         auto-launches after idle (X11 / Wayland)
+  vid-daemon.sh           background video transcoder
+  xmp-police.sh           writes per-photo location metadata (.xmp) from GPS
+briefing/               AI morning briefing    → ~/Screensaver-App/config/
+  grok-briefing.sh        the briefing engine (TTS + playback)
+  news-build.py           assembles the briefing from RSS feeds (no AI)
+  stock-card.sh  weather-card.sh   live market + weather cards
+  fetch-article.sh        pulls the source article for the right pane
+geo/                    offline location       → ~/Screensaver-App/config/
+  build-geodb.sh          builds the offline GeoNames place DB
+  geo-resolve.sh          lat/lon → landmark + city/region
+media/                  asset builders         → ~/Screensaver-App/config/
+  build-title.sh          animated month/year title cards
+  build-minimap.sh  build-thumb.sh   minimap/QR + album-art generators
+  trash-media.sh  trash-music.sh     Delete-key handlers
+  make-demo.sh            demo-clip recorder
+assets/welcome/         greeting clips played while the first briefing loads
+tools/fix-flac.sh       one-off FLAC repair utility
 ```
 
 User data lives under `~/Screensaver-App/Data/` (`Media/`, `Music/`, caches, the
@@ -527,7 +542,7 @@ place DB, generated title cards, and the playlist).
 - **No location HUD on a photo** → it probably has no GPS EXIF data, or the place
   DB hasn't finished building yet (it builds in the background on first launch).
 - **Landmarks are blank / wrong** → press `l` to cycle candidates; rebuild the DB
-  with `config/build-geodb.sh` if you changed `GEONAMES_COUNTRIES`.
+  with `geo/build-geodb.sh` if you changed `GEONAMES_COUNTRIES`.
 - **Briefing never runs** → confirm `XAI_API_KEY` is in the session environment
   (`echo "${XAI_API_KEY:+set}"` should print `set`), `GROK_BRIEFING=1`, and you
   have a network connection.
