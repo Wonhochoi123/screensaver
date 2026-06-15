@@ -259,7 +259,7 @@ fi
 echo "▶ Installing config and app files..."
 
 # Install runtime files into $CFG / $APP_DIR. The repo groups sources by
-# subsystem (config/ hud/ briefing/ geo/ media/ daemons/ assets/), but they all
+# subsystem (config/ hud/ briefing/ geo/ media/ daemons/), but they all
 # install into the SAME flat layout the running app expects — so this reorg does
 # not change anything at runtime, only where the files live in the repo.
 # screensaver.conf: on a FRESH install, lay it down. On an EXISTING install,
@@ -295,7 +295,7 @@ copy_file config/mpv.conf         "$CFG/mpv.conf"         0644
 copy_file briefing/grok-briefing.sh "$CFG/grok-briefing.sh" 0755
 # Premade briefing greeting clips (play instantly while the first segment loads).
 install -d -m 0755 "$CFG/welcome"
-for w in "$SRC"/assets/welcome/*; do [ -e "$w" ] && install -m 0644 "$w" "$CFG/welcome/"; done
+for w in "$SRC"/briefing/welcome/*; do [ -e "$w" ] && install -m 0644 "$w" "$CFG/welcome/"; done
 copy_file media/build-minimap.sh  "$CFG/build-minimap.sh" 0755
 copy_file media/build-thumb.sh    "$CFG/build-thumb.sh"   0755
 copy_file media/trash-media.sh    "$CFG/trash-media.sh"   0755
