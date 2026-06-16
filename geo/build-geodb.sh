@@ -346,14 +346,22 @@ def _dbf_rows(path):
         yield row
 
 # OSM POI categories worth showing as a landmark — real attractions + natural
-# features. NOT a popularity score: just OSM's own fclass tags. The separate
-# place-of-worship layer is never loaded, so minor temples don't dominate.
+# features + notable institutions/venues. NOT a popularity score: just OSM's own
+# fclass tags. The separate place-of-worship layer is still never loaded, so minor
+# churches/temples don't dominate (esp. in Korea). Shops/cafes/restaurants and the
+# bench/bus-stop firehose are excluded — they aren't how you'd name a spot.
 POI_KEEP = {
     "attraction", "viewpoint", "tower", "monument", "memorial", "museum",
     "castle", "ruins", "archaeological", "fort", "theme_park", "zoo", "aquarium",
     "lighthouse", "windmill", "battlefield", "fountain", "observation_tower",
     "gallery", "arts_centre", "park", "garden",
     "peak", "volcano", "waterfall", "cave_entrance", "spring", "beach", "cliff", "glacier",
+    # notable institutions / venues (Geofabrik fclass; variants where the exact
+    # spelling differs by extract). Verify hits after a rebuild — a missing
+    # spelling just means that category is silently absent, never an error.
+    "university", "college", "hospital", "theatre", "cinema", "library",
+    "community_centre", "town_hall", "townhall", "courthouse",
+    "marketplace", "market_place", "stadium", "sports_centre", "water_park", "marina",
 }
 # Settlement / neighbourhood level — a finer-than-city fallback (kept distinct via
 # fclass so the resolver can append the nearest one after the real POIs).
