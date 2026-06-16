@@ -156,6 +156,13 @@ local logo_ov        = mp.create_osd_overlay("ass-events")  -- stylish briefing 
 local controls_ov    = mp.create_osd_overlay("ass-events")  -- briefing transport / replay menu
 local logo_text_ov   = mp.create_osd_overlay("ass-events")  -- "getting ready" under the logo
 local loading_ov   = mp.create_osd_overlay("ass-events")
+-- Latched true the instant the first real file replaces the loading screen.
+-- After that the loading overlay must never redraw: its fade-in runs on a
+-- self-rescheduling timer and launch.sh keeps pushing status lines, either of
+-- which could otherwise land AFTER the handoff and paint the "LOADING" text
+-- back on top of a real photo (with no black behind it). A global (not an LC
+-- field) because the file-loaded handler below is defined before LC exists.
+loading_done = false
 
 -- Shared progress-bar styling: a translucent light-gray track with a
 -- translucent white fill. Used by the bottom video bar and the music bar.
@@ -1266,6 +1273,8 @@ mp.register_event("file-loaded", function()
     -- through again and drop the "please wait" overlay.
     if ss_input_locked and not path:find("lavfi", 1, true) then
         unlock_loading_input()
+        loading_done = true     -- the loading screen's job is over: no more redraws
+        loading_ov:remove()     -- drop it now (also covers the briefing early-return below)
     end
 
     -- During a briefing the screensaver is a calm, light backdrop: skip videos &
@@ -2183,6 +2192,7 @@ end)
 -- The loading screen, with a stylish fade-in on first appearance.
 local LC = { gen = 0 }
 function loading_render(frac)
+    if loading_done then loading_ov:remove(); return end  -- handoff happened: never repaint
     local w, h = LC.w, LC.h
     local fs   = math.floor(h * 0.066)
     local fsp  = math.floor(h * 0.024 + 0.5)
@@ -2199,6 +2209,7 @@ function loading_render(frac)
     loading_ov:update()
 end
 mp.register_script_message("ss-show-loading", function(title, subtitle)
+    if loading_done then return end   -- handed off already: ignore late status pushes
     lock_loading_input()   -- defensive: stay non-interactive while loading
     title    = (title    and title    ~= "") and title    or "LOADING"
     subtitle = (subtitle and subtitle ~= "") and subtitle or "Please wait..."
@@ -2209,7 +2220,7 @@ mp.register_script_message("ss-show-loading", function(title, subtitle)
         LC.t0 = mp.get_time(); LC.gen = LC.gen + 1
         local gen = LC.gen
         local function tick()
-            if gen ~= LC.gen then return end
+            if gen ~= LC.gen or loading_done then return end
             local frac = math.min(1, (mp.get_time() - LC.t0) / 0.6)
             loading_render(frac)
             if frac < 1 then mp.add_timeout(0.033, tick) end
