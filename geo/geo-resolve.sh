@@ -76,7 +76,15 @@ except sqlite3.OperationalError:
     HAVE_POI = False
 
 POI_SOURCE = os.environ.get("GEO_POI_SOURCE", "overpass").strip().lower()
-OVERPASS_URL = os.environ.get("GEO_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+# Public Overpass mirrors, tried in order: the main server (overpass-api.de) is
+# frequently overloaded and answers 429/504, which on its own left out-of-region
+# landmarks blank. GEO_OVERPASS_URL still overrides (single URL) if you run your
+# own; otherwise we rotate through these so one busy server doesn't kill landmarks.
+_OVERPASS_DEFAULT = ["https://overpass-api.de/api/interpreter",
+                     "https://overpass.kumi.systems/api/interpreter",
+                     "https://maps.mail.ru/osm/tools/overpass/api/interpreter"]
+_env_op = os.environ.get("GEO_OVERPASS_URL", "").strip()
+OVERPASS_URLS = [_env_op] if _env_op else _OVERPASS_DEFAULT
 POI_CACHE = os.environ.get("GEO_POI_CACHE", "")
 _op_last = [0.0]    # rate-limit clock; _op_fail = consecutive failures (circuit breaker)
 _op_fail = [0]
@@ -85,9 +93,9 @@ def overpass_pois(lat, lon):
     # Live OSM landmarks near a point -> [(name, plat, plon), ...]; None on network
     # failure (so the caller can fall back offline), [] if simply nothing nearby.
     # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
-    # The "q6" prefix is the query version — bump it whenever the filters/format
+    # The "q7" prefix is the query version — bump it whenever the filters/format
     # change so stale cached results are re-fetched instead of reused.
-    key = "q6_%.3f_%.3f" % (lat, lon)
+    key = "q7_%.3f_%.3f" % (lat, lon)
     cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
     if cf and os.path.exists(cf):
         try:
@@ -96,19 +104,20 @@ def overpass_pois(lat, lon):
             pass
     if _op_fail[0] >= 3:        # 3 strikes -> assume offline for the rest of this run
         return None
-    R = 4000
+    R = 2500
     # Category filters MIRROR the offline keep-list (build-geodb.sh POI_KEEP) so a
     # travel photo OUTSIDE the downloaded regions gets the SAME kinds of landmarks
     # as one inside them: real attractions / historic sites / natural features /
-    # parks — not the OSM firehose of plaques, benches and boundary stones (still no
-    # tourism=artwork, no generic historic=yes). Radius is 4 km: wider than the old
-    # 2.5 km so spots with nothing in the immediate block still find the nearest real
-    # sights, but small enough that dense cities answer well under the socket timeout
-    # (8 km pushed Paris-scale queries past 35 s and they timed out -> no landmark).
-    # The socket timeout below is kept safely above Overpass's own compute budget
-    # ([timeout:40]) so a slow-but-valid response isn't cut off. Not a popularity
-    # score — purely OSM's own category tags.
-    q = ("[out:json][timeout:40];("
+    # parks / notable institutions — not the OSM firehose of plaques, benches and
+    # boundary stones (still no tourism=artwork, no generic historic=yes). Radius,
+    # out cap and declared timeout are kept at the proven-light values (2.5 km / 50 /
+    # 25 s): the public Overpass server weights a query's cost by radius x out cap x
+    # timeout and rejects or queues heavy ones, so widening any of these (an 8 km /
+    # out 200 / 40 s build briefly did) made dense areas time out and return NOTHING.
+    # The broader category list is cheap; the geometry budget is what must stay small.
+    # Socket timeout (below) is held just above the declared 25 s so a slow-but-valid
+    # response isn't cut mid-flight. Not a popularity score — purely OSM's own tags.
+    q = ("[out:json][timeout:25];("
          'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
          'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|city_gate|citywalls|city_walls|monastery|palace|manor|tower|battlefield|aqueduct)$"][name];'
          'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring|spring|cliff)$"][name];'
@@ -119,27 +128,29 @@ def overpass_pois(lat, lon):
          # neighbourhood/suburb level — a finer-than-city fallback for when the
          # exact POI you were at isn't mapped (e.g. 잠실동).
          'node(around:%d,%f,%f)[place~"^(suburb|neighbourhood|quarter|city_block|borough|hamlet|village)$"][name];'
-         ");out center 200;") % ((R, lat, lon) * 8)
+         ");out center 50;") % ((R, lat, lon) * 8)
     body = urllib.parse.urlencode({"data": q}).encode()
     j = None
-    for attempt in (0, 1):                         # one retry — Overpass load is spiky
+    # Try each mirror once (busy server -> 429/504); a final retry on the first
+    # mirror covers a transient blip. Stop as soon as one answers.
+    urls = OVERPASS_URLS + OVERPASS_URLS[:1]
+    for url in urls:
         wait = 1.2 - (time.time() - _op_last[0])   # be polite: >=1.2 s between calls
         if wait > 0:
             time.sleep(wait)
         try:
-            req = urllib.request.Request(OVERPASS_URL, data=body,
+            req = urllib.request.Request(url, data=body,
                                          headers={"User-Agent": "mpv-screensaver-geo/1"})
-            with urllib.request.urlopen(req, timeout=50) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 j = json.loads(r.read().decode("utf-8"))
             _op_last[0] = time.time(); _op_fail[0] = 0
             break
         except Exception:
             _op_last[0] = time.time()
-            if attempt == 0 and _op_fail[0] == 0:  # retry once, but not when already failing
-                time.sleep(3)                      # brief backoff, then retry once
-                continue
-            _op_fail[0] += 1
-            return None
+            continue
+    if j is None:                                  # every mirror failed this round
+        _op_fail[0] += 1
+        return None
     out = []
     for el in j.get("elements", []):
         tags = el.get("tags", {}); nm = tags.get("name")
