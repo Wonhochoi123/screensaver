@@ -87,7 +87,7 @@ def overpass_pois(lat, lon):
     # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
     # The "q3" prefix is the query version — bump it whenever the filters/format
     # change so stale cached results are re-fetched instead of reused.
-    key = "q3_%.3f_%.3f" % (lat, lon)
+    key = "q4_%.3f_%.3f" % (lat, lon)
     cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
     if cf and os.path.exists(cf):
         try:
@@ -96,22 +96,27 @@ def overpass_pois(lat, lon):
             pass
     if _op_fail[0] >= 3:        # 3 strikes -> assume offline for the rest of this run
         return None
-    R = 2500
-    # Tight category filters: the raw OSM firehose has a minor plaque / public
-    # artwork / boundary stone on every corner, and by pure proximity those would
-    # crowd the real sights out of the top 10. So tourism keeps only real draws
-    # (no 'artwork'), and historic is restricted to notable subtypes (not the
-    # generic historic=yes or markers). Not a popularity score — OSM's own tags.
-    q = ("[out:json][timeout:25];("
+    R = 8000
+    # Category filters MIRROR the offline keep-list (build-geodb.sh POI_KEEP) so a
+    # travel photo OUTSIDE the downloaded regions gets the SAME kinds of landmarks
+    # as one inside them: real attractions / historic sites / natural features /
+    # parks — not the OSM firehose of plaques, benches and boundary stones (still no
+    # tourism=artwork, no generic historic=yes). Radius was 2.5 km, which left spots
+    # with nothing in the immediate block blank; widened so the nearest real sights
+    # are still found, closer to the wide window the offline path searches. Not a
+    # popularity score — purely OSM's own category tags.
+    q = ("[out:json][timeout:30];("
          'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
          'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|city_gate|citywalls|city_walls|monastery|palace|manor|tower|battlefield|aqueduct)$"][name];'
-         'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring)$"][name];'
-         'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk)$"][name];'
+         'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring|spring|cliff)$"][name];'
+         'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk|observation_tower)$"][name];'
          'nwr(around:%d,%f,%f)[leisure~"^(park|garden)$"][name];'
+         'nwr(around:%d,%f,%f)[amenity~"^(arts_centre|fountain)$"][name];'
+         'nwr(around:%d,%f,%f)[waterway~"^(waterfall)$"][name];'
          # neighbourhood/suburb level — a finer-than-city fallback for when the
          # exact POI you were at isn't mapped (e.g. 잠실동).
          'node(around:%d,%f,%f)[place~"^(suburb|neighbourhood|quarter|city_block|borough|hamlet|village)$"][name];'
-         ");out center 50;") % ((R, lat, lon) * 6)
+         ");out center 200;") % ((R, lat, lon) * 8)
     body = urllib.parse.urlencode({"data": q}).encode()
     j = None
     for attempt in (0, 1):                         # one retry — Overpass load is spiky
