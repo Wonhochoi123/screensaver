@@ -85,9 +85,9 @@ def overpass_pois(lat, lon):
     # Live OSM landmarks near a point -> [(name, plat, plon), ...]; None on network
     # failure (so the caller can fall back offline), [] if simply nothing nearby.
     # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
-    # The "q3" prefix is the query version — bump it whenever the filters/format
+    # The "q6" prefix is the query version — bump it whenever the filters/format
     # change so stale cached results are re-fetched instead of reused.
-    key = "q5_%.3f_%.3f" % (lat, lon)
+    key = "q6_%.3f_%.3f" % (lat, lon)
     cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
     if cf and os.path.exists(cf):
         try:
@@ -96,16 +96,19 @@ def overpass_pois(lat, lon):
             pass
     if _op_fail[0] >= 3:        # 3 strikes -> assume offline for the rest of this run
         return None
-    R = 8000
+    R = 4000
     # Category filters MIRROR the offline keep-list (build-geodb.sh POI_KEEP) so a
     # travel photo OUTSIDE the downloaded regions gets the SAME kinds of landmarks
     # as one inside them: real attractions / historic sites / natural features /
     # parks — not the OSM firehose of plaques, benches and boundary stones (still no
-    # tourism=artwork, no generic historic=yes). Radius was 2.5 km, which left spots
-    # with nothing in the immediate block blank; widened so the nearest real sights
-    # are still found, closer to the wide window the offline path searches. Not a
-    # popularity score — purely OSM's own category tags.
-    q = ("[out:json][timeout:30];("
+    # tourism=artwork, no generic historic=yes). Radius is 4 km: wider than the old
+    # 2.5 km so spots with nothing in the immediate block still find the nearest real
+    # sights, but small enough that dense cities answer well under the socket timeout
+    # (8 km pushed Paris-scale queries past 35 s and they timed out -> no landmark).
+    # The socket timeout below is kept safely above Overpass's own compute budget
+    # ([timeout:40]) so a slow-but-valid response isn't cut off. Not a popularity
+    # score — purely OSM's own category tags.
+    q = ("[out:json][timeout:40];("
          'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
          'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|city_gate|citywalls|city_walls|monastery|palace|manor|tower|battlefield|aqueduct)$"][name];'
          'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring|spring|cliff)$"][name];'
@@ -126,7 +129,7 @@ def overpass_pois(lat, lon):
         try:
             req = urllib.request.Request(OVERPASS_URL, data=body,
                                          headers={"User-Agent": "mpv-screensaver-geo/1"})
-            with urllib.request.urlopen(req, timeout=25) as r:
+            with urllib.request.urlopen(req, timeout=50) as r:
                 j = json.loads(r.read().decode("utf-8"))
             _op_last[0] = time.time(); _op_fail[0] = 0
             break
