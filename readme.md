@@ -320,13 +320,14 @@ once by `geo/build-geodb.sh`. No API key, no runtime network.
   - `'hybrid'` (default) — **offline** OpenStreetMap for your `GEO_POI_REGIONS`
     (reliable, no network, accurate — e.g. Korea) and **live Overpass only for
     photos outside** those regions. Best of both: your usual area is offline +
-    instant + dependable, travel still gets worldwide POIs. Falls back to GeoNames
-    features if neither has anything.
+    instant + dependable, travel still gets worldwide POIs. If neither has a
+    landmark, the field is simply left blank (the city / region still show).
   - `'overpass'` — always query **OpenStreetMap live** (Overpass), whole world, no
     download — but depends on the public Overpass servers and sends each photo's
-    GPS to them.
+    GPS to them. To survive a busy server, the live path rotates through several
+    public mirrors (configurable via `GEO_OVERPASS_URL` — empty = use the mirrors).
   - `'offline'` — ONLY the downloaded regions; never goes online.
-  - `'none'` — GeoNames features only.
+  - `'none'` — no landmarks (just city / region).
   - Both OSM paths keep only real attraction/natural categories with a name; the
     place-of-worship layer is excluded so minor temples don't dominate. No
     popularity score — purely OSM's own tags.
@@ -374,18 +375,20 @@ the same way as the tables below:
 
 - **`↑` / `↓`** (or the mouse wheel) moves between options.
 - **`←` / `→`** nudges the selected value — numbers step within a sane range,
-  switches toggle, times move in 5–15 minute steps.
-- **`Enter`** lets you **type** a value (briefing location, stock tickers, an
-  exact time…). Empty is allowed where it means "off".
+  switches toggle, multi-choice options (like the **landmark source**) cycle
+  through their values, times move in 5–15 minute steps.
+- **`Enter`** lets you **type** a value (briefing location, stock tickers,
+  native-script languages, an exact time…). Empty is allowed where it means "off".
 - **`Esc`** closes the menu. **`r`** restarts the screensaver in place.
 
 Every change is saved **immediately** into `screensaver.conf` (comments and
 layout preserved — the file stays human-editable). Options the running show
 can pick up — HUD text sizes, volume, photo duration, quiet hours, the idle
-blackout — say *"applied live"* and take effect on the spot. The rest say
-*"applies next start"*; press **`r`** to restart right away, or just let it
-apply next time the screensaver comes up. Changing the indexed country list
-also bumps `GEODB_VERSION` for you so the place database rebuilds.
+blackout, the landmark source — say *"applied live"* and take effect on the
+spot. The rest say *"applies next start"*; press **`r`** to restart right away,
+or just let it apply next time the screensaver comes up. Changing any
+place-database knob (indexed countries, native-script languages, boundaries,
+offline POI regions) also bumps `GEODB_VERSION` for you so the database rebuilds.
 
 The menu contains **every behavioural option**. The only conf entries not in
 it are the install paths (`APP_DIR`, `MEDIA_DIR`, …) and the internal
@@ -451,6 +454,10 @@ file, so a value set here applies everywhere.
 | `GROK_TIME` | `"05:39"` | When it plays (24h `HH:MM`) |
 | `GROK_LOCATION` | `"Mooresville, NC"` | Location for the weather segment |
 | `GROK_TICKERS` | `"TSLA, AMD, PLTR, BTC, SPCX"` | Stocks/crypto segment (empty skips it). Stock tickers, crypto by name (BTC, ETH, SOL…), and private-market names CNBC carries (e.g. `SPCX` = SpaceX). |
+| `GROK_WATCHLIST` | `1` | After your tickers, add the day's biggest large-cap movers (1) / off (0) |
+| `GROK_WATCHLIST_N` | `2` | How many market movers to add |
+| `GROK_NEWS_N` | `5` | Top-news headlines read (from the balanced RSS feeds) |
+| `GROK_TECH_N` | `4` | Tech headlines read |
 | `GROK_MODEL` | `"grok-4.3"` | xAI model |
 | `GROK_VOICE` | `"ara"` | Voice |
 | `GROK_BGM_VOLUME` | `60` | Briefing music volume (0–100) |
@@ -473,7 +480,8 @@ file, so a value set here applies everywhere.
 | `GEO_BOUNDARIES` | `'*'` | Point-in-polygon city resolution; `'*'` = whole planet, or ISO-2 list; empty = nearest-point |
 | `GEO_POI_SOURCE` | `'hybrid'` | Landmarks: `hybrid` (offline regions + Overpass elsewhere), `overpass`, `offline`, `none` |
 | `GEO_POI_REGIONS` | `'asia/south-korea'` | Geofabrik slugs to download for offline POIs (`hybrid`/`offline`) |
-| `GEODB_VERSION` | `'15'` | Bump to force a one-time DB rebuild |
+| `GEO_OVERPASS_URL` | `''` | Live-landmark server. Empty rotates through public Overpass **mirrors** (so one overloaded server doesn't blank out landmarks); set a single URL only if you run your own Overpass |
+| `GEODB_VERSION` | `'16'` | Bump to force a one-time DB rebuild |
 
 (Path keys like `APP_DIR`, `DATA_DIR`, `MEDIA_DIR`, `MUSIC_DIR`, `GEODB`, … are
 also defined at the top of the file; they keep `$HOME`/`$VAR` references so the

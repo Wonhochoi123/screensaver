@@ -3660,6 +3660,14 @@ SET.schema = {
       desc = "City for the weather segment, e.g. \"Mooresville, NC\"." },
     { key = "GROK_TICKERS", label = "Stock tickers", typ = "str",
       desc = "Comma-separated tickers for the stocks segment — empty skips it." },
+    { key = "GROK_WATCHLIST", label = "Add market movers", typ = "bool", on = "1", off = "0", def = "1",
+      desc = "After your tickers, add the day's biggest large-cap movers, each with a card + analysis." },
+    { key = "GROK_WATCHLIST_N", label = "Movers count", typ = "int", min = 0, max = 6, step = 1, def = "2",
+      desc = "How many market movers to add after your own tickers." },
+    { key = "GROK_NEWS_N", label = "Top-news headlines", typ = "int", min = 0, max = 15, step = 1, def = "5",
+      desc = "How many top-news headlines the briefing reads (from the balanced RSS feeds)." },
+    { key = "GROK_TECH_N", label = "Tech headlines", typ = "int", min = 0, max = 15, step = 1, def = "4",
+      desc = "How many technology headlines the briefing reads." },
     { key = "GROK_VOICE", label = "Voice", typ = "str",
       desc = "The xAI voice the briefing speaks with." },
     { key = "GROK_MODEL", label = "Model", typ = "str",
@@ -3680,11 +3688,20 @@ SET.schema = {
       desc = "Soft return of the slideshow music afterwards." },
 
     { head = "PLACE NAMES" },
+    { key = "GEO_POI_SOURCE", label = "Landmark source", typ = "enum",
+      choices = { "hybrid", "overpass", "offline", "none" }, def = "hybrid",
+      desc = "hybrid = offline regions + live elsewhere; overpass = always live; offline = downloaded only; none = off." },
+    { key = "GEO_LOCALIZE", label = "Native-script langs", typ = "str", quote = true,
+      onsave = function() set_geodb_bump() end,
+      desc = "ISO langs shown in their own script (ko→서울); empty = romanized. Rebuilds the place database next launch." },
+    { key = "GEO_BOUNDARIES", label = "Boundary cities", typ = "str", quote = true,
+      onsave = function() set_geodb_bump() end,
+      desc = "'*' = whole planet, or ISO-2 codes (KR JP); empty = nearest-point. Rebuilds the place database next launch." },
+    { key = "GEO_POI_REGIONS", label = "Offline POI regions", typ = "str", quote = true,
+      onsave = function() set_geodb_bump() end,
+      desc = "Geofabrik slugs for offline landmarks (e.g. asia/south-korea). Rebuilds the place database next launch." },
     { key = "GEONAMES_COUNTRIES", label = "Countries indexed", typ = "str",
-      onsave = function()
-          local cur = tonumber((set_conf_read().GEODB_VERSION or "1"):match("%d+") or "1") or 1
-          set_conf_write("GEODB_VERSION", tostring(cur + 1), { quote = true })
-      end,
+      onsave = function() set_geodb_bump() end,
       desc = "ISO codes, space-separated — empty = whole planet. Changing this rebuilds the place database next launch." },
 }
 SET.rows = SET.schema
@@ -3729,7 +3746,7 @@ function set_conf_write(key, val, it)
                     if cm then tail = sp .. cm end
                 end
                 local enc = val
-                if it and (it.typ == "str" or it.typ == "time" or it.quote) then
+                if it and (it.typ == "str" or it.typ == "time" or it.typ == "enum" or it.quote) then
                     enc = '"' .. val:gsub('[\\"$`]', "") .. '"'
                 end
                 line = pre .. enc .. tail
@@ -3740,7 +3757,7 @@ function set_conf_write(key, val, it)
     f:close()
     if not found then
         local enc = val
-        if it and (it.typ == "str" or it.typ == "time" or it.quote) then enc = '"' .. val .. '"' end
+        if it and (it.typ == "str" or it.typ == "time" or it.typ == "enum" or it.quote) then enc = '"' .. val .. '"' end
         lines[#lines + 1] = "export " .. key .. "=" .. enc
     end
     local out = io.open(path .. ".part", "w")
@@ -3750,10 +3767,19 @@ function set_conf_write(key, val, it)
     return os.rename(path .. ".part", path) ~= nil
 end
 
+-- A knob that changes the place database's CONTENTS (which countries / langs /
+-- boundaries / POI regions are baked in) forces a one-time rebuild by bumping
+-- GEODB_VERSION; build-geodb.sh notices the new version next launch.
+function set_geodb_bump()
+    local cur = tonumber((set_conf_read().GEODB_VERSION or "1"):match("%d+") or "1") or 1
+    set_conf_write("GEODB_VERSION", tostring(cur + 1), { quote = true })
+end
+
 function set_fmt(it, v)
     v = v or ""
     if it.typ == "bool" then return (v == (it.on or "1")) and "ON" or "OFF" end
     if it.typ == "time" then return (v == "") and "off" or v end
+    if it.typ == "enum" then return (v == "") and (it.def or "—") or v end
     if it.fmt then return it.fmt(v) end
     local s
     if it.typ == "num" then s = string.format("%." .. (it.dec or 2) .. "f", tonumber(v) or 0)
@@ -3874,6 +3900,12 @@ function set_adjust(dir)
     local v = SET.vals[it.key] or ""
     if it.typ == "bool" then
         v = (v == (it.on or "1")) and (it.off or "0") or (it.on or "1")
+    elseif it.typ == "enum" then
+        local ch = it.choices or {}
+        if #ch == 0 then return end
+        local idx = 1
+        for i, c in ipairs(ch) do if c == v then idx = i; break end end
+        v = ch[((idx - 1 + dir) % #ch) + 1]
     elseif it.typ == "time" then
         local hh, mm = v:match("^(%d+):(%d+)$")
         if not hh then hh, mm = v:match("^(%d+)$"), "0" end
@@ -3918,7 +3950,7 @@ end
 function set_edit()
     local it = SET.rows[SET.sel]
     if not it or not it.key then return end
-    if it.typ == "bool" then set_adjust(1); return end
+    if it.typ == "bool" or it.typ == "enum" then set_adjust(1); return end
     local ok, input = pcall(require, "mp.input")
     if not ok or not input or not input.get then
         SET.note = "Typing needs mpv ≥ 0.38 — use ‹ › or edit the conf file"
