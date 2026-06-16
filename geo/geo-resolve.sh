@@ -87,7 +87,7 @@ def overpass_pois(lat, lon):
     # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
     # The "q3" prefix is the query version — bump it whenever the filters/format
     # change so stale cached results are re-fetched instead of reused.
-    key = "q4_%.3f_%.3f" % (lat, lon)
+    key = "q5_%.3f_%.3f" % (lat, lon)
     cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
     if cf and os.path.exists(cf):
         try:
@@ -110,8 +110,8 @@ def overpass_pois(lat, lon):
          'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|city_gate|citywalls|city_walls|monastery|palace|manor|tower|battlefield|aqueduct)$"][name];'
          'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring|spring|cliff)$"][name];'
          'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk|observation_tower)$"][name];'
-         'nwr(around:%d,%f,%f)[leisure~"^(park|garden)$"][name];'
-         'nwr(around:%d,%f,%f)[amenity~"^(arts_centre|fountain)$"][name];'
+         'nwr(around:%d,%f,%f)[leisure~"^(park|garden|stadium|sports_centre|water_park|marina)$"][name];'
+         'nwr(around:%d,%f,%f)[amenity~"^(arts_centre|fountain|place_of_worship|university|college|hospital|theatre|cinema|library|marketplace|townhall|courthouse|community_centre)$"][name];'
          'nwr(around:%d,%f,%f)[waterway~"^(waterfall)$"][name];'
          # neighbourhood/suburb level — a finer-than-city fallback for when the
          # exact POI you were at isn't mapped (e.g. 잠실동).
