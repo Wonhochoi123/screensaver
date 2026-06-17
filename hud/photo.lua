@@ -178,13 +178,33 @@ local BAR_FILL  = "\\1c&HFFFFFF&\\alpha&H3C&"   -- white, mostly opaque
 --   is engaged immediately (script load == the black screen appearing) so even
 --   the very first keypress is swallowed.
 -- ----------------------------------------------------------------------------
--- ESC / q are deliberately NOT in this list: quitting must always work, even
--- while loading, so a slow or stuck build can be aborted from the keyboard
--- (everything else — pausing, skipping, navigation — stays swallowed).
+-- ESC / q and the MUSIC controls stay live during loading; everything else
+-- (slideshow navigation, zoom, delete, volume, clicks) is swallowed until real
+-- content loads. Quitting must always work so a slow/stuck build can be aborted,
+-- and since the music plays during the wait the user can pause/resume and skip
+-- tracks while it builds.
 local LOADING_KEYS = {
-    "SPACE","PLAY","PAUSE","PLAYPAUSE","p","RIGHT","LEFT","UP","DOWN",
-    "PGDWN","PGUP","END","HOME","NEXT","PREV","[","]","DEL","=","-",
+    "RIGHT","LEFT","UP","DOWN","PGDWN","PGUP","END","HOME","DEL","=","-",
     "MBTN_LEFT","MBTN_RIGHT","WHEEL_UP","WHEEL_DOWN",
+}
+-- Loading-time music controls act on the music player (AUDIO_SOCK) DIRECTLY, so
+-- they never touch the not-yet-built slideshow's own playback/pause state. After
+-- handoff these are removed and input.conf's richer bindings (ss-toggle-pause,
+-- etc.) take over.
+local function _ssload_audio(cmd)
+    mp.commandv("run", "/bin/sh", "-c",
+        "printf '%s\\n' '" .. cmd .. "' | socat - UNIX-CONNECT:" .. AUDIO_SOCK .. " 2>/dev/null")
+end
+local LOADING_MUSIC = {
+    { "SPACE",     "ssload_m_space", '{"command":["cycle","pause"]}' },
+    { "p",         "ssload_m_p",     '{"command":["cycle","pause"]}' },
+    { "PLAYPAUSE", "ssload_m_pp",    '{"command":["cycle","pause"]}' },
+    { "PLAY",      "ssload_m_play",  '{"command":["set_property","pause",false]}' },
+    { "PAUSE",     "ssload_m_paus",  '{"command":["set_property","pause",true]}' },
+    { "]",         "ssload_m_next",  '{"command":["playlist-next"]}' },
+    { "NEXT",      "ssload_m_next2", '{"command":["playlist-next"]}' },
+    { "[",         "ssload_m_prev",  '{"command":["playlist-prev"]}' },
+    { "PREV",      "ssload_m_prev2", '{"command":["playlist-prev"]}' },
 }
 local ss_input_locked = false
 local function lock_loading_input()
@@ -197,6 +217,11 @@ local function lock_loading_input()
     -- loading window always works and launch.sh's watchdog tears the launch down.
     mp.add_forced_key_binding("ESC", "ssload_quit_esc", function() mp.command("quit") end)
     mp.add_forced_key_binding("q",   "ssload_quit_q",   function() mp.command("quit") end)
+    -- Live music controls (pause/resume + track skip) straight to the music player.
+    for _, m in ipairs(LOADING_MUSIC) do
+        local cmd = m[3]
+        mp.add_forced_key_binding(m[1], m[2], function() _ssload_audio(cmd) end)
+    end
 end
 local function unlock_loading_input()
     if not ss_input_locked then return end
@@ -206,6 +231,9 @@ local function unlock_loading_input()
     end
     mp.remove_key_binding("ssload_quit_esc")
     mp.remove_key_binding("ssload_quit_q")
+    for _, m in ipairs(LOADING_MUSIC) do
+        mp.remove_key_binding(m[2])
+    end
 end
 lock_loading_input()
 
