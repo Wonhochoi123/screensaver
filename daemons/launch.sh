@@ -202,13 +202,30 @@ mpv --config-dir="$CFG_DIR" \
     >/dev/null 2>&1 &
 MPV_LOAD_PID=$!
 # Loading-screen watchdog: the playlist build below (metadata extraction, geo
-# enrichment, title-card rendering) runs synchronously and can take a while. If
-# the user closes the loading window in that time (Esc/q — see photo.lua), abort
-# the WHOLE launch instead of grinding the build to completion and then popping a
-# slideshow up anyway. Killing our own PID fires the cleanup trap, which stops the
-# music, daemons and sockets. Torn down at handoff (below), where the load window
+# enrichment, title-card rendering) runs synchronously in the FOREGROUND, so while
+# it's working the main script can't act on a signal — a plain TERM to it would sit
+# pending until the build finished, with the music still playing the whole time.
+# So if the user closes the loading window during that phase (Esc/q — see
+# photo.lua), tear the WHOLE launch down from HERE instead of signalling the main
+# script: run cleanup() (it inherited every daemon/music PID + the sockets), then
+# kill the main script and EVERY descendant it has spawned — including the in-flight
+# build (xmp-police --once, geo-resolve, title-card render) that would otherwise be
+# orphaned and keep running. Torn down at handoff (below), where the load window
 # legitimately becomes the slideshow and we wait on it directly.
-( while kill -0 "$MPV_LOAD_PID" 2>/dev/null; do sleep 0.5; done; kill -TERM "$$" 2>/dev/null ) &
+_ss_proc_tree() {                          # echo a pid and all its descendants
+    local _p="$1" _c
+    printf '%s ' "$_p"
+    for _c in $(pgrep -P "$_p" 2>/dev/null); do _ss_proc_tree "$_c"; done
+}
+SS_MAIN_PID=$$
+(
+    _self="$BASHPID"                       # this watchdog subshell — never kill it
+    while kill -0 "$MPV_LOAD_PID" 2>/dev/null; do sleep 0.3; done
+    cleanup                                # stop music/daemons/briefing + drop sockets
+    for _p in $(_ss_proc_tree "$SS_MAIN_PID"); do
+        [ "$_p" = "$_self" ] || kill -9 "$_p" 2>/dev/null
+    done
+) &
 LOAD_WATCH_PID=$!
 # Wait for IPC socket (up to 5s)
 _w=0
