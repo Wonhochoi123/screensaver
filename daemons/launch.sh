@@ -3,10 +3,26 @@
 # window is actually up (spawned much later, after the playlist build), so two
 # near-simultaneous launches (e.g. idle-watcher auto-start + a manual "Start
 # Screensaver") could BOTH get past it during the build phase and bring up two
-# full stacks. An atomic flock, held on FD 9 for this process's whole lifetime,
-# closes that race; it is released automatically on exit — even on kill -9.
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/screensaver.lock" 2>/dev/null
-flock -n 9 2>/dev/null || exit 0
+# full stacks. So claim a lock file holding THIS launch's PID first.
+#
+# It records a PID and verifies liveness rather than holding an flock for the
+# process lifetime: an flock would be inherited by every child we spawn (music
+# mpv, daemons, the build's geo lookups), so a single orphaned child would keep
+# the lock held and silently block EVERY future start. Here only a genuinely
+# running launch.sh blocks a restart — a crashed run or leftover orphans never do.
+# A brief flock just makes the check-and-claim atomic between racing launches.
+_LOCK="${XDG_RUNTIME_DIR:-/tmp}/screensaver.lock"
+exec 9<>"$_LOCK" 2>/dev/null            # read-write, do NOT truncate (holds the PID)
+if flock -n 9 2>/dev/null; then
+    _old="$(head -n1 "$_LOCK" 2>/dev/null)"
+    if [ -n "$_old" ] && [ "$_old" != "$$" ] && kill -0 "$_old" 2>/dev/null \
+       && grep -qa 'launch\.sh' "/proc/$_old/cmdline" 2>/dev/null; then
+        exit 0                          # a real screensaver launch is already running
+    fi
+    echo "$$" > "$_LOCK"                 # claim it for this launch
+    flock -u 9                          # the recorded PID is the guard now…
+fi
+exec 9>&-                                # …so don't leak the lock FD to any child
 # Belt-and-braces: also bail if the slideshow window is already up. Match the mpv
 # window by its unique x11-name, NOT the broad "Screensaver-App/config" — that
 # also matched the background build-geodb.sh (config/build-geodb.sh), so while the
