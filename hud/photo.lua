@@ -178,10 +178,13 @@ local BAR_FILL  = "\\1c&HFFFFFF&\\alpha&H3C&"   -- white, mostly opaque
 --   is engaged immediately (script load == the black screen appearing) so even
 --   the very first keypress is swallowed.
 -- ----------------------------------------------------------------------------
+-- ESC / q are deliberately NOT in this list: quitting must always work, even
+-- while loading, so a slow or stuck build can be aborted from the keyboard
+-- (everything else — pausing, skipping, navigation — stays swallowed).
 local LOADING_KEYS = {
     "SPACE","PLAY","PAUSE","PLAYPAUSE","p","RIGHT","LEFT","UP","DOWN",
     "PGDWN","PGUP","END","HOME","NEXT","PREV","[","]","DEL","=","-",
-    "MBTN_LEFT","MBTN_RIGHT","WHEEL_UP","WHEEL_DOWN","ESC","q",
+    "MBTN_LEFT","MBTN_RIGHT","WHEEL_UP","WHEEL_DOWN",
 }
 local ss_input_locked = false
 local function lock_loading_input()
@@ -190,6 +193,10 @@ local function lock_loading_input()
     for i, k in ipairs(LOADING_KEYS) do
         mp.add_forced_key_binding(k, "ssload_" .. i, function() end)
     end
+    -- Force ESC/q to quit during loading regardless of input.conf, so closing the
+    -- loading window always works and launch.sh's watchdog tears the launch down.
+    mp.add_forced_key_binding("ESC", "ssload_quit_esc", function() mp.command("quit") end)
+    mp.add_forced_key_binding("q",   "ssload_quit_q",   function() mp.command("quit") end)
 end
 local function unlock_loading_input()
     if not ss_input_locked then return end
@@ -197,6 +204,8 @@ local function unlock_loading_input()
     for i = 1, #LOADING_KEYS do
         mp.remove_key_binding("ssload_" .. i)
     end
+    mp.remove_key_binding("ssload_quit_esc")
+    mp.remove_key_binding("ssload_quit_q")
 end
 lock_loading_input()
 

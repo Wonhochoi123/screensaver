@@ -1,6 +1,14 @@
 #!/bin/bash
-# Single-instance guard: bail only if the SLIDESHOW itself is already up. Match the
-# mpv window by its unique x11-name, NOT the broad "Screensaver-App/config" — that
+# Single-instance guard. The x11-name check below only matches once the loading
+# window is actually up (spawned much later, after the playlist build), so two
+# near-simultaneous launches (e.g. idle-watcher auto-start + a manual "Start
+# Screensaver") could BOTH get past it during the build phase and bring up two
+# full stacks. An atomic flock, held on FD 9 for this process's whole lifetime,
+# closes that race; it is released automatically on exit — even on kill -9.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/screensaver.lock" 2>/dev/null
+flock -n 9 2>/dev/null || exit 0
+# Belt-and-braces: also bail if the slideshow window is already up. Match the mpv
+# window by its unique x11-name, NOT the broad "Screensaver-App/config" — that
 # also matched the background build-geodb.sh (config/build-geodb.sh), so while the
 # place DB was rebuilding (e.g. after a version bump) the app refused to relaunch.
 pgrep -f "x11-name=StartScreensaver" >/dev/null 2>&1 && exit 0
@@ -47,6 +55,7 @@ cleanup() {
     [ -n "$POLICE_PID" ]   && kill "$POLICE_PID" 2>/dev/null
     [ -n "$VID_PID" ]      && kill "$VID_PID" 2>/dev/null
     [ -n "$MPV_LOAD_PID" ] && kill "$MPV_LOAD_PID" 2>/dev/null
+    [ -n "$LOAD_WATCH_PID" ] && kill "$LOAD_WATCH_PID" 2>/dev/null
     [ -n "$GROK_PID" ]     && kill "$GROK_PID" 2>/dev/null
     [ -f /tmp/ss_briefing_ffplay.pid ] && kill "$(cat /tmp/ss_briefing_ffplay.pid 2>/dev/null)" 2>/dev/null
     [ -f /tmp/ss_briefing.pid ]        && kill "$(cat /tmp/ss_briefing.pid 2>/dev/null)" 2>/dev/null
@@ -192,6 +201,15 @@ mpv --config-dir="$CFG_DIR" \
     "av://lavfi:color=c=black:s=${_SS_W}x${_SS_H}" \
     >/dev/null 2>&1 &
 MPV_LOAD_PID=$!
+# Loading-screen watchdog: the playlist build below (metadata extraction, geo
+# enrichment, title-card rendering) runs synchronously and can take a while. If
+# the user closes the loading window in that time (Esc/q — see photo.lua), abort
+# the WHOLE launch instead of grinding the build to completion and then popping a
+# slideshow up anyway. Killing our own PID fires the cleanup trap, which stops the
+# music, daemons and sockets. Torn down at handoff (below), where the load window
+# legitimately becomes the slideshow and we wait on it directly.
+( while kill -0 "$MPV_LOAD_PID" 2>/dev/null; do sleep 0.5; done; kill -TERM "$$" 2>/dev/null ) &
+LOAD_WATCH_PID=$!
 # Wait for IPC socket (up to 5s)
 _w=0
 while [ ! -S "$LOAD_SOCK" ] && [ $_w -lt 50 ]; do
@@ -364,6 +382,9 @@ if [ -S "$LOAD_SOCK" ]; then
     printf '{"command":["loadlist","%s","replace"]}\n' "$PLAYLIST" | \
         socat -t 3 - "UNIX-CONNECT:$LOAD_SOCK" 2>/dev/null
     rm -f "$LOAD_SOCK"; LOAD_SOCK=""
+    # Handoff done: the loading window is now the slideshow. Stop the watchdog so a
+    # normal later quit goes through the wait below (not a redundant self-TERM).
+    [ -n "$LOAD_WATCH_PID" ] && kill "$LOAD_WATCH_PID" 2>/dev/null; LOAD_WATCH_PID=""
     wait "$MPV_LOAD_PID"
 else
     # Fallback: IPC socket never appeared (mpv failed to start).
