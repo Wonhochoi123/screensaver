@@ -102,6 +102,11 @@ Notes:
 - **Manually:** open **"Start Screensaver"** from your app launcher, or run
   `~/Screensaver-App/launch.sh`.
 - **Quit:** press `Esc` or `q`.
+- **While it's still loading:** the opening "please wait" screen is already
+  interactive — `Esc`/`q` quit (so a slow first build is never a trap), and the
+  music controls work while the playlist builds: `Space`/`p` pause/resume and
+  `[` / `]` (or the media keys) skip tracks. The other keys start working once the
+  slideshow appears.
 
 ---
 
