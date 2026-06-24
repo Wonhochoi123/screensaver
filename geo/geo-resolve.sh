@@ -93,9 +93,9 @@ def overpass_pois(lat, lon):
     # Live OSM landmarks near a point -> [(name, plat, plon), ...]; None on network
     # failure (so the caller can fall back offline), [] if simply nothing nearby.
     # Cached on disk by ~110 m cell so each spot is queried at most once, ever.
-    # The "q7" prefix is the query version — bump it whenever the filters/format
+    # The "q8" prefix is the query version — bump it whenever the filters/format
     # change so stale cached results are re-fetched instead of reused.
-    key = "q7_%.3f_%.3f" % (lat, lon)
+    key = "q8_%.3f_%.3f" % (lat, lon)
     cf = os.path.join(POI_CACHE, key + ".json") if POI_CACHE else ""
     if cf and os.path.exists(cf):
         try:
@@ -105,29 +105,35 @@ def overpass_pois(lat, lon):
     if _op_fail[0] >= 3:        # 3 strikes -> assume offline for the rest of this run
         return None
     R = 2500
-    # Category filters MIRROR the offline keep-list (build-geodb.sh POI_KEEP) so a
-    # travel photo OUTSIDE the downloaded regions gets the SAME kinds of landmarks
-    # as one inside them: real attractions / historic sites / natural features /
-    # parks / notable institutions — not the OSM firehose of plaques, benches and
-    # boundary stones (still no tourism=artwork, no generic historic=yes). Radius,
-    # out cap and declared timeout are kept at the proven-light values (2.5 km / 50 /
-    # 25 s): the public Overpass server weights a query's cost by radius x out cap x
-    # timeout and rejects or queues heavy ones, so widening any of these (an 8 km /
-    # out 200 / 40 s build briefly did) made dense areas time out and return NOTHING.
-    # The broader category list is cheap; the geometry budget is what must stay small.
+    # Category filters MIRROR the offline keep-list ONE-FOR-ONE so an out-of-region
+    # travel photo gets the same KINDS of landmarks the offline path would pick. The
+    # tag list below is the exact set of OSM tags that Geofabrik collapses into the
+    # fclass values build-geodb.sh keeps (POI_KEEP) — verified against the values
+    # actually present in the built DB. In particular: NO place_of_worship (the
+    # offline build never loads the gis_osm_pofw_* layer, so temples/churches don't
+    # dominate — esp. in Korea), and none of the minor historic flourishes
+    # (city_gate / citywalls / monastery / palace / manor / aqueduct / obelisk /
+    # hot_spring) that have no kept fclass; real palaces/forts still come through as
+    # tourism=attraction or historic=castle|fort. Hood nodes mirror HOOD_FCLASS
+    # exactly (town + locality included). Radius, out cap and declared timeout stay
+    # at the proven-light values (2.5 km / 50 / 25 s): the public Overpass server
+    # weights a query's cost by radius x out cap x timeout and rejects or queues
+    # heavy ones, so widening any of these (an 8 km / out 200 / 40 s build briefly
+    # did) made dense areas time out and return NOTHING — the offline path's 40 km
+    # window simply cannot be matched live, so a remote spot may stay blank here.
     # Socket timeout (below) is held just above the declared 25 s so a slow-but-valid
     # response isn't cut mid-flight. Not a popularity score — purely OSM's own tags.
     q = ("[out:json][timeout:25];("
          'nwr(around:%d,%f,%f)[tourism~"^(attraction|museum|viewpoint|theme_park|zoo|gallery|aquarium)$"][name];'
-         'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|city_gate|citywalls|city_walls|monastery|palace|manor|tower|battlefield|aqueduct)$"][name];'
-         'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|hot_spring|spring|cliff)$"][name];'
-         'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|obelisk|observation_tower)$"][name];'
+         'nwr(around:%d,%f,%f)[historic~"^(monument|memorial|castle|fort|fortress|ruins|archaeological_site|tower|battlefield)$"][name];'
+         'nwr(around:%d,%f,%f)[natural~"^(peak|volcano|waterfall|cave_entrance|beach|glacier|spring|cliff)$"][name];'
+         'nwr(around:%d,%f,%f)[man_made~"^(tower|lighthouse|windmill|observation_tower)$"][name];'
          'nwr(around:%d,%f,%f)[leisure~"^(park|garden|stadium|sports_centre|water_park|marina)$"][name];'
-         'nwr(around:%d,%f,%f)[amenity~"^(arts_centre|fountain|place_of_worship|university|college|hospital|theatre|cinema|library|marketplace|townhall|courthouse|community_centre)$"][name];'
+         'nwr(around:%d,%f,%f)[amenity~"^(arts_centre|fountain|university|college|hospital|theatre|cinema|library|marketplace|townhall|courthouse|community_centre)$"][name];'
          'nwr(around:%d,%f,%f)[waterway~"^(waterfall)$"][name];'
          # neighbourhood/suburb level — a finer-than-city fallback for when the
-         # exact POI you were at isn't mapped (e.g. 잠실동).
-         'node(around:%d,%f,%f)[place~"^(suburb|neighbourhood|quarter|city_block|borough|hamlet|village)$"][name];'
+         # exact POI you were at isn't mapped (e.g. 잠실동). Mirrors HOOD_FCLASS.
+         'node(around:%d,%f,%f)[place~"^(suburb|neighbourhood|quarter|city_block|borough|hamlet|village|town|locality)$"][name];'
          ");out center 50;") % ((R, lat, lon) * 8)
     body = urllib.parse.urlencode({"data": q}).encode()
     j = None
